@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Network
+import os
 
 /// A phone that is not paired yet, waiting for the user to allow it on the Mac.
 public struct PairingRequest: Identifiable, Sendable {
@@ -19,6 +20,9 @@ public struct PairingRequest: Identifiable, Sendable {
 /// pairs phones over a WebSocket control channel and tells the phone where to send its pad.
 /// One phone is connected at a time. Everything runs on one private queue.
 public final class RemoteServer: @unchecked Sendable {
+    /// `log stream --predicate 'subsystem == "org.anyps5.launcher"'` shows what the phone and the
+    /// launcher tell each other.
+    static let log = Logger(subsystem: "org.anyps5.launcher", category: "phone")
     public static let serviceType = "_anyps5-remote._tcp"
     /// The control port the launcher tries first; the phone's manual address field assumes it.
     public static let preferredPort: UInt16 = 47700
@@ -33,15 +37,19 @@ public final class RemoteServer: @unchecked Sendable {
         public var latency: @Sendable (Double) -> Void
         /// What the welcomed phone asks the launcher to do (launcher mode).
         public var request: @Sendable (RemoteMessage) -> Void
+        /// A phone that said hello and is not welcomed yet, by name; nil when it gave up or was
+        /// refused before that.
+        public var connecting: @Sendable (String?) -> Void
 
         public init(pairing: @escaping @Sendable (PairingRequest) -> Void = { _ in }, connected: @escaping @Sendable (String) -> Void = { _ in },
                     disconnected: @escaping @Sendable () -> Void = {}, latency: @escaping @Sendable (Double) -> Void = { _ in },
-                    request: @escaping @Sendable (RemoteMessage) -> Void = { _ in }) {
+                    request: @escaping @Sendable (RemoteMessage) -> Void = { _ in }, connecting: @escaping @Sendable (String?) -> Void = { _ in }) {
             self.pairing = pairing
             self.connected = connected
             self.disconnected = disconnected
             self.latency = latency
             self.request = request
+            self.connecting = connecting
         }
     }
 
@@ -181,14 +189,19 @@ public final class RemoteServer: @unchecked Sendable {
                 client.connection.cancel()
                 return
             }
-            if let data, metadata?.opcode == .text || metadata?.opcode == .binary, let message = try? JSONDecoder().decode(RemoteMessage.self, from: data) {
-                self.handle(message, from: client)
+            if let data, metadata?.opcode == .text || metadata?.opcode == .binary {
+                if let message = try? JSONDecoder().decode(RemoteMessage.self, from: data) {
+                    self.handle(message, from: client)
+                } else {
+                    RemoteServer.log.error("unreadable from phone: \(String(decoding: data.prefix(200), as: UTF8.self), privacy: .public)")
+                }
             }
             self.receive(client)
         }
     }
 
     private func handle(_ message: RemoteMessage, from client: Client) {
+        RemoteServer.log.info("from phone: \(message.kind, privacy: .public) welcomed=\(client.session != nil, privacy: .public)")
         switch message {
         case .hello(let version, let deviceID, let deviceName, let key):
             guard version == RemoteMessage.protocolVersion else { return reject(client, "protocol") }
@@ -201,6 +214,7 @@ public final class RemoteServer: @unchecked Sendable {
             client.deviceID = deviceID
             client.name = deviceName
             current = client
+            events.connecting(deviceName)
             if let key, let device = devices.device(id: deviceID, key: key) {
                 welcome(client, key: device.key)
             } else {
@@ -235,7 +249,10 @@ public final class RemoteServer: @unchecked Sendable {
     }
 
     private func reject(_ client: Client, _ reason: String) {
-        if current === client { current = nil }
+        if current === client {
+            current = nil
+            if client.session == nil { events.connecting(nil) }
+        }
         send(.rejected(reason: reason), to: client) { client.connection.cancel() }
     }
 
@@ -245,13 +262,22 @@ public final class RemoteServer: @unchecked Sendable {
         let welcomed = client.session != nil
         current = nil
         phoneEnded()
-        if welcomed { events.disconnected() }
+        if welcomed { events.disconnected() } else { events.connecting(nil) }
     }
 
     private func send(_ message: RemoteMessage, to client: Client, then: (() -> Void)? = nil) {
         let metadata = NWProtocolWebSocket.Metadata(opcode: .text)
         let context = NWConnection.ContentContext(identifier: "message", metadata: [metadata])
-        client.connection.send(content: Data(message.text.utf8), contentContext: context, isComplete: true, completion: .contentProcessed { _ in then?() })
+        let data = Data(message.text.utf8)
+        let kind = message.kind
+        client.connection.send(content: data, contentContext: context, isComplete: true, completion: .contentProcessed { error in
+            if let error {
+                RemoteServer.log.error("to phone: \(kind, privacy: .public) \(data.count) bytes failed: \(error.localizedDescription, privacy: .public)")
+            } else {
+                RemoteServer.log.info("to phone: \(kind, privacy: .public) \(data.count) bytes")
+            }
+            then?()
+        })
     }
 
     // MARK: Pad relay
