@@ -17,6 +17,9 @@ This launcher is for macOS. On **Windows and Linux**, use [**AnyPS5 Launcher** b
 - **Starts them**, with a start screen until the game's first window shows, and says in plain words why a game stopped when it ends on an error.
 - **Per game:** controls (keyboard and mouse to pad), resolution, language, deadzones, the mouse as the camera, the shader cache, and sharing all of it as one file.
 - **Trophies:** the list as the console shows it, and a card over the game when one is earned.
+- **Music:** the selected game's own theme song fades in, like on the PS5, with volumes for it and the interface sounds.
+- **Updates:** it tells you when a new AnyPS5 is out and replaces itself with it from Settings → About.
+- **Getting around:** arrow keys, Return, Esc and O, or a controller; L1 / R1 (Q / E) jump between games, also inside a game's panels.
 - **Discord:** the game you play on your profile, as itself when Discord knows it.
 - **The phone as a controller:** a server for AnyPS5 Remote (branch [`mobile-controller`](https://github.com/utkuhalis/AnyPS5-ARM/tree/mobile-controller)): pairing, the game list, moving around the launcher, starting and stopping games, and relaying the pad to the game.
 - English and Turkish; English by default.
