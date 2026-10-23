@@ -54,6 +54,14 @@ class Strings {
   String get vibration => _text('vibration');
   String get vibrationDetail => _text('vibrationDetail');
   String get motion => _text('motion');
+  String get trophyEarned => _text('trophyEarned');
+  String get activityUnlocking => _text('activity.unlocking');
+  String get activityUpdating => _text('activity.updating');
+  String get activityQueued => _text('activity.queued');
+  String get activityStarting => _text('activity.starting');
+  String activityStep(String phase) => _text('activity.$phase');
+  String get activityReady => _text('activity.ready');
+  String percent(int value) => _text('percent').replaceAll('{n}', '$value');
   String get motionDetail => _text('motionDetail');
   String get editLayout => _text('editLayout');
   String get done => _text('done');
@@ -106,6 +114,20 @@ class Strings {
     'vibration': 'Vibration',
     'vibrationDetail': "The game's rumble and trigger effects on the phone",
     'motion': 'Motion',
+    'trophyEarned': 'Trophy earned',
+    'activity.unlocking': 'Unlocking',
+    'activity.updating': 'Updating',
+    'activity.queued': 'Waiting',
+    'activity.starting': 'Starting',
+    'activity.unwrap': 'Opening the game files',
+    'activity.relink': 'Converting for Mac',
+    'activity.copy': 'Preparing the game',
+    'activity.bundle': 'Packaging',
+    'activity.finish': 'Finishing touches',
+    'activity.wait': 'Another game goes first',
+    'activity.launch': 'Opening the game on the Mac',
+    'activity.ready': 'Ready',
+    'percent': '{n}%',
     'motionDetail':
         "Tilting and turning the phone, as the DualSense's motion sensors",
     'editLayout': 'Edit Layout',
@@ -160,6 +182,20 @@ class Strings {
     'vibration': 'Titreşim',
     'vibrationDetail': 'Oyunun titreşimi ve tetik efektleri telefonda',
     'motion': 'Hareket',
+    'trophyEarned': 'Kupa kazanıldı',
+    'activity.unlocking': 'Kilit açılıyor',
+    'activity.updating': 'Güncelleniyor',
+    'activity.queued': 'Sırada',
+    'activity.starting': 'Açılıyor',
+    'activity.unwrap': 'Oyun dosyaları açılıyor',
+    'activity.relink': 'Mac için çevriliyor',
+    'activity.copy': 'Oyun hazırlanıyor',
+    'activity.bundle': 'Paketleniyor',
+    'activity.finish': 'Son dokunuşlar',
+    'activity.wait': 'Önce başka bir oyun',
+    'activity.launch': "Oyun Mac'te açılıyor",
+    'activity.ready': 'Hazır',
+    'percent': '%{n}',
     'motionDetail':
         "Telefonu eğip döndürmek, DualSense'in hareket sensörleri gibi",
     'editLayout': 'Düzeni Düzenle',

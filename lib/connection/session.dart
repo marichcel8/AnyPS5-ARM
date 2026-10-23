@@ -53,6 +53,12 @@ class Session extends ChangeNotifier {
   Library? library;
   final art = <String, GameArt>{};
 
+  /// The trophy earned last, shown for a moment over whatever the phone shows.
+  final trophy = ValueNotifier<TrophyEarned?>(null);
+
+  /// What the launcher is doing with a game, and since when on this phone's clock.
+  final activity = ValueNotifier<({Activity activity, DateTime since})?>(null);
+
   /// Off while the phone shows the launcher: the game gets no pad from it then.
   bool _padActive = true;
 
@@ -114,6 +120,7 @@ class Session extends ChangeNotifier {
     final old = _socket;
     _socket = null;
     _stopPad();
+    activity.value = null;
     await old?.close();
     await _open(generation);
   }
@@ -171,6 +178,20 @@ class Session extends ChangeNotifier {
           _socket?.add(WantArt(game.id).toJson());
         }
         notifyListeners();
+      case final TrophyEarned earned:
+        trophy.value = earned;
+        haptics?.celebrate();
+      case ActivityUpdate(:final activity):
+        final shown = this.activity.value;
+        this.activity.value = activity == null
+            ? null
+            : (
+                activity: activity,
+                // The same game keeps its start, so the count does not jump.
+                since: shown != null && shown.activity.id == activity.id
+                    ? shown.since
+                    : DateTime.now().subtract(activity.elapsed),
+              );
       case Art(:final id, :final icon, :final background):
         final pictures = art[id];
         if (pictures == null) break;
@@ -299,6 +320,7 @@ class Session extends ChangeNotifier {
     if (generation != _generation) return;
     _socket = null;
     _stopPad();
+    activity.value = null;
     if (_closed || status == ConnectionStatus.rejected) return;
     _scheduleRetry(generation);
   }
