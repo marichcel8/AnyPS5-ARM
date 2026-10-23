@@ -57,7 +57,7 @@ enum T {
         case directionUp, directionDown, directionLeft, directionRight, keySpace, keyEnter
         case mouseLeft, mouseRight, mouseMiddle, mouseBack, mouseForward, wheelUp, wheelDown
         case trophies, trophyHidden, trophyHiddenDetail, trophyLocked, gradePlatinum, gradeGold, gradeSilver, gradeBronze
-        case phonePairingTitle, phonePairingText, phoneAllow, phoneDeny, phoneConnected, phones, phonesNone, phoneRemove, phoneOpenLauncher, phoneServerFailed, phoneConnecting, phoneNone, phoneConnectedDetail
+        case phonePairingTitle, phonePairingText, phoneAllow, phoneDeny, phoneConnected, phones, phonesNone, phoneRemove, phoneOpenLauncher, phoneServerFailed, phoneConnecting, phoneNone, phoneConnectedDetail, phoneOnline, phonesConnectedCount, phonePlayer, phoneWaiting
         case madeBy, builtOn
         case updateChoiceText, updateAndPlay, updateAndPlayDetail, playNow, playNowDetail
         case discordPresence, discordPresenceDetail, gameMusic, gameMusicDetail, checkUpdates, checkUpdatesDetail, screenshots, screenshotsNone, backUpSaves, backUpSavesDetail, lastBackup, restoreSaves, restoreSavesDetail, savesBackedUp, savesRestored, backupFailed, closeGameFirst, launcherUpdateAvailable, updateTo, updateDetail, updateDownloading, whatsNew, updateFailed, updateCloseGame, updateNotWritable
@@ -218,6 +218,10 @@ enum T {
         .phoneConnected: "%@ bağlandı",
         .phoneConnecting: "%@ bağlanıyor…",
         .phoneNone: "Bağlı telefon yok",
+        .phoneOnline: "Bağlı",
+        .phonePlayer: "Oyuncu %d: %@",
+        .phoneWaiting: "%@: bir tuşa basınca oyuncu olur",
+        .phonesConnectedCount: "%d bağlı",
         .phoneConnectedDetail: "mController hazır: telefonla oynayabilirsin",
         .phones: "Telefonlar",
         .phonesNone: "Henüz yok",
@@ -479,6 +483,10 @@ enum T {
         .phoneConnected: "%@ connected",
         .phoneConnecting: "%@ is connecting…",
         .phoneNone: "No phone connected",
+        .phoneOnline: "Connected",
+        .phonePlayer: "Player %d: %@",
+        .phoneWaiting: "%@: becomes a player at its first press",
+        .phonesConnectedCount: "%d connected",
         .phoneConnectedDetail: "mController is ready: play with the phone",
         .phones: "Phones",
         .phonesNone: "None yet",

@@ -131,6 +131,21 @@ final class AppModel: ObservableObject {
     @Published var pairing: PairingRequest?
     /// The connected phone and its last reported latency.
     @Published private(set) var phone: (name: String, latency: Double?)?
+    /// The device IDs of the phones connected now, by player.
+    @Published private(set) var connectedPhones: [String] = []
+    /// Which player each connected phone is in the game playing, from 1, by device ID.
+    @Published private(set) var phonePlayers: [String: Int] = [:]
+
+    /// The connected phones as the indicator shows them: by player in a game, a phone not
+    /// pressed yet with no number; outside a game, numbered as they connected.
+    var phoneBadges: [PhoneBadge] {
+        if let previewBadges { return previewBadges }
+        let playing = running != nil
+        let badges = connectedPhones.enumerated().map { slot, id in
+            PhoneBadge(id: id, name: phones.first { $0.id == id }?.name ?? id, number: playing ? phonePlayers[id] : slot + 1)
+        }
+        return badges.sorted { ($0.number ?? .max) < ($1.number ?? .max) }
+    }
     /// A phone that said hello and is not connected yet (pairing, or about to be welcomed).
     @Published private(set) var phoneConnecting: String?
     /// The phones allowed so far, for the settings.
@@ -664,8 +679,10 @@ final class AppModel: ObservableObject {
             pairing: { request in Task { @MainActor in self.askToPair(request) } },
             connected: { name in Task { @MainActor in
                 withAnimation(Motion.overlay) {
-                    self.phone = (name, nil)
+                    // With several phones the first one's name and latency stand for them all.
+                    if self.phone == nil { self.phone = (name, nil) }
                     self.phoneConnecting = nil
+                    self.connectedPhones = self.remote?.connectedDeviceIDs ?? []
                 }
                 self.phones = self.pairedDevices.all
                 self.show(T.format(.phoneConnected, name), symbol: "iphone.gen3")
@@ -674,14 +691,24 @@ final class AppModel: ObservableObject {
                     TrophyBanner.shared.notice(T.format(.phoneConnected, name), detail: T.text(.phoneConnectedDetail), symbol: "iphone.gen3", sounds: self.preferences.sounds)
                 }
                 self.phoneLibrary = nil
+                self.phoneActivity = nil
                 self.tellPhone()
             } },
-            disconnected: { Task { @MainActor in withAnimation(Motion.overlay) { self.phone = nil } } },
+            disconnected: { Task { @MainActor in
+                withAnimation(Motion.overlay) {
+                    self.phone = self.remote?.connectedDevice.map { ($0, nil) }
+                    self.connectedPhones = self.remote?.connectedDeviceIDs ?? []
+                    self.phonePlayers = self.remote?.phonePlayers ?? [:]
+                }
+            } },
             latency: { milliseconds in Task { @MainActor in if let phone = self.phone { self.phone = (phone.name, milliseconds) } } },
             request: { message in Task { @MainActor in self.phoneAsked(message) } },
             connecting: { name in Task { @MainActor in
                 guard self.phone == nil || name != nil else { return }
                 withAnimation(Motion.overlay) { self.phoneConnecting = name }
+            } },
+            players: { Task { @MainActor in
+                withAnimation(Motion.overlay) { self.phonePlayers = self.remote?.phonePlayers ?? [:] }
             } })
         // Whatever the launcher shows changes the library the phone shows.
         librarySink = objectWillChange.debounce(for: .milliseconds(150), scheduler: RunLoop.main).sink { [weak self] _ in
@@ -723,6 +750,12 @@ final class AppModel: ObservableObject {
 
     func previewPhoneConnecting(_ name: String) { phoneConnecting = name }
 
+    private var previewBadges: [PhoneBadge]?
+    func previewPhones(_ badges: [PhoneBadge]) {
+        previewBadges = badges
+        phone = (badges[0].name, 9)
+    }
+
     func previewUpdate(_ release: Updates.Release, progress: Double?) {
         availableUpdate = release
         updateProgress = progress
@@ -730,14 +763,64 @@ final class AppModel: ObservableObject {
 
     func discordOff() { discord.clear() }
 
+    /// A trophy just earned shows on the phone too, with its icon made small.
+    private func tellPhone(_ trophy: TrophySet.Trophy) {
+        guard let remote, phone != nil else { return }
+        let grade: String
+        switch trophy.grade {
+        case .platinum: grade = "platinum"
+        case .gold: grade = "gold"
+        case .silver: grade = "silver"
+        case .bronze: grade = "bronze"
+        }
+        let icon = trophy.icon.flatMap { data -> String? in
+            let file = FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-trophy-\(UUID().uuidString).png")
+            defer { try? FileManager.default.removeItem(at: file) }
+            guard (try? data.write(to: file)) != nil else { return nil }
+            return RemoteArt.jpeg(file, longestSide: 160)
+        }
+        remote.publish(.trophy(name: trophy.name, detail: trophy.detail, grade: grade, icon: icon))
+    }
+
     /// The library as the phone shows it, sent when it differs from what the phone has.
     private func tellPhone() {
         guard let remote, phone != nil else { return }
+        let activity = activityForPhone()
+        if phoneActivity == nil || !RemoteActivity.same(phoneActivity!, activity) {
+            phoneActivity = .some(activity)
+            remote.publish(.activity(activity))
+        }
         let library = RemoteMessage.library(games: games.map(remoteGame), selected: selectedGame?.id, running: (running?.game ?? starting)?.id,
                                             language: preferences.language.rawValue)
         guard library != phoneLibrary else { return }
         phoneLibrary = library
         remote.publish(library)
+    }
+
+    /// What the phone last heard the launcher doing; nil before it heard anything.
+    private var phoneActivity: RemoteActivity??
+    /// The game the launcher is busy with and since when, so the phone counts the whole of it:
+    /// waiting, updating and starting.
+    private var activityStart: (id: String, date: Date)?
+
+    /// The game starting, else the one installing, else the next one waiting.
+    private func activityForPhone() -> RemoteActivity? {
+        guard let game = starting ?? games.first(where: { progress[$0.id] != nil }) ?? games.first(where: { queue.contains($0.id) }) else {
+            activityStart = nil
+            return nil
+        }
+        if activityStart?.id != game.id { activityStart = (game.id, Date()) }
+        var phase = RemoteActivity.Phase.queued
+        var fraction: Double?
+        switch state(of: game) {
+        case .starting: phase = .starting
+        case .installing(let step, let done):
+            phase = RemoteActivity.Phase(rawValue: "\(step)") ?? .queued
+            fraction = step.overall(done)
+        default: break
+        }
+        return RemoteActivity(id: game.id, phase: phase, updating: installedRecords[game.id] != nil, fraction: fraction,
+                              elapsed: Date().timeIntervalSince(activityStart?.date ?? Date()))
     }
 
     private func remoteGame(_ game: Game) -> RemoteGame {
@@ -801,6 +884,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// PS on a controller: from the game to the launcher, and from the launcher back to the game
+    /// playing.
+    func togglePlaying() {
+        guard let running, starting == nil else { return bringLauncherFront() }
+        if NSApp.isActive {
+            Sounds.shared.play(.select)
+            NSApp.yieldActivation(to: running.app)
+            running.app.activate()
+        } else {
+            bringLauncherFront()
+            Sounds.shared.play(.select)
+        }
+    }
+
     private func bringLauncherFront() {
         guard !NSApp.isActive else { return }
         showWindows()
@@ -830,7 +927,10 @@ final class AppModel: ObservableObject {
                 let earned = set.trophies.filter { fresh.contains($0.id) }
                 await MainActor.run {
                     self.trophies[game.id] = set
-                    for trophy in earned { TrophyBanner.shared.show(trophy, sounds: self.preferences.sounds) }
+                    for trophy in earned {
+                        TrophyBanner.shared.show(trophy, sounds: self.preferences.sounds)
+                        self.tellPhone(trophy)
+                    }
                 }
             }
         }
@@ -1135,3 +1235,4 @@ enum Rosetta {
         return error == nil && installed
     }
 }
+

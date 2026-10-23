@@ -106,7 +106,7 @@ struct TopBar: View {
             Spacer()
             iconButton("square.grid.3x3.fill", index: 0) { model.open(.library) }
             iconButton("gearshape.fill", index: 1) { model.open(.settings) }
-            PhoneIndicator(phone: model.phone, connecting: model.phoneConnecting)
+            PhoneIndicator(phone: model.phone, connecting: model.phoneConnecting, badges: model.phoneBadges)
             HStack(spacing: 10 * scale) {
                 ZStack {
                     Circle().fill(LinearGradient(colors: [model.accent, model.accent.opacity(0.55)], startPoint: .topLeading, endPoint: .bottomTrailing))
@@ -539,6 +539,10 @@ extension AppModel {
             if command == .back { cancelStart() }
             return true
         }
+        if command == .home {
+            togglePlaying()
+            return true
+        }
         if command == .previousGame || command == .nextGame {
             switchGame(command == .nextGame ? 1 : -1)
             return true
@@ -574,7 +578,7 @@ extension AppModel {
             case .down: moveLibrary(LibraryGrid.columns)
             case .select: pickFromLibrary()
             case .back, .options: closeOverlay()
-            case .previousGame, .nextGame: break
+            case .previousGame, .nextGame, .home: break
             }
             return true
         case nil:
@@ -632,7 +636,7 @@ extension AppModel {
             }
         case .options:
             if galleryShots.indices.contains(galleryIndex) { NSWorkspace.shared.activateFileViewerSelecting([galleryShots[galleryIndex]]) }
-        case .previousGame, .nextGame:
+        case .previousGame, .nextGame, .home:
             break
         }
     }
