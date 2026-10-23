@@ -13,7 +13,7 @@ func fail(_ message: String) -> Never {
     exit(2)
 }
 
-let usage = "usage: anyps5-tool unwrap <self> <elf> | scan <games folder> | theme <snd0.at9> <out.wav> | install <game folder> <games folder> | remote [--allow-all] [--devices <file>] [--port <port>] [--games <folder> [--language en|tr]] [--hidden]"
+let usage = "usage: anyps5-tool unwrap <self> <elf> | scan <games folder> | theme <snd0.at9> <out.wav> | update-check <version> [--download] | install <game folder> <games folder> | remote [--allow-all] [--devices <file>] [--port <port>] [--games <folder> [--language en|tr]] [--hidden]"
 
 /// Prints a line at once, so a script reading the output sees it while the server runs.
 func say(_ line: String) {
@@ -53,6 +53,24 @@ case "install":
     } catch {
         fail("FAIL: \(error.localizedDescription)")
     }
+case "update-check":
+    guard arguments.count >= 2 else { fail(usage) }
+    let current = arguments[1]
+    let download = arguments.contains("--download")
+    let done = DispatchSemaphore(value: 0)
+    Task {
+        defer { done.signal() }
+        guard let release = await Updates.check(current: current) else { return say("no newer release than \(current)") }
+        say("newer: \(release.tag) (\(release.version)) \(release.download?.absoluteString ?? "no zip") \(release.size ?? 0) bytes")
+        guard download else { return }
+        do {
+            let app = try await Updates.prepare(release, bundleIdentifier: "org.anyps5.launcher", current: current)
+            say("ready: \(app.path)")
+        } catch {
+            say("FAIL: \(error)")
+        }
+    }
+    done.wait()
 case "theme":
     guard arguments.count == 3 else { fail(usage) }
     do {
@@ -102,10 +120,11 @@ case "remote":
     let shownLanguage = language
     let selected = Locked<String?>(games.first?.id)
     let playing = Locked<String?>(nil)
+    let layouts = Locked<[String: String]>([:])
     @Sendable func tell() {
         let list = games.map { game in
             RemoteGame(id: game.id, name: game.name, state: playing.value == game.id ? .running : .installed, trophies: nil,
-                       art: RemoteArt.tag(icon: game.icon, background: game.background))
+                       art: RemoteArt.tag(icon: game.icon, background: game.background), layout: layouts.value[game.id])
         }
         server.value?.publish(.library(games: list, selected: selected.value, running: playing.value, language: shownLanguage))
     }
@@ -139,6 +158,7 @@ case "remote":
                 selected.value = id
                 playing.value = id
             case .close: playing.value = nil
+            case .saveLayout(let id, let layout): layouts.value[id] = layout
             default: return
             }
             tell()
