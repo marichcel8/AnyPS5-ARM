@@ -6,6 +6,10 @@
 
 This branch holds the launcher alone. The whole project, with the engine the launcher runs games with and the phone app, is on [`main`](https://github.com/utkuhalis/AnyPS5-ARM/tree/main); releases are made from there.
 
+## Windows and Linux
+
+This launcher is for macOS. On **Windows and Linux**, use [**AnyPS5 Launcher** by AlxcBTW](https://github.com/AlxcBTW/anyps5-launcher), a port of this launcher for [AnyPS5](https://github.com/boykopovar/AnyPS5) on those systems: the same PS5-style home screen, with unlocking and starting games, per-game controls, trophies and Discord. Downloads are on its [releases page](https://github.com/AlxcBTW/anyps5-launcher/releases/latest).
+
 ## What it does
 
 - **Finds the games** in a folder of PS5 dumps, with their icons, backgrounds, music, sizes and trophy counts.
