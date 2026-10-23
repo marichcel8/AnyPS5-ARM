@@ -25,6 +25,14 @@ struct Preferences: Codable, Equatable {
     var hideWhilePlaying = false
     /// The running game on the user's Discord profile; nil means on.
     var discordPresence: Bool?
+    /// Keeping the last seconds of the game playing, to save as a clip (Create, ⌥F12 or the
+    /// phone); nil means off. clipLength is in seconds, nil for 30.
+    var clips: Bool?
+    var clipLength: Int?
+    /// Keeping each game's saves in step through a folder other Macs see (SaveSync); nil means
+    /// off. syncFolder nil is iCloud Drive.
+    var saveSync: Bool?
+    var syncFolder: String?
     var profileName = NSFullUserName().components(separatedBy: " ").first ?? "Player"
     var gamesFolder: String?
     /// Where F12 saves screenshots, nil for ~/Pictures/AnyPS5.
@@ -190,8 +198,15 @@ final class AppModel: ObservableObject {
             MainActor.assumeIsolated {
                 self?.active = true
                 if let self, Date().timeIntervalSince(self.lastScan) > 3 { self.rescan() }
+                // Coming back to the launcher after a while asks again, so a new release shows
+                // without a restart.
+                if let self, self.lastUpdateCheck.map({ Date().timeIntervalSince($0) > 30 * 60 }) ?? false { self.checkForUpdate() }
                 if let self, let game = self.selectedGame { self.loadTrophies(game, again: true) }
             }
+        }
+        // The game settings say what Low Power Mode does as soon as it is turned on or off.
+        NotificationCenter.default.addObserver(forName: Notification.Name.NSProcessInfoPowerStateDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.objectWillChange.send() }
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.active = false }
@@ -261,13 +276,39 @@ final class AppModel: ObservableObject {
     static var runningVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
 
     func checkForUpdate() {
-        guard persists, preferences.checkUpdates ?? true, updateProgress == nil else { return }
+        guard persists, preferences.checkUpdates ?? true, updateProgress == nil, !checkingUpdates else { return }
+        lookUpUpdate(told: false)
+    }
+
+    /// Check for Updates in About: at once, whatever the setting, and it says what it found.
+    func checkForUpdatesNow() {
+        guard updateProgress == nil, !checkingUpdates else { return }
+        lookUpUpdate(told: true)
+    }
+
+    /// When the launcher last asked GitHub, and whether it is asking now.
+    @Published private(set) var lastUpdateCheck: Date?
+    @Published private(set) var checkingUpdates = false
+
+    private func lookUpUpdate(told: Bool) {
         let current = AppModel.runningVersion
+        checkingUpdates = true
         Task { @MainActor in
-            guard let release = await Updates.check(current: current) else { return }
-            let first = self.availableUpdate?.tag != release.tag
-            self.availableUpdate = release
-            if first { self.show(T.format(.launcherUpdateAvailable, release.version), symbol: "arrow.down.circle.fill") }
+            let found = await Updates.lookup(current: current)
+            self.checkingUpdates = false
+            switch found {
+            case .newer(let release):
+                self.lastUpdateCheck = Date()
+                let first = self.availableUpdate?.tag != release.tag
+                self.availableUpdate = release
+                if first || told { self.show(T.format(.launcherUpdateAvailable, release.version), symbol: "arrow.down.circle.fill") }
+            case .current:
+                self.lastUpdateCheck = Date()
+                self.availableUpdate = nil
+                if told { self.show(T.format(.launcherUpToDate, current), symbol: "checkmark.circle.fill") }
+            case .failed:
+                if told { self.show(T.text(.updateCheckFailed), symbol: "exclamationmark.triangle.fill") }
+            }
         }
     }
 
@@ -549,7 +590,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Plays the game, its saves brought in step first where save sync is on.
     func play(_ game: Game) {
+        guard root != nil, starting == nil, running == nil, syncing == nil else { return }
+        syncSaves(game) { self.start(game) }
+    }
+
+    private func start(_ game: Game) {
         guard let root, starting == nil, running == nil else { return }
         let bundle = Installer.bundle(for: game, root: root)
         let configuration = NSWorkspace.OpenConfiguration()
@@ -588,6 +635,113 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Save sync
+
+    /// The game whose saves are being synced, so it does not start twice meanwhile.
+    @Published private(set) var syncing: String?
+
+    var syncRoot: URL? { preferences.syncFolder.map { URL(fileURLWithPath: $0) } ?? SaveSync.iCloudDrive }
+
+    private func saveSync(for game: Game) -> SaveSync? {
+        guard preferences.saveSync == true, let root = syncRoot, let folder = gameFolder(game) else { return nil }
+        return SaveSync(game: folder, cloud: SaveSync.folder(in: root, titleID: game.titleID), backups: SaveBackup.folder(for: game), mac: Host.current().localizedName ?? "Mac")
+    }
+
+    /// Syncs the game's saves off the main thread, says what came from another Mac, then goes on.
+    private func syncSaves(_ game: Game, then: @escaping @MainActor () -> Void) {
+        guard let sync = saveSync(for: game) else { return then() }
+        syncing = game.id
+        Task.detached {
+            let result = Result { try sync.sync(date: Date()) }
+            await MainActor.run {
+                self.syncing = nil
+                switch result {
+                case .success(.downloaded(let mac)): self.show(T.format(.savesSyncedFrom, mac), symbol: "icloud.and.arrow.down")
+                case .failure(let error): self.show(T.text(.saveSyncFailed) + ": \(error)", symbol: "exclamationmark.icloud")
+                default: break
+                }
+                then()
+            }
+        }
+    }
+
+    func chooseSyncFolder() {
+        if let url = chooseDirectory(start: syncRoot) {
+            preferences.syncFolder = url.path
+            preferences.saveSync = true
+        }
+    }
+
+    // MARK: Clips
+
+    let clipRecorder = ClipRecorder()
+    var clipSeconds: Int { preferences.clipLength ?? 30 }
+
+    /// With clips on, the game that just showed its window is kept from now on.
+    private func startClips(for app: NSRunningApplication) {
+        guard preferences.clips == true else { return }
+        let pid = app.processIdentifier
+        let seconds = Double(clipSeconds)
+        Task { @MainActor in
+            do {
+                try await self.clipRecorder.start(pid: pid, length: seconds)
+            } catch ClipRecorder.Failure.noPermission {
+                TrophyBanner.shared.notice(T.text(.clipsNeedPermission), detail: T.text(.clipsNeedPermissionDetail), symbol: "record.circle", sounds: self.preferences.sounds)
+            } catch {
+                self.show(T.text(.clipFailed) + ": \(error)", symbol: "exclamationmark.triangle.fill")
+            }
+        }
+    }
+
+    /// Clips turned on: macOS asks for the screen recording permission now rather than at a game.
+    func clipsChanged(_ on: Bool) {
+        preferences.clips = on
+        guard on else { return clipRecorder.stop() }
+        Task { @MainActor in
+            if !(await ClipRecorder.allowed()) { self.show(T.text(.clipsNeedPermissionDetail), symbol: "record.circle") }
+            if let app = self.running?.app, self.clipRecorder.recordingPid == nil { self.startClips(for: app) }
+        }
+    }
+
+    /// Create, ⌥F12 or the phone: the last seconds of the game playing go to the gallery.
+    func saveClip() {
+        guard let game = running?.game else { return }
+        guard preferences.clips == true else {
+            return TrophyBanner.shared.notice(T.text(.clipsOff), detail: T.text(.clipsOffDetail), symbol: "record.circle", sounds: preferences.sounds)
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let folder = screenshotsFolder
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let file = folder.appendingPathComponent("\(game.titleID)-\(formatter.string(from: Date())).mp4")
+        Task { @MainActor in
+            do {
+                try await self.clipRecorder.save(to: file)
+                Sounds.shared.play(.select)
+                TrophyBanner.shared.notice(T.text(.clipSaved), detail: T.format(.clipSavedDetail, self.clipSeconds), symbol: "film", sounds: false)
+            } catch {
+                TrophyBanner.shared.notice(T.text(.clipFailed), detail: "\(error)", symbol: "exclamationmark.triangle.fill", sounds: self.preferences.sounds)
+            }
+        }
+    }
+
+    /// Games told this run that Low Power Mode holds them at 60 Hz, so it is said once a game.
+    private var toldLowPower: Set<String> = []
+
+    /// What Low Power Mode does to this display now, for the game's settings.
+    var lowPowerNotice: PowerNotice? {
+        PowerNotice.kind(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, displayMaximumFPS: NSScreen.main?.maximumFramesPerSecond ?? 60, frameGeneration: true)
+    }
+
+    /// A card over the game that just started when Low Power Mode holds the display at 60 Hz.
+    private func tellLowPower(about game: Game) {
+        guard let kind = PowerNotice.kind(lowPower: ProcessInfo.processInfo.isLowPowerModeEnabled, displayMaximumFPS: NSScreen.main?.maximumFramesPerSecond ?? 60,
+                                          frameGeneration: settings(for: game).frameGeneration == true),
+              toldLowPower.insert(game.id).inserted else { return }
+        TrophyBanner.shared.notice(T.text(.lowPowerTitle), detail: T.text(kind == .frameGeneration ? .lowPowerFrameGeneration : .lowPowerRefresh), symbol: "battery.25", sounds: preferences.sounds)
+    }
+
     /// The process starts long before the game draws anything (Rosetta translates it and the
     /// shaders compile first), so the splash stays up until the game's first window shows.
     /// macOS does not let an app that shows its window that late take the front by itself, so
@@ -608,6 +762,8 @@ final class AppModel: ObservableObject {
             NSApp.yieldActivation(to: app)
             app.activate()
             if let game = running?.game, preferences.discordPresence ?? true { discord.playing(game.name, since: Date()) }
+            if let game = running?.game { tellLowPower(about: game) }
+            startClips(for: app)
             withAnimation(Motion.overlay) { starting = nil }
             if preferences.hideWhilePlaying { hideWindows() }
         }
@@ -649,6 +805,8 @@ final class AppModel: ObservableObject {
     private func applicationEnded(_ pid: pid_t?) {
         guard let running, running.app.processIdentifier == pid else { return }
         self.running = nil
+        clipRecorder.stop()
+        syncSaves(running.game) {}
         discord.clear()
         loadTrophies(running.game, again: true)
         diagnose(running.game)
@@ -847,6 +1005,9 @@ final class AppModel: ObservableObject {
                 remote.publish(.art(id: id, icon: RemoteArt.jpeg(game.icon, longestSide: RemoteArt.iconSide),
                                     background: RemoteArt.jpeg(game.background, longestSide: RemoteArt.backgroundSide)))
             }
+        case .command("capture"):
+            // Create on the phone's pad: a clip of the game, the game staying in front.
+            saveClip()
         case .command(let name):
             let commands: [String: Command] = ["left": .left, "right": .right, "up": .up, "down": .down, "select": .select, "back": .back, "options": .options,
                                                "l1": .previousGame, "r1": .nextGame]

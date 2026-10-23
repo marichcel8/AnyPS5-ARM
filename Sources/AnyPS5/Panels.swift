@@ -129,6 +129,21 @@ extension AppModel {
                 self?.preferences.discordPresence = value
                 if !value { self?.discordOff() }
             }),
+            PanelRow(id: "clips", title: T.text(.clips), detail: T.format(.clipsDetail, clipSeconds), symbol: "record.circle", kind: .toggle(preferences.clips == true) { [weak self] value in
+                self?.clipsChanged(value)
+            }),
+            PanelRow(id: "clipLength", title: T.text(.clipLength), symbol: "timer",
+                     kind: .stepper(value: clipSeconds, range: 15...120, step: 15, format: { T.format(.seconds, $0) }) { [weak self] value in
+                         self?.preferences.clipLength = value
+                     }),
+            PanelRow(id: "saveSync", title: T.text(.saveSync), detail: syncRoot.map { T.format(.saveSyncDetail, $0.abbreviatedPath) } ?? T.text(.saveSyncNoFolder), symbol: "arrow.triangle.2.circlepath.icloud",
+                     kind: .toggle(preferences.saveSync == true && syncRoot != nil) { [weak self] value in
+                         guard let self else { return }
+                         if value && self.syncRoot == nil { return self.chooseSyncFolder() }
+                         self.preferences.saveSync = value
+                     }),
+            PanelRow(id: "syncFolder", title: T.text(.syncFolder), detail: preferences.syncFolder.map { URL(fileURLWithPath: $0).abbreviatedPath } ?? T.text(SaveSync.iCloudDrive != nil ? .syncFolderICloud : .syncFolderNone),
+                     symbol: "folder.badge.gearshape", kind: .action(destructive: false) { [weak self] in self?.chooseSyncFolder() }),
             PanelRow(id: "checkUpdates", title: T.text(.checkUpdates), detail: T.text(.checkUpdatesDetail), symbol: "arrow.down.circle", kind: .toggle(preferences.checkUpdates ?? true) { [weak self] value in
                 self?.preferences.checkUpdates = value
                 if value { self?.checkForUpdate() }
@@ -154,6 +169,9 @@ extension AppModel {
                 NSWorkspace.shared.open(update.page)
             }))
         }
+        let checked = lastUpdateCheck.map { T.format(.lastChecked, $0.formatted(date: .omitted, time: .shortened)) } ?? T.text(.checkForUpdatesDetail)
+        about.append(PanelRow(id: "checkForUpdates", title: T.text(.checkForUpdatesNow), detail: checkingUpdates ? T.text(.checkingUpdates) : checked,
+                              symbol: "arrow.triangle.2.circlepath", kind: .action(destructive: false) { [weak self] in self?.checkForUpdatesNow() }))
         about += [
             PanelRow(id: "toolkit", title: T.text(.toolkitVersion), kind: .info(toolkit?.version ?? "—")),
             PanelRow(id: "author", title: T.text(.madeBy), kind: .info("Utku Halis")),
@@ -217,7 +235,7 @@ extension AppModel {
             }))
         }
         rows.append(PanelRow(id: "vsync", title: T.text(.vsync), symbol: "waveform.path", kind: .toggle(settings.vsync || settings.frameGeneration == true) { [weak self] value in self?.update(game) { $0.vsync = value } }))
-        rows.append(PanelRow(id: "frameGeneration", title: T.text(.frameGeneration), detail: T.text(.frameGenerationDetail), symbol: "square.stack.3d.forward.dottedline",
+        rows.append(PanelRow(id: "frameGeneration", title: T.text(.frameGeneration), detail: T.text(lowPowerNotice != nil ? .frameGenerationLowPower : .frameGenerationDetail), symbol: "square.stack.3d.forward.dottedline",
                              kind: .toggle(settings.frameGeneration == true) { [weak self] value in self?.update(game) { $0.frameGeneration = value ? true : nil } }))
         rows.append(PanelRow(id: "controls", title: T.text(.controls), symbol: "keyboard", kind: .action(destructive: false) { [weak self] in self?.open(.controls) }))
         if let set = trophies[game.id] {
@@ -375,7 +393,7 @@ extension AppModel {
             case .down: movePanelCategory(1, count: categories.count)
             case .right, .select: enterRows(rows)
             case .back, .options: closeOverlay()
-            case .left, .previousGame, .nextGame, .home: break
+            case .left, .previousGame, .nextGame, .home, .capture: break
             }
             return true
         }
@@ -399,7 +417,7 @@ extension AppModel {
             leaveRows(single)
         case .options:
             closeOverlay()
-        case .previousGame, .nextGame, .home:
+        case .previousGame, .nextGame, .home, .capture:
             break
         }
         return true
