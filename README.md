@@ -16,6 +16,7 @@ This launcher is for macOS. On **Windows and Linux**, use [**AnyPS5 Launcher** b
 - **Unlocks them:** the engine's relinker turns each game into a Mac app, kept in the games folder (`.AnyPS5/Games`), with the game's own files and saves beside it (`.AnyPS5/Data`) so macOS checks the app only once.
 - **Starts them**, with a start screen until the game's first window shows, and says in plain words why a game stopped when it ends on an error.
 - **Per game:** controls (keyboard and mouse to pad), resolution, language, deadzones, the mouse as the camera, the shader cache, and sharing all of it as one file.
+- **Screenshots and saves:** a gallery of each game's F12 shots, and backing up and restoring its saves and trophies.
 - **Trophies:** the list as the console shows it, and a card over the game when one is earned.
 - **Music:** the selected game's own theme song fades in, like on the PS5, with volumes for it and the interface sounds.
 - **Updates:** it tells you when a new AnyPS5 is out and replaces itself with it from Settings → About.
