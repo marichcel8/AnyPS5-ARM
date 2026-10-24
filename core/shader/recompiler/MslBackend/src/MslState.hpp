@@ -71,6 +71,13 @@ struct State {
     std::map<std::uint32_t, std::uint32_t> constants;
     std::vector<std::string> imageTypes;
     std::unordered_map<const IrValue*, std::uint8_t> precision;
+    std::string exit = "return;";
+    std::map<std::string, std::string> stageInputs;
+    std::map<std::string, std::string> stageOutputs;
+    std::map<std::string, std::string> stageArguments;
+    std::map<std::string, std::string> stageGlobals;
+    bool validMask = false;
+    std::uint32_t zeroClip = 0xffffffffu;
 };
 
 [[noreturn]] void Fail(const IrValue& inst, std::string_view reason);
@@ -103,6 +110,10 @@ void EmitInstruction(State& state, const IrValue& inst);
 void EmitBlockBody(State& state, const IrBlock& block);
 void EmitFlow(State& state);
 std::string Prelude(const State& state);
+void PrepareStage(State& state);
+std::string StageBuiltin(State& state, StageInputKind kind, std::uint32_t component);
+bool EmitStage(State& state, const IrValue& inst);
+std::string StageHeader(const State& state, const std::string& parameters);
 
 }
 

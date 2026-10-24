@@ -328,7 +328,7 @@ void EmitInstruction(State& state, const IrValue& inst) {
     default:
         break;
     }
-    if (EmitWave(state, inst) || EmitAlu(state, inst) || EmitMemory(state, inst)) return;
+    if (EmitStage(state, inst) || EmitWave(state, inst) || EmitAlu(state, inst) || EmitMemory(state, inst)) return;
     Fail(inst, "has no MSL emitter");
 }
 
@@ -336,7 +336,9 @@ void EmitInstruction(State& state, const IrValue& inst) {
 
 std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInfo& inputInfo, const CompiledBindingLayout& bindings, const MslTarget& target) const {
     using namespace Msl;
-    if (program.Resources().stage != IrShaderStage::Compute) throw MslUnsupported("MSL backend: only compute programs are emitted (graphics stages are section S6)");
+    const auto stage = program.Resources().stage;
+    const bool compute = stage == IrShaderStage::Compute;
+    if (!compute && stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel) throw MslUnsupported("MSL backend: only compute, vertex and pixel programs are emitted (tessellation, geometry and mesh stages are section S7)");
     if (target.simdgroupSize != 32u || (program.WaveSize() != 32u && program.WaveSize() != 64u)) throw MslUnsupported("MSL backend: only wave32 and wave64 programs on 32-wide SIMD-groups are emitted");
     if (program.Info().sharedMemoryBytes != 0u) throw MslUnsupported("MSL backend: LDS in device memory is not emitted (section S9)");
     State state{program, inputInfo, bindings.layout, target};
@@ -349,10 +351,16 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     state.scratchDwords = program.Info().scratchDwords;
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
-    state.stopAllowed = state.waveLds == 0u && !HasBarrier(program) && !state.spanned;
+    state.stopAllowed = compute && state.waveLds == 0u && !HasBarrier(program) && !state.spanned;
+    if (!compute) {
+        if (state.spanned) throw MslUnsupported("MSL backend: wave64 vertex and pixel programs need two guest lanes per thread (section S4b)");
+        PrepareStage(state);
+    }
     Hoister{state}.Run();
     AnalyzePrecision(state);
     EmitFlow(state);
+    if (!compute && (state.features & (Lds | WaveExchange | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
+    if (stage == IrShaderStage::Vertex && (state.features & (Lane | Wave)) != 0u) throw MslUnsupported("MSL backend: SIMD-group operations in vertex functions are not emitted");
 
     std::string declarations;
     const auto declare = [&](std::string_view text) {
@@ -378,6 +386,14 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     }
 
     std::string text = Prelude(state);
+    if (!compute) {
+        text += StageHeader(state, Parameters(state));
+        text += declarations;
+        text += state.body;
+        if (!state.body.ends_with(state.exit + "\n")) text += "    " + state.exit + "\n";
+        text += "}\n";
+        return text;
+    }
     if (workgroup != nullptr) {
         const auto threads = std::max(workgroup->threadsNum[0], 1u) * std::max(workgroup->threadsNum[1], 1u) * std::max(workgroup->threadsNum[2], 1u);
         text += "[[max_total_threads_per_threadgroup(" + std::to_string(threads) + ")]] ";
