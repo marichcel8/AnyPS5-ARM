@@ -159,6 +159,7 @@ function(add_shader_recompiler target runtimeTarget)
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslImage.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslFlow.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslWave.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslStage.cpp
 
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/DummyShaders.cpp
     )

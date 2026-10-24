@@ -539,6 +539,30 @@ CompiledVariant emitMslVariant(const RecompileRequest& request, IrProgram& progr
     result.imageMetadataDword = bindings.layout.ImageMetadataDword();
     result.runtimeImageCount = bindings.layout.runtimeImageCount;
     result.hostSubgroupSize = HostSubgroupSize(request);
+    result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
+    result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
+    result.vertexOffsetShared = program.Info().vertexOffsetShared;
+    result.instanceOffsetShared = program.Info().instanceOffsetShared;
+    result.vertexOffsetConflict = program.Info().vertexOffsetConflict;
+    result.instanceOffsetConflict = program.Info().instanceOffsetConflict;
+    for (const auto& output : program.Info().outputs) {
+        if (output.kind == StageOutputKind::Parameter) result.parameterExports.push_back(output.location);
+    }
+    if (request.shader.stage == ShaderStage::Fragment) result.fragmentParameters = DescribeFragmentParameters(program, inputInfo);
+    if (request.shader.stage == ShaderStage::Vertex) {
+        if (inputInfo.vertex == nullptr) throw std::runtime_error("vertex input metadata is missing");
+        for (const auto& input : program.Info().inputs) {
+            if (input.kind != StageInputKind::Parameter) continue;
+            if (input.location >= static_cast<std::uint32_t>(inputInfo.vertex->resourcesNum)) throw std::runtime_error("vertex attribute location exceeds resource count");
+            result.vertexInputs.push_back({input.location, input.componentCount, inputInfo.vertex->resourcesDst[input.location].fetchIndex});
+            if (!inputInfo.vertex->fetchEmbedded) continue;
+            for (const auto& block : program.Blocks()) {
+                for (const auto* instruction : block->Instructions()) {
+                    if (instruction->Opcode() == IrOpcode::GetAttribute && instruction->Argument(0)->Resolve()->ImmediateU32() == input.location) result.vertexInputs.back().outputMask |= 1u << instruction->Argument(1)->Resolve()->ImmediateU32();
+                }
+            }
+        }
+    }
     return {request.layout, {}, std::move(static_cast<CompiledBindingLayout&>(bindings)), std::move(result)};
 }
 
@@ -947,6 +971,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         if (variant.info.info.rasterPrimitive) moduleKey.push_back(static_cast<std::uint32_t>(request.context.pixel->rasterPrimitive));
         if (variant.info.info.layerExported) moduleKey.push_back(request.context.pixel->layerExported ? 1u : 0u);
     }
+    const bool selectsVertexClasses = !artifact.vertexInputPatches.empty() || (artifact.backend == ShaderBackendKind::Msl && request.context.vertex && request.context.vertex->fetchEmbedded);
     result.vertexAttributes.reserve(result.vertexInputs.size());
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources> vertexClasses{};
     std::array<std::uint32_t, ShaderVertexStageInfo::MaxResources / RuntimeAbi::VertexSelectorsPerDword> runtimeSelectors{};
@@ -956,7 +981,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         const auto& resource = vertex.resources[input.location];
         const auto fetchIndex = vertex.fetchEmbedded ? vertex.resourcesDst[input.location].fetchIndex : input.fetchIndex;
         result.vertexAttributes.push_back({input.location, input.components, resource, fetchIndex});
-        if (!artifact.vertexInputPatches.empty()) {
+        if (selectsVertexClasses) {
             const auto format = static_cast<IrBufferFormat>((resource.fields[3] >> 12u) & 0x7fu);
             const auto numeric = registrationDefaults && format == IrBufferFormat::Invalid ? IrTextureNumericClass::Float : VertexInputNumericClass(format);
             if (numeric == IrTextureNumericClass::Unsupported) throw std::runtime_error("unsupported prepared vertex format");
@@ -977,6 +1002,31 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
     }
     result.backend = artifact.backend;
     result.msl = artifact.msl;
+    const auto pipelineConstants = [&] {
+        auto constants = plan->bindings.specialization;
+        std::size_t index = 0;
+        if (variant.bindings.layout.UsesPushData()) constants.push_back({PipelineSpecialization::PushDataOffset, moduleKey[index++]});
+        if (!artifact.stencilReferences.empty()) constants.push_back({PipelineSpecialization::StencilReferenceOffset, moduleKey[index++]});
+        if (request.context.pixel) {
+            for (std::uint32_t target = 0; target < request.context.pixel->targetExportPacking.size(); ++target) constants.push_back({PipelineSpecialization::ExportPackingBase + target, moduleKey[index++]});
+            constants.push_back({PipelineSpecialization::DualSourceBlend, moduleKey[index++]});
+            constants.push_back({PipelineSpecialization::ReversedBlend, moduleKey[index++]});
+            if (variant.info.info.rasterPrimitive) constants.push_back({PipelineSpecialization::RasterPrimitive, moduleKey[index++]});
+            if (variant.info.info.layerExported) constants.push_back({PipelineSpecialization::LayerExported, moduleKey[index++]});
+        }
+        if (selectsVertexClasses) {
+            for (const auto& input : result.vertexInputs) {
+                const auto selectors = moduleKey[index++];
+                const auto first = PipelineSpecialization::VertexBase + input.location * PipelineSpecialization::VertexWords;
+                for (std::uint32_t component = 0; component < 4u; ++component) constants.push_back({first + component, (selectors >> (component * 3u)) & 7u});
+                const auto kind = selectors >> 12u;
+                constants.push_back({first + 4u, kind == 0u ? 0x3f800000u : 1u});
+                constants.push_back({first + 5u, kind});
+            }
+        }
+        return constants;
+    };
+    if (artifact.backend == ShaderBackendKind::Msl) result.specialization = pipelineConstants();
     if (artifact.backend == ShaderBackendKind::Spirv && (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !artifact.vertexInputPatches.empty() || request.context.pixel)) {
         {
             std::shared_lock lock(plan->mutex);
@@ -988,27 +1038,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             entry = found != plan->modules.end() ? found->second : plan->modules.emplace(moduleKey, std::make_shared<PreparedModuleEntry>()).first->second;
         }
         const auto prepare = [&] {
-            auto constants = plan->bindings.specialization;
-            std::size_t index = 0;
-            if (variant.bindings.layout.UsesPushData()) constants.push_back({PipelineSpecialization::PushDataOffset, moduleKey[index++]});
-            if (!artifact.stencilReferences.empty()) constants.push_back({PipelineSpecialization::StencilReferenceOffset, moduleKey[index++]});
-            if (request.context.pixel) {
-                for (std::uint32_t target = 0; target < request.context.pixel->targetExportPacking.size(); ++target) constants.push_back({PipelineSpecialization::ExportPackingBase + target, moduleKey[index++]});
-                constants.push_back({PipelineSpecialization::DualSourceBlend, moduleKey[index++]});
-                constants.push_back({PipelineSpecialization::ReversedBlend, moduleKey[index++]});
-                if (variant.info.info.rasterPrimitive) constants.push_back({PipelineSpecialization::RasterPrimitive, moduleKey[index++]});
-                if (variant.info.info.layerExported) constants.push_back({PipelineSpecialization::LayerExported, moduleKey[index++]});
-            }
-            if (!artifact.vertexInputPatches.empty()) {
-                for (const auto& input : result.vertexInputs) {
-                    const auto selectors = moduleKey[index++];
-                    const auto first = PipelineSpecialization::VertexBase + input.location * PipelineSpecialization::VertexWords;
-                    for (std::uint32_t component = 0; component < 4u; ++component) constants.push_back({first + component, (selectors >> (component * 3u)) & 7u});
-                    const auto kind = selectors >> 12u;
-                    constants.push_back({first + 4u, kind == 0u ? 0x3f800000u : 1u});
-                    constants.push_back({first + 5u, kind});
-                }
-            }
+            const auto constants = pipelineConstants();
             const auto module = artifact.registrationModule && plan->bindings.specialization.empty() ? registrationModule(artifact.variantId, moduleKey, [&] { return specializeModule(variant.artifact, vertexClasses, constants, request.target); }) : specializeModule(variant.artifact, vertexClasses, constants, request.target);
             if (variant.bindings.layout.UsesPushData() && !module->pushData) throw std::runtime_error("specialization removed the prepared push constant interface");
             auto selected = DescriptorBindingBuilder{}.Select(plan->bindings, module->bindings);

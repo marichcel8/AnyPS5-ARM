@@ -154,7 +154,7 @@ private:
             return JumpOut(merge, stop);
         }
         default:
-            Line(state, "return;");
+            Line(state, state.exit);
             return nullptr;
         }
     }

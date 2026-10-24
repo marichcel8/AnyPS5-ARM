@@ -56,6 +56,8 @@ inline constexpr std::uint32_t GuestBufferTableBytes = RuntimeAbi::BufferCapacit
 inline constexpr std::uint32_t GuestImageTableEntries = (RuntimeAbi::FirstStorageImageBinding - RuntimeAbi::FirstImageBinding) * RuntimeAbi::SampledHeapCapacity + (static_cast<std::uint32_t>(RuntimeAbi::Binding::Samplers) - RuntimeAbi::FirstStorageImageBinding) * RuntimeAbi::StorageHeapCapacity;
 inline constexpr std::uint32_t GuestImageTableBytes = GuestImageTableEntries * sizeof(ResourceIdEntry);
 inline constexpr std::uint32_t GuestSamplerTableBytes = RuntimeAbi::SamplerHeapCapacity * sizeof(ResourceIdEntry);
+inline constexpr std::uint32_t PositionFlipYConstant = 60000u;
+inline constexpr std::uint32_t DepthNegativeOneToOneConstant = 60001u;
 
 struct ArgumentSlot {
     BufferSlot slot;

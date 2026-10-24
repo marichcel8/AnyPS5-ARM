@@ -72,7 +72,7 @@ std::string Builtin(State& state, const IrValue& inst) {
     case StageInputKind::DispatchThreadLimit:
         return ShaderDataWord(state, state.layout.DispatchThreadLimitDword() + component);
     default:
-        throw MslUnsupported("MSL backend: compute builtin " + std::to_string(static_cast<std::uint32_t>(kind)) + " is not emitted (graphics inputs are section S6)");
+        return StageBuiltin(state, kind, component);
     }
 }
 

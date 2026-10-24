@@ -294,7 +294,7 @@ struct MslTarget {
     std::optional<MeshTargetLimits> mesh;
     std::optional<TessellationTargetLimits> tessellation;
     bool relaxedFloat = true;
-    bool fragmentBarycentric = true;
+    bool fragmentBarycentric = false;
     bool vertexSimdgroups = false;
     bool float16DenormPreserve = false;
     bool float32DenormPreserve = false;
