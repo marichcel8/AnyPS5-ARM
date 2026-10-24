@@ -5,6 +5,9 @@
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "Decoder/Png.hpp"
 #include "SDL_vulkan.h"
+#ifdef ANYPS5_GPU_BACKEND_METAL
+#include "SDL_metal.h"
+#endif
 #include <cstdio>
 #include <span>
 #include <stdexcept>
@@ -59,8 +62,13 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     const auto initialSize = AgcDriver::ComputeContainSize_nid_postfix(sourceWidth, sourceHeight, boundsWidth, boundsHeight, true);
     require(initialSize.width >= DisplayWindowMinimumWidth && initialSize.height >= DisplayWindowMinimumHeight, "initial window extent is smaller than the minimum");
     const auto title = GetAppTitle_nid_postfix();
+#ifdef ANYPS5_GPU_BACKEND_METAL
+    constexpr Uint32 GpuWindowFlag = SDL_WINDOW_METAL;
+#else
+    constexpr Uint32 GpuWindowFlag = SDL_WINDOW_VULKAN;
+#endif
     AgcDriverLockVulkanLoader_nid_postfix();
-    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+    window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | GpuWindowFlag | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     AgcDriverUnlockVulkanLoader_nid_postfix();
     require(window != nullptr, SDL_GetError());
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
@@ -98,7 +106,11 @@ void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) co
     }
     int drawableWidth = 0;
     int drawableHeight = 0;
+#ifdef ANYPS5_GPU_BACKEND_METAL
+    SDL_Metal_GetDrawableSize(window, &drawableWidth, &drawableHeight);
+#else
     SDL_Vulkan_GetDrawableSize(window, &drawableWidth, &drawableHeight);
+#endif
     width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
     height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
 }
