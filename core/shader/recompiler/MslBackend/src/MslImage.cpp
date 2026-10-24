@@ -991,7 +991,7 @@ TableWord EmitTableWord(State& state, const IrValue& inst, std::uint32_t source,
         Line(state, "const uint " + word.code + " = " + name + "_fault != 0u ? " + name + "_fault : (" + name + "_mapped ? " + name + "_entry : " + outsideSnapshot + ");");
         Line(state, "const ulong " + word.address + " = " + name + "_base + ulong(" + name + "_offset & 0xfffffffcu) + ulong(long(int(" + U32(immediate) + ")));");
     } else {
-        Line(state, "const ulong " + name + "_sum = ulong(" + name + "_offset) + " + U32(column.offset) + "ul;");
+        Line(state, "const ulong " + name + "_sum = ulong(" + name + "_offset) + ulong(" + U32(column.offset) + ");");
         Line(state, "const uint " + name + "_byte = uint(" + name + "_sum) & 0xfffffffcu;");
         Line(state, "const bool " + name + "_inside = (" + name + "_sum >> 32u) == 0ul && (" + field(ImageTableAbi::TableSizeHigh) + " != 0u || " + name + "_byte < (" + field(ImageTableAbi::TableSizeLow) + " & 0xfffffffcu));");
         Line(state, "const uint " + word.code + " = " + name + "_fault != 0u ? " + name + "_fault : (" + name + "_mapped ? " + name + "_entry : (" + name + "_inside ? " + outsideSnapshot + " : " + field(ImageTableAbi::TableOutsideCode) + "));");
