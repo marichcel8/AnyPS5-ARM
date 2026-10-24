@@ -25,17 +25,12 @@ struct Statistics {
 
 // Lifts the guest's x86-64 functions to LLVM IR over GuestState (runtime/GuestState.hpp). Each guest
 // function becomes `void g_<offset>(GuestState*)`; aps5_guest_functions maps guest offsets to them.
-// Discover finds the functions once; Lift then builds one module per partition of them, each in its own
-// context, so partitions can be lifted, optimized and compiled on separate threads. The first partition
-// also holds the guest image and the tables. With one partition the functions are internal; with more,
-// they are hidden globals the partitions call across.
 class Lifter {
 public:
     explicit Lifter(const Elf& elf);
     ~Lifter();
 
     void Discover();
-    // Entries in address order, grouped into partitions of about `instructions` guest instructions.
     std::vector<std::vector<std::uint64_t>> Partitions(std::size_t instructions) const;
     std::size_t FunctionSize(std::uint64_t entry) const;
     std::unique_ptr<llvm::Module> Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, Statistics& stats) const;

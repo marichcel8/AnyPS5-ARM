@@ -361,10 +361,6 @@ void Lifter::Impl::Jump(std::uint64_t target) {
     else TailCall(target);
 }
 
-// An indirect jump through a jump table switches over the table's targets. Every other indirect
-// jump goes to the function's dispatch, which switches over all its branch targets; a target outside
-// the function leaves through the runtime lookup. One shared dispatch keeps the control flow graph
-// linear in the number of indirect jumps.
 llvm::BasicBlock* Lifter::Impl::Dispatch() {
     if (dispatch != nullptr) return dispatch;
     llvm::IRBuilderBase::InsertPointGuard guard(builder);
@@ -964,8 +960,6 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
     }
 }
 
-// Removes what a failed instruction emitted: what it added to its block after `last` and the blocks
-// it appended.
 void Lifter::Impl::Discard(llvm::BasicBlock* block, llvm::Instruction* last, std::size_t keepBlocks) {
     std::vector<llvm::BasicBlock*> appended;
     for (auto it = std::next(current->begin(), static_cast<std::ptrdiff_t>(keepBlocks)); it != current->end(); ++it) appended.push_back(&*it);
@@ -986,9 +980,6 @@ void Lifter::Impl::Discard(llvm::BasicBlock* block, llvm::Instruction* last, std
     }
 }
 
-// The instructions that start a basic block: the entry, branch targets, and any instruction control
-// does not reach by falling through from the one before it alone. The rest continue their
-// predecessor's block, which keeps the graph LLVM optimizes small.
 std::set<std::uint64_t> Lifter::Impl::Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses) const {
     std::set<std::uint64_t> leaders(branchTargets.begin(), branchTargets.end());
     leaders.insert(entry);

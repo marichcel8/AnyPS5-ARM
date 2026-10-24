@@ -48,18 +48,11 @@ std::size_t Setting(const char* name, std::size_t fallback) {
     return static_cast<std::size_t>(std::strtoull(text, nullptr, 10));
 }
 
-// How a translation is split and how hard each function is optimized. The defaults keep a title with
-// some very large guest functions within minutes and a few hundred MB per thread.
 struct Options {
     std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::max(1u, std::thread::hardware_concurrency()));
     std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 16384);
-    // Functions of more guest instructions than this skip the O2 pipeline, whose loop and memory
-    // passes grow faster than linearly, for a short list of linear ones.
     std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 8000);
-    // Beyond this, the register allocator's live range splitting grows too fast as well, so these
-    // functions are also compiled like optnone code: fast instruction selection and allocation.
     std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 32000);
-    // Large functions are not inlined, so inlining never builds a huge function out of several.
     std::size_t large = Setting("APS5_TRANSLATOR_LARGE", 2000);
     bool verbose = std::getenv("APS5_TRANSLATOR_STATS") != nullptr;
 };
@@ -124,9 +117,6 @@ std::string Hash(const std::vector<llvm::StringRef>& parts) {
     return llvm::toHex(llvm::ArrayRef<std::uint8_t>(digest.data(), 16), true);
 }
 
-// Translated partitions stay in a cache keyed by the translator binary, the guest ELF, the options and
-// the partition, so a repeated or interrupted translation only compiles what is missing. The cache
-// keeps one translation per ELF. APS5_TRANSLATOR_CACHE names the directory; "off" disables it.
 std::string CacheDirectory(const std::string& elfKey) {
     const char* setting = std::getenv("APS5_TRANSLATOR_CACHE");
     if (setting != nullptr && std::string(setting) == "off") return {};
@@ -146,7 +136,6 @@ std::string ToolKey(const char* argv0) {
     return path + ":" + std::to_string(status.getSize()) + ":" + std::to_string(status.getLastModificationTime().time_since_epoch().count());
 }
 
-// Joins the partition objects into one relocatable object; hidden symbols become local in it.
 void Join(const std::vector<std::string>& objects, const std::string& output) {
     std::string linker;
     if (const char* setting = std::getenv("APS5_TRANSLATOR_LD"); setting != nullptr && *setting != 0) linker = setting;
@@ -167,8 +156,6 @@ void Merge(Translator::Statistics& into, const Translator::Statistics& from) {
     for (const auto& [what, count] : from.unsupported) into.unsupported[what] += count;
 }
 
-// A cached partition keeps its statistics next to its object: the instruction count, then one
-// "<count> <what>" line per unsupported instruction.
 void SaveStatistics(const Translator::Statistics& stats, const std::string& path) {
     std::error_code code;
     llvm::raw_fd_ostream output(path, code, llvm::sys::fs::OF_None);

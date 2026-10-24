@@ -38,8 +38,6 @@ bool IsShift(unsigned id) {
     }
 }
 
-// The flags an instruction reads and the ones it always overwrites, from Capstone's flag table plus
-// what the lifter itself reads. Anything uncertain reads every flag and overwrites none.
 FlagUse UseOf(const Instruction& instruction) {
     const auto id = instruction.id;
     if (instruction.size == 0 || instruction.mnemonic.empty() || instruction.mnemonic.front() == 'f') return {AllFlags, 0};
@@ -92,9 +90,6 @@ FlagUse UseOf(const Instruction& instruction) {
 
 }
 
-// Backward liveness of the arithmetic flags over the function's instructions. A flag write no later
-// instruction can read is dead. Flags are not live across calls, returns and jumps to other functions
-// (the System V ABI preserves none), so most of what the lifter computes for them never reaches a store.
 std::map<std::uint64_t, std::uint8_t> Lifter::Impl::DeadFlags(std::uint64_t entry, const std::set<std::uint64_t>& addresses) {
     std::map<std::uint64_t, std::uint8_t> dead;
     static const bool keepAll = std::getenv("APS5_TRANSLATOR_ALL_FLAGS") != nullptr;
