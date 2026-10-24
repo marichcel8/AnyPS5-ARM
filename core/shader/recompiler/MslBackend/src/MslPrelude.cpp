@@ -521,6 +521,13 @@ std::string Prelude(const State& state) {
         text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "device"), "NAME", "");
         if (has(Lds)) text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "threadgroup"), "NAME", "_lds");
     }
+    for (std::size_t index = 0; index < state.imageTypes.size(); ++index) text += "struct aps5_img" + std::to_string(index) + " { " + state.imageTypes[index] + " t; };\n";
+    if (has(Samplers)) text += "struct aps5_sampler { sampler s; };\n";
+    for (const auto& [id, fallback] : state.constants) {
+        const auto name = std::to_string(id);
+        text += "constant uint aps5_fc" + name + " [[function_constant(" + name + ")]];\n";
+        text += "constant uint aps5_c" + name + " = is_function_constant_defined(aps5_fc" + name + ") ? aps5_fc" + name + " : " + U32(fallback) + ";\n";
+    }
     return text;
 }
 
