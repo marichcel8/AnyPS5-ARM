@@ -52,8 +52,8 @@ inline std::uint32_t Expected(Expect expect, std::uint32_t lane) {
     case Expect::ReadLane37: return 37u;
     case Expect::FirstUpperPlus: return lane > 32u ? 33u + lane : 0u;
     case Expect::Carry64: return lane == 1u ? 1u : 0u;
-    case Expect::MaxPair64: return lane == 2u ? Threads - 1u : (lane == 3u ? 1u : 0u);
-    case Expect::OrPair64: return lane == 4u || lane == 5u ? 0xffffffffu : 0u;
+    case Expect::MaxPair64: return lane == 0u ? Threads - 1u : (lane == 1u ? 1u : 0u);
+    case Expect::OrPair64: return lane < 2u ? 0xffffffffu : 0u;
     case Expect::AllOne: return 1u;
     }
     return 0u;
@@ -82,8 +82,8 @@ inline std::vector<Program> Programs() {
         {"wave64 ballot", {0xd4c10008u, 0x00020094u, 0x7e020209u, 0x3a020208u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_ballot64", Expect::Ballot64, false, Wave64},
         {"wave64 readlane", {0xd7600004u, 0x00014b00u, 0x7e020204u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_read64", Expect::ReadLane37, false, Wave64},
         {"buffer atomic add64", {0x7e0202ffu, 0x04000000u, 0x7e040280u, 0xe1480000u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::Carry64, false, BothWaves},
-        {"buffer atomic umax64", {0x7e040281u, 0x7e020300u, 0xe1600008u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::MaxPair64, false, BothWaves},
-        {"buffer atomic or64", {0x7e060281u, 0x34020700u, 0x7e040301u, 0xe1680010u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::OrPair64, false, BothWaves},
+        {"buffer atomic umax64", {0x7e040281u, 0x7e020300u, 0xe1600000u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::MaxPair64, false, BothWaves},
+        {"buffer atomic or64", {0x7e060281u, 0x34020700u, 0x7e040301u, 0xe1680000u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::OrPair64, false, BothWaves},
         {"global atomic add64", {0x7e0602ffu, 0x04000000u, 0x7e080280u, 0x7e040280u, 0xdd488000u, 0x00040302u, EndProgram}, "aps5_bda_atomic8", Expect::Carry64, true, BothWaves},
         {"lds atomic add64", {0x7e0602ffu, 0x04000000u, 0x7e080280u, 0x7e0a0280u, 0x7e0c0280u, 0x7e0e0280u, 0xd9340000u, 0x00000605u, 0xbf8cc07fu, 0xbf8a0000u, 0xd9000000u, 0x00000305u, 0xbf8cc07fu, 0xbf8a0000u, 0xd8d80004u, 0x01000005u, 0xbf8cc07fu, 0x34040082u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_atomic64_lds", Expect::AllOne, false, BothWaves},
         {"wave64 readfirstlane", {0xd4c10008u, 0x000200a0u, 0xbefe0408u, 0x7e080500u, 0x4a020004u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_readfirst64", Expect::FirstUpperPlus, false, Wave64},
