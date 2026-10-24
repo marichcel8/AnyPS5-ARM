@@ -278,6 +278,10 @@ set(agcDriverVulkanSources
 set(agcDriverMetalSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Null/NullBackend.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestTextureResource.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
 )
 
 if(ANYPS5_GPU_BACKEND STREQUAL "Metal")
@@ -1700,6 +1704,12 @@ foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
     get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)
     if(ANYPS5_AGC_EXECUTION_TESTS AND NOT agcExecutionTestName IN_LIST ANYPS5_AGC_EXECUTION_TESTS)
         set(agcExecutionTestSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/ExecutionTestNotBuilt.cpp)
+    elseif(ANYPS5_GPU_BACKEND STREQUAL "Metal")
+        file(READ ${agcExecutionTestSource} agcExecutionTestText)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${agcExecutionTestSource})
+        if(agcExecutionTestText MATCHES "GetContext|graphicsContext|Graphics::Context|Graphics::Buffer|CommandBatch|DecodeColorBuffer|StorageTexture::Find|FlushAllPending|QueryBda|HostImport|SharedResourceCache|SetImportWatch|ImportWatch|CachedTextures|ClearDepthSurfaces|DepthSurfaceView|PixelEarlyZ|TextureDetiler|\\.Keep\\(|VulkanDeviceTestAccess|vk[A-Z][A-Za-z]+\\(")
+            set(agcExecutionTestSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/ExecutionTestNotBuilt.cpp)
+        endif()
     endif()
     string(REGEX REPLACE "([a-z0-9])([A-Z])" "\\1_\\2" agcExecutionTestName "${agcExecutionTestName}")
     string(TOLOWER "agc_driver_${agcExecutionTestName}_tests" agcExecutionTest)

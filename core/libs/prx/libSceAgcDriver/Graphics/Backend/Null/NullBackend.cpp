@@ -66,8 +66,6 @@ ShaderStages DecodeShaderStages(const QueueState&, bool) { return {}; }
 
 State DecodeState(const QueueState&, bool) { return {}; }
 
-GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t>) { return {}; }
-
 ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte>, std::uint64_t, std::span<const std::uint32_t>, std::vector<DecodeRead>*, bool, std::uint32_t) { return {}; }
 
 ShaderRecompiler::ShaderPixelStageInfo DefaultUnexportedInputs(ShaderRecompiler::ShaderPixelStageInfo, std::span<const std::uint32_t>) { return {}; }
@@ -79,8 +77,6 @@ bool DepthResummarizeDrawsNothing(const QueueState&) { return false; }
 std::uint64_t DepthSliceBytes(VkExtent2D, std::uint32_t) { return 0; }
 
 bool DepthSurfaceAt(std::uint64_t) { return false; }
-
-SurfaceGeometry DescribeSurface(const GuestTextureResource&) { return {}; }
 
 bool DrawKeyCovers(RegisterRead) { return false; }
 

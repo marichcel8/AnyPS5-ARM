@@ -539,7 +539,10 @@ CompiledVariant emitMslVariant(const RecompileRequest& request, IrProgram& progr
     result.imageMetadataDword = bindings.layout.ImageMetadataDword();
     result.runtimeImageCount = bindings.layout.runtimeImageCount;
     result.hostSubgroupSize = HostSubgroupSize(request);
-    if (inputInfo.compute != nullptr) result.hostThreadgroup = {std::max(inputInfo.compute->threadsNum[0], 1u), std::max(inputInfo.compute->threadsNum[1], 1u), std::max(inputInfo.compute->threadsNum[2], 1u)};
+    if (inputInfo.compute != nullptr) {
+        const std::array<std::uint32_t, 3> threads{std::max(inputInfo.compute->threadsNum[0], 1u), std::max(inputInfo.compute->threadsNum[1], 1u), std::max(inputInfo.compute->threadsNum[2], 1u)};
+        result.hostThreadgroup = program.WaveSize() == 64u ? std::array<std::uint32_t, 3>{(threads[0] * threads[1] * threads[2] + 63u) / 64u * 32u, 1u, 1u} : threads;
+    }
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
     result.vertexOffsetShared = program.Info().vertexOffsetShared;
