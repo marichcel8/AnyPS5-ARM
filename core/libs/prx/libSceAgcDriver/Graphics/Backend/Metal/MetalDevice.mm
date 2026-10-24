@@ -807,7 +807,13 @@ struct VulkanDevice::State {
         if (!binding.imageShape) throw std::runtime_error("AGC graphics: Metal image binding has no image shape");
         const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
         const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
-        return imageView(words, *binding.imageShape, written, ImageKindOf(binding.binding).numeric, true, snapshots, uses);
+        const auto kind = ImageKindOf(binding.binding);
+        std::optional<std::uint32_t> storageMip;
+        if (kind.storage) {
+            storageMip = 0u;
+            for (auto previous = element; previous > 0u && std::equal(words.begin(), words.end(), binding.guestDescriptor.begin() + static_cast<std::ptrdiff_t>(previous - 1u) * 8); --previous) ++*storageMip;
+        }
+        return imageView(words, *binding.imageShape, written, kind.numeric, true, snapshots, uses, storageMip);
     }
 
     std::uint64_t tableImage(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
@@ -816,7 +822,7 @@ struct VulkanDevice::State {
         return imageView(words, binding.imageShapes.at(element), written, std::nullopt, false, snapshots, uses);
     }
 
-    std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
+    std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses, std::optional<std::uint32_t> storageMip = std::nullopt) {
         const auto viewKind = ViewKindOf(shape);
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
         const auto resource = Graphics::DecodeTextureResource(words);
@@ -832,6 +838,10 @@ struct VulkanDevice::State {
         view.pixelFormat = numeric ? NumericView(surface.texture.pixelFormat, *numeric) : surface.texture.pixelFormat;
         view.baseLevel = std::min(resource.baseLevel, info.mipLevels - 1u);
         view.levelCount = std::min(std::max(resource.lastLevel, view.baseLevel), info.mipLevels - 1u) - view.baseLevel + 1u;
+        if (storageMip) {
+            view.baseLevel = std::min(view.baseLevel + *storageMip, info.mipLevels - 1u);
+            view.levelCount = 1;
+        }
         if (viewKind == Metal::TextureKind::Tex3D || viewKind == Metal::TextureKind::Tex2DMsaa) {
             view.baseSlice = 0;
             view.sliceCount = 1;
@@ -917,6 +927,7 @@ struct VulkanDevice::State {
             descriptor.lodMinClamp = std::max(decoded.minLod, 0.0f);
             descriptor.lodMaxClamp = std::max(decoded.maxLod, descriptor.lodMinClamp);
         }
+        if (descriptor.minFilter == MTLSamplerMinMagFilterNearest && descriptor.magFilter == MTLSamplerMinMagFilterNearest) descriptor.maxAnisotropy = 1;
         if (point) {
             descriptor.minFilter = MTLSamplerMinMagFilterNearest;
             descriptor.magFilter = MTLSamplerMinMagFilterNearest;
