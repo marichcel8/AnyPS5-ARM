@@ -77,6 +77,8 @@ struct State {
     std::map<std::string, std::string> stageGlobals;
     bool validMask = false;
     std::uint32_t zeroClip = 0xffffffffu;
+    std::map<std::uint32_t, std::uint32_t> localFetches;
+    std::vector<std::string> prologue;
 };
 
 [[noreturn]] void Fail(const IrValue& inst, std::string_view reason);
@@ -118,6 +120,18 @@ void PrepareStage(State& state);
 std::string StageBuiltin(State& state, StageInputKind kind, std::uint32_t component);
 bool EmitStage(State& state, const IrValue& inst);
 std::string StageHeader(const State& state, const std::string& parameters);
+void DeclareVertexOutputs(State& state);
+std::string StageConstant(State& state, std::uint32_t id, std::uint32_t fallback);
+
+bool IsGeometry(IrShaderStage stage);
+void PrepareGeometry(State& state);
+std::string GeometryBuiltin(State& state, StageInputKind kind, std::uint32_t component);
+bool EmitGeometry(State& state, const IrValue& inst);
+std::string LocalAttribute(State& state, std::uint32_t location, std::uint32_t component);
+bool MeshAuxExport(State& state, const PositionExportComponent& output, const std::string& raw);
+void MeshPrimitive(State& state, const std::string& value);
+void CheckGeometry(const State& state);
+std::string GeometryProgram(State& state, const std::string& prelude, const std::string& declarations, const std::string& parameters);
 
 template <class Body>
 void ForEachHalf(const State& state, Body&& body) {
