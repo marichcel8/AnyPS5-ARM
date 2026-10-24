@@ -101,11 +101,11 @@ Phase RunPhase(MetalCompiler& compiler, const std::vector<Source>& sources, Comp
 }
 
 void Print(const char* name, const Phase& phase, const CompilerReport& report, int count) {
-    std::printf("%s: %d/%d ready in %.1f ms, max submit %.3f ms, max poll-loop gap %.3f ms | libraries %llu (%.1f ms total) pipelines %llu (%.1f ms total, %llu archive-fast) shards loaded %llu rejected %llu bytes %llu flushes %llu (%.1f ms)\n",
+    std::printf("%s: %d/%d ready in %.1f ms, max submit %.3f ms, max poll-loop gap %.3f ms | libraries %llu (%.1f ms total) pipelines %llu (%.1f ms total, %llu archive-fast) shards loaded %llu rejected %llu compacted %llu bytes %llu flushes %llu (%.1f ms)\n",
                 name, phase.ready, count, phase.totalMs, phase.submitMaxMs, phase.loopMaxMs,
                 static_cast<unsigned long long>(report.librariesBuilt), report.libraryNanos / 1.0e6,
                 static_cast<unsigned long long>(report.pipelinesBuilt), report.pipelineNanos / 1.0e6, static_cast<unsigned long long>(report.pipelinesFromArchive),
-                static_cast<unsigned long long>(report.archiveShardsLoaded), static_cast<unsigned long long>(report.archiveShardsRejected), static_cast<unsigned long long>(report.archiveBytes),
+                static_cast<unsigned long long>(report.archiveShardsLoaded), static_cast<unsigned long long>(report.archiveShardsRejected), static_cast<unsigned long long>(report.archiveShardsCompacted), static_cast<unsigned long long>(report.archiveBytes),
                 static_cast<unsigned long long>(report.flushes), report.flushNanos / 1.0e6);
 }
 

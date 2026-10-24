@@ -317,6 +317,36 @@ void TestCacheDirectory() {
     std::filesystem::remove_all(root);
 }
 
+void TestCompaction() {
+    const auto root = TempRoot("compact");
+    CompileCacheDirectory cache(root, CacheEnvironment{"25A1", "gpu", 40, 1, 1}, 1 << 20, 16);
+    const auto commit = [&](std::size_t bytes, const std::vector<std::uint64_t>& ids, bool sidecar) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        const auto partial = cache.NewShardPath();
+        Touch(partial, bytes);
+        Check(cache.CommitShard(partial), "shard commits");
+        const auto shard = cache.Directory() / partial.filename();
+        std::vector<CompileKey> keys;
+        for (const auto id : ids) keys.push_back(Key(id));
+        if (sidecar) Check(cache.WriteKeys(shard, keys), "keys are written");
+        return shard;
+    };
+    const auto unrelated = commit(10, {9}, true);
+    const auto noSidecar = commit(10, {}, false);
+    const auto subset = commit(10, {1, 2}, true);
+    const auto empty = commit(10, {}, true);
+    const auto partialCover = commit(10, {2, 3}, true);
+    const auto newest = commit(10, {1, 2, 3, 4}, true);
+    Check(cache.ReadKeys(newest).size() == 4 && cache.ReadKeys(newest)[3] == Key(4), "keys round trip");
+    Check(cache.ReadKeys(noSidecar).empty(), "a shard without a sidecar has no keys");
+    Check(cache.Compact() == 2, "shards whose keys are all covered by newer shards are removed");
+    Check(!std::filesystem::exists(subset) && !std::filesystem::exists(subset.string() + ".keys"), "a redundant shard and its keys are removed");
+    Check(!std::filesystem::exists(partialCover), "a shard covered by the newest one is removed");
+    Check(std::filesystem::exists(newest) && std::filesystem::exists(unrelated) && std::filesystem::exists(noSidecar) && std::filesystem::exists(empty), "the newest, unrelated and unlisted shards stay");
+    Check(cache.Compact() == 0, "compaction is idempotent");
+    std::filesystem::remove_all(root);
+}
+
 void TestJournal() {
     const auto root = TempRoot("journal");
     const auto file = root / "warm.txt";
@@ -362,6 +392,7 @@ int main() {
     TestBrokenWorker();
     TestShutdown();
     TestCacheDirectory();
+    TestCompaction();
     TestJournal();
     std::puts("shader compile service tests passed");
     return 0;
