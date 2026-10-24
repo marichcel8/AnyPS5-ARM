@@ -1,5 +1,6 @@
 #include "MslState.hpp"
 #include "BdaAbi.hpp"
+#include "SpirvBackend/SpirvBufferFormat.hpp"
 #include <bit>
 #include <string>
 
@@ -91,6 +92,52 @@ static inline uint aps5_half2(uint bits, uint other, bool multiply) {
     half2 a = as_type<half2>(bits);
     half2 b = as_type<half2>(other);
     return as_type<uint>(multiply ? a * b : a + b);
+}
+)";
+
+constexpr std::string_view ExactHalfText = R"(static inline uint aps5_f32_to_f16(uint bits) {
+    uint sign = (bits >> 16u) & 0x8000u;
+    uint magnitude = bits & 0x7fffffffu;
+    if (magnitude > 0x7f800000u) return sign | 0x7e00u | ((bits & 0x007fffffu) >> 13u);
+    if (magnitude >= 0x477ff000u) return sign | 0x7c00u;
+    if (magnitude <= 0x33000000u) return sign;
+    uint exponent = magnitude >> 23u;
+    uint mantissa = (magnitude & 0x7fffffu) | 0x800000u;
+    uint shift = exponent < 113u ? 126u - exponent : 13u;
+    uint rounded = exponent < 113u ? mantissa >> shift : ((exponent - 112u) << 10u) + ((mantissa >> 13u) & 0x3ffu);
+    uint rest = mantissa & ((1u << shift) - 1u);
+    uint halfway = 1u << (shift - 1u);
+    return sign | (rounded + (rest > halfway || (rest == halfway && (rounded & 1u) != 0u) ? 1u : 0u));
+}
+static inline uint aps5_f32_to_f16_rtz(uint bits) {
+    uint sign = (bits >> 16u) & 0x8000u;
+    uint magnitude = bits & 0x7fffffffu;
+    if (magnitude > 0x7f800000u) return aps5_f32_to_f16(bits);
+    if (magnitude == 0x7f800000u) return sign | 0x7c00u;
+    if (magnitude >= 0x47800000u) return sign | 0x7bffu;
+    if (magnitude < 0x33800000u) return sign;
+    uint exponent = magnitude >> 23u;
+    uint mantissa = (magnitude & 0x7fffffu) | 0x800000u;
+    return sign | (exponent < 113u ? mantissa >> (126u - exponent) : ((exponent - 112u) << 10u) | ((mantissa >> 13u) & 0x3ffu));
+}
+static inline float aps5_f16_to_f32(uint bits) {
+    uint sign = (bits & 0x8000u) << 16u;
+    uint exponent = (bits >> 10u) & 0x1fu;
+    uint mantissa = bits & 0x3ffu;
+    if (exponent == 31u) return as_type<float>(sign | 0x7f800000u | (mantissa << 13u));
+    if (exponent != 0u) return as_type<float>(sign | ((exponent + 112u) << 23u) | (mantissa << 13u));
+    if (mantissa == 0u) return as_type<float>(sign);
+    uint msb = 31u - clz(mantissa);
+    return as_type<float>(sign | ((msb + 103u) << 23u) | ((mantissa << (23u - msb)) & 0x7fffffu));
+}
+static inline uint aps5_half_op(uint a, uint b, bool multiply) {
+#pragma METAL fp math_mode(safe)
+    float x = aps5_f16_to_f32(a);
+    float y = aps5_f16_to_f32(b);
+    return aps5_f32_to_f16(as_type<uint>(multiply ? x * y : x + y));
+}
+static inline uint aps5_half2(uint bits, uint other, bool multiply) {
+    return aps5_half_op(bits & 0xffffu, other & 0xffffu, multiply) | (aps5_half_op(bits >> 16u, other >> 16u, multiply) << 16u);
 }
 )";
 
@@ -307,6 +354,221 @@ static inline device atomic_uint* aps5_vsharp_atomic(thread aps5_ctx& c, aps5_vs
     ulong address = 0ul;
     if (!aps5_bda_add(c, r.base, ulong(byte), false, pc, address)) return nullptr;
     return aps5_bda_atomic(c, address, $READ_WRITE, pc);
+}
+)";
+
+constexpr std::string_view FormatText = R"(static inline uint aps5_fmt_unorm(uint value, uint bits) {
+    if (value == 0u) return 0u;
+    uint msb = 31u - clz(value);
+    uint leading = bits - 1u - msb;
+    uint rotated = ((value << leading) | (value >> (bits - leading))) & ((1u << bits) - 1u);
+    uint pattern = rotated << (32u - bits);
+    for (uint shift = bits; shift < 32u; shift *= 2u) pattern |= pattern >> shift;
+    return ((msb + 126u - bits) << 23u) + (pattern >> 8u) + ((pattern >> 7u) & 1u);
+}
+static inline uint aps5_fmt_half(uint value) {
+    uint sign = (value & 0x8000u) << 16u;
+    uint exponent = (value >> 10u) & 0x1fu;
+    uint mantissa = value & 0x3ffu;
+    if (exponent == 31u) return sign | 0x7f800000u | (mantissa << 13u);
+    if (exponent != 0u) return sign | ((exponent + 112u) << 23u) | (mantissa << 13u);
+    if (mantissa == 0u) return sign;
+    uint msb = 31u - clz(mantissa);
+    return sign | ((msb + 103u) << 23u) | ((mantissa << (23u - msb)) & 0x7fffffu);
+}
+static inline uint aps5_fmt_ufloat(uint raw, uint bits) {
+    uint width = bits == 11u ? 6u : 5u;
+    uint mantissa = raw & ((1u << width) - 1u);
+    uint exponent = (raw >> width) & 0x1fu;
+    if (exponent == 31u) return 0x7f800000u | (mantissa << (23u - width));
+    if (exponent != 0u) return ((exponent + 112u) << 23u) | (mantissa << (23u - width));
+    if (mantissa == 0u) return 0u;
+    uint msb = 31u - clz(mantissa);
+    return ((msb + 113u - width) << 23u) | ((mantissa << (23u - msb)) & 0x7fffffu);
+}
+static inline uint aps5_fmt_decode(uint raw, uint type, uint bits) {
+    switch (type) {
+    case 1u:
+    case 2u: return raw;
+    case 3u: return aps5_fmt_unorm(raw, bits);
+    case 4u: {
+        bool negative = int(raw) < 0;
+        uint magnitude = min(negative ? 0u - raw : raw, (1u << (bits - 1u)) - 1u);
+        return (negative ? 0x80000000u : 0u) | aps5_fmt_unorm(magnitude, bits - 1u);
+    }
+    case 5u: return as_type<uint>(float(raw));
+    case 6u: return as_type<uint>(float(int(raw)));
+    case 7u: return bits == 32u ? raw : bits == 16u ? aps5_fmt_half(raw) : aps5_fmt_ufloat(raw, bits);
+    default: return 0u;
+    }
+}
+static inline uint aps5_fmt_norm16(uint value, uint maximum) {
+    if (value == 0u) return 0u;
+    uint first = 9u + (32u - clz(maximum)) - (31u - clz(value));
+    if ((value << first) < 1024u * maximum) first += 1u;
+    uint shift = min(first, 24u);
+    uint scaled = value << shift;
+    uint rounded = scaled / maximum + (scaled % maximum > (maximum >> 1u) ? 1u : 0u);
+    return ((25u - shift) << 10u) + rounded - 1024u;
+}
+static inline uint aps5_fmt_int16(uint value) {
+    if (value == 0u) return 0u;
+    uint msb = 31u - clz(value);
+    bool wide = msb > 10u;
+    uint right = wide ? msb - 10u : 0u;
+    uint quotient = (value << (wide ? 0u : 10u - msb)) >> right;
+    uint unit = 1u << right;
+    uint remainder = value & (unit - 1u);
+    uint halfway = unit >> 1u;
+    bool up = wide && (remainder > halfway || (remainder == halfway && (quotient & 1u) != 0u));
+    return min(((msb + 15u) << 10u) + quotient + (up ? 1u : 0u) - 1024u, 0x7bffu);
+}
+static inline uint aps5_fmt_small(uint bits, uint width, bool signedFormat) {
+    uint infinity = 0x1fu << width;
+    bool negative = (bits & 0x80000000u) != 0u;
+    uint exponent = (bits >> 23u) & 0xffu;
+    uint mantissa = bits & 0x7fffffu;
+    uint top = mantissa >> (23u - width);
+    int biased = int(exponent) - 112;
+    uint magnitude = 0u;
+    if (exponent == 0xffu) magnitude = infinity | (top == 0u && mantissa != 0u ? 1u : top);
+    else if (biased >= 31) magnitude = infinity - 1u;
+    else if (biased >= 1) magnitude = (uint(biased) << width) | top;
+    else if (biased >= -int(width)) magnitude = (mantissa | 0x800000u) >> min(24u - width - uint(biased), 31u);
+    if (!signedFormat) return negative && !(exponent == 0xffu && mantissa != 0u) ? 0u : magnitude;
+    return (negative ? 1u << (5u + width) : 0u) | magnitude;
+}
+static inline uint aps5_fmt_norm_store(uint bits, uint maximum, bool signedFormat) {
+    uint magnitude = bits & 0x7fffffffu;
+    uint exponent = (bits >> 23u) & 0xffu;
+    bool denormal = exponent == 0u;
+    uint mantissa = (bits & 0x7fffffu) | (denormal ? 0u : 0x800000u);
+    uint extra = (denormal ? 149u : 150u - exponent) - 24u;
+    uint low = mantissa * maximum;
+    uint high = mulhi(mantissa, maximum);
+    uint fraction = low & 0xffffffu;
+    uint fixed = (((low >> 24u) | (high << 8u)) << 16u) | (fraction >> 8u);
+    bool sticky = (fraction & 0xffu) != 0u;
+    uint safe = min(extra, 16u);
+    uint quotient = (fixed >> 16u) >> safe;
+    uint remainder = fixed - ((quotient << 16u) << safe);
+    uint halfway = (1u << 15u) << safe;
+    bool up = remainder > halfway || (remainder == halfway && (sticky || (quotient & 1u) != 0u));
+    uint result = extra > 16u ? 0u : quotient + (up ? 1u : 0u);
+    if (magnitude >= 0x3f800000u && magnitude <= 0x7f800000u) result = maximum;
+    bool positive = signedFormat ? magnitude != 0u && magnitude <= 0x7f800000u : int(bits) > 0 && bits <= 0x7f800000u;
+    if (!positive) result = 0u;
+    return signedFormat && (bits & 0x80000000u) != 0u ? 0u - result : result;
+}
+static inline uint aps5_fmt_decode16(uint raw, uint type, uint bits) {
+    if (type != 7u && bits > 16u) {
+        if (type == 1u) return min(raw, 0xffffu);
+        if (type == 2u) return uint(clamp(int(raw), -32768, 32767)) & 0xffffu;
+        return 0u;
+    }
+    bool negative = int(raw) < 0;
+    uint magnitude = negative ? 0u - raw : raw;
+    uint sign = negative ? 0x8000u : 0u;
+    switch (type) {
+    case 1u:
+    case 2u: return raw & 0xffffu;
+    case 3u: return aps5_fmt_norm16(raw, (1u << bits) - 1u);
+    case 4u: return sign | aps5_fmt_norm16(min(magnitude, (1u << (bits - 1u)) - 1u), (1u << (bits - 1u)) - 1u);
+    case 5u: return aps5_fmt_int16(raw);
+    case 6u: return sign | aps5_fmt_int16(magnitude);
+    case 7u: return bits == 16u ? raw & 0xffffu : aps5_fmt_small(aps5_fmt_decode(raw, 7u, bits), 10u, true);
+    default: return 0u;
+    }
+}
+static inline uint aps5_fmt_encode(uint data, uint type, uint bits) {
+    uint mask = bits >= 32u ? 0xffffffffu : (1u << bits) - 1u;
+    switch (type) {
+    case 1u: return bits >= 32u ? data : min(data, mask);
+    case 2u: return bits >= 32u ? data : uint(clamp(int(data), int(~(mask >> 1u)), int(mask >> 1u))) & mask;
+    case 3u:
+    case 5u: return aps5_fmt_norm_store(data, mask, false);
+    case 4u:
+    case 6u: return aps5_fmt_norm_store(data, mask >> 1u, true) & mask;
+    case 7u: return bits == 32u ? data : bits == 16u ? aps5_fmt_small(data, 10u, true) : aps5_fmt_small(data, bits - 5u, false);
+    default: return 0u;
+    }
+}
+static inline uint aps5_fmt_encode16(uint value, uint type, uint bits) {
+    if (type == 1u) return aps5_fmt_encode(value, type, bits);
+    if (type == 2u) return aps5_fmt_encode(uint(int(value << 16u) >> 16u), type, bits);
+    if (type == 7u && bits == 16u) return value;
+    return aps5_fmt_encode(aps5_fmt_half(value), type, bits);
+}
+$TABLE
+static inline uint3 aps5_fmt_info(uint format) {
+    if (format == 0u || format > $FORMATS) return uint3(0u);
+    return uint3(aps5_fmt_table[format * 3u], aps5_fmt_table[format * 3u + 1u], aps5_fmt_table[format * 3u + 2u]);
+}
+)";
+
+constexpr std::string_view FormatAccessText = R"(static inline uint4 aps5_fmt_loadNAME(thread aps5_ctx& c, uint element, aps5_vsharp r, uint offset, uint soffset, uint3 info, uint sel, uint outputs, bool d16, bool check, uint pc) {
+    uint count = info.x & 7u;
+    if (count == 0u) {
+        BAD;
+        return uint4(0u);
+    }
+    bool packed = (info.x & 8u) != 0u;
+    uint type = extract_bits(info.x, 4u, 4u);
+    uint required = 0u;
+    for (uint output = 0u; output < outputs; ++output) {
+        uint source = extract_bits(sel, output * 3u, 3u);
+        if (check && (source == 2u || source == 3u)) BAD;
+        if (source >= 4u) required |= 1u << ((source - 4u) % count);
+    }
+    uint bytes[4] = {0u, 0u, 0u, 0u};
+    bool inBounds = true;
+    for (uint part = 0u; part < count; ++part) {
+        if ((required & (1u << part)) == 0u) continue;
+        uint width = packed ? 4u : extract_bits(info.x, 8u + part * 6u, 6u) >> 3u;
+        inBounds = inBounds && aps5_vsharp_byte(r, offset + extract_bits(info.y, part * 8u, 8u), soffset, width, bytes[part]);
+    }
+    uint values[4] = {0u, 0u, 0u, 0u};
+    for (uint part = 0u; inBounds && part < count; ++part) {
+        if ((required & (1u << part)) == 0u) continue;
+        uint bits = extract_bits(info.x, 8u + part * 6u, 6u);
+        uint raw = READ(bytes[part], packed ? 4u : bits >> 3u);
+        if (bits != 32u) {
+            uint shift = packed ? extract_bits(info.z, part * 8u, 8u) : 0u;
+            raw = type == 2u || type == 4u || type == 6u ? uint(extract_bits(int(raw), shift, bits)) : extract_bits(raw, shift, bits);
+        }
+        values[part] = d16 ? aps5_fmt_decode16(raw, type, bits) : aps5_fmt_decode(raw, type, bits);
+    }
+    uint one = type == 1u || type == 2u ? 1u : d16 ? 0x3c00u : 0x3f800000u;
+    uint4 result = uint4(0u);
+    for (uint output = 0u; output < outputs; ++output) {
+        uint source = extract_bits(sel, output * 3u, 3u);
+        result[output] = source == 0u ? 0u : source == 1u ? one : values[(source - 4u) % count];
+    }
+    return result;
+}
+static inline void aps5_fmt_storeNAME(thread aps5_ctx& c, uint element, aps5_vsharp r, uint offset, uint soffset, uint3 info, uint components, uint4 data, bool d16, uint pc) {
+    uint count = info.x & 7u;
+    if (count == 0u) {
+        BAD;
+        return;
+    }
+    bool packed = (info.x & 8u) != 0u;
+    uint type = extract_bits(info.x, 4u, 4u);
+    uint bytes[4] = {0u, 0u, 0u, 0u};
+    bool inBounds = true;
+    for (uint part = 0u; part < count; ++part) {
+        uint width = packed ? 4u : extract_bits(info.x, 8u + part * 6u, 6u) >> 3u;
+        inBounds = inBounds && aps5_vsharp_byte(r, offset + extract_bits(info.y, part * 8u, 8u), soffset, width, bytes[part]);
+    }
+    if (!inBounds) return;
+    uint word = 0u;
+    for (uint part = 0u; part < count; ++part) {
+        uint bits = extract_bits(info.x, 8u + part * 6u, 6u);
+        uint encoded = part >= components ? 0u : d16 ? aps5_fmt_encode16(data[part], type, bits) : aps5_fmt_encode(data[part], type, bits);
+        if (packed) word |= (encoded & ((1u << bits) - 1u)) << extract_bits(info.z, part * 8u, 8u);
+        else WRITE(bytes[part], bits >> 3u, encoded);
+    }
+    if (packed) WRITE(bytes[0], 4u, word);
 }
 )";
 
@@ -579,6 +841,96 @@ static inline uint aps5_dot2_f32_f16(uint a, uint b, uint c) {
 }
 )";
 
+constexpr std::string_view StrictTrigText = R"(static inline uint aps5_s_tiny(uint a, uint b, uint r) {
+#pragma METAL fp math_mode(safe)
+    uint ea = a & 0x7f800000u;
+    uint eb = b & 0x7f800000u;
+    if (ea == 0u || eb == 0u || ea == 0x7f800000u || eb == 0x7f800000u) return r;
+    uint scaled = as_type<uint>((as_type<float>(a) * as_type<float>(0x5f800000u)) * as_type<float>(b));
+    uint magnitude = scaled & 0x7fffffffu;
+    return magnitude >= 0x20800000u ? (scaled & 0x80000000u) | (magnitude - 0x20000000u) : r;
+}
+static inline uint aps5_s_tiny_fma(uint a, uint b, uint c, uint r) {
+#pragma METAL fp math_mode(safe)
+    if ((c & 0x7fffffffu) == 0u) return aps5_s_tiny(a, b, r);
+    if ((a & 0x7fffffffu) >= 0x5f800000u || (b & 0x7f800000u) == 0x7f800000u || (c & 0x7fffffffu) >= 0x5f800000u) return r;
+    float scale = as_type<float>(0x5f800000u);
+    uint scaled = as_type<uint>(fma(as_type<float>(a) * scale, as_type<float>(b), as_type<float>(c) * scale));
+    uint magnitude = scaled & 0x7fffffffu;
+    return magnitude >= 0x20800000u && magnitude < 0x7f800000u ? (scaled & 0x80000000u) | (magnitude - 0x20000000u) : r;
+}
+static inline float aps5_s_sin_series(float t) {
+#pragma METAL fp math_mode(safe)
+    float square = t * t;
+    float p = as_type<float>(0xc17183a8u);
+    p = fma(p, square, as_type<float>(0x42283c1au));
+    p = fma(p, square, as_type<float>(0xc2996966u));
+    p = fma(p, square, as_type<float>(0x42a335e3u));
+    p = fma(p, square, as_type<float>(0xc2255de7u));
+    p = fma(p, square, as_type<float>(0x40c90fdbu));
+    return t * p;
+}
+static inline float aps5_s_cos_series(float t) {
+#pragma METAL fp math_mode(safe)
+    float square = t * t;
+    float p = as_type<float>(0x40fce9c5u);
+    p = fma(p, square, as_type<float>(0xc1d368f9u));
+    p = fma(p, square, as_type<float>(0x4270fa83u));
+    p = fma(p, square, as_type<float>(0xc2aae9e4u));
+    p = fma(p, square, as_type<float>(0x4281e0f8u));
+    p = fma(p, square, as_type<float>(0xc19de9e6u));
+    return fma(p, square, 1.0f);
+}
+static inline float aps5_s_far(float value, float series) {
+    uint v = as_type<uint>(value);
+    uint s = as_type<uint>(series);
+    return min(v - s, s - v) > 4u ? series : value;
+}
+static inline float aps5_s_near(float value, float distance, float linear) {
+#pragma METAL fp math_mode(safe)
+    return (as_type<uint>(distance) & 0x7fffffffu) < 0x39800000u ? distance * linear : value;
+}
+static inline uint aps5_s_sin_turns(uint a) {
+#pragma METAL fp math_mode(safe)
+    float x = as_type<float>(a);
+    float cycle = (a & 0x7fffffffu) == 0u ? x : x - rint(x);
+    float absolute = abs(cycle);
+    bool nearHalf = absolute > 0.25f;
+    float distance = nearHalf ? 0.5f - absolute : absolute;
+    float series = distance > 0.125f ? aps5_s_cos_series(0.25f - distance) : aps5_s_sin_series(distance);
+    float value = aps5_s_far(sin(absolute * as_type<float>(0x40c90fdbu)), series);
+    float result = aps5_s_near(value, distance, as_type<float>(nearHalf ? 0x40c90fdbu : 0x40c90fd5u));
+    return as_type<uint>(result) | (as_type<uint>(cycle) & 0x80000000u);
+}
+static inline uint aps5_s_cos_turns(uint a) {
+#pragma METAL fp math_mode(safe)
+    float x = as_type<float>(a);
+    float absolute = abs(x - rint(x));
+    float distance = 0.25f - absolute;
+    float series = absolute > 0.375f ? -aps5_s_cos_series(0.5f - absolute) : absolute > 0.125f ? aps5_s_sin_series(distance) : aps5_s_cos_series(absolute);
+    float value = aps5_s_far(cos(absolute * as_type<float>(0x40c90fdbu)), series);
+    return as_type<uint>(aps5_s_near(value, distance, as_type<float>(0x40c90fdbu)));
+}
+)";
+
+std::string FormatTable() {
+    constexpr auto count = static_cast<std::uint32_t>(IrBufferFormat::Format32_32_32_32Float);
+    std::string text = "constant uint aps5_fmt_table[" + std::to_string(3u * (count + 1u)) + "] = {0u, 0u, 0u";
+    for (std::uint32_t index = 1; index <= count; ++index) {
+        const auto info = GetFormatInfo(static_cast<IrBufferFormat>(index));
+        std::uint32_t layout = info.componentCount | (info.packedBitfield ? 8u : 0u) | (static_cast<std::uint32_t>(info.type) << 4u);
+        std::uint32_t bytes = 0;
+        std::uint32_t bits = 0;
+        for (std::uint32_t component = 0; component < info.componentCount; ++component) {
+            layout |= info.componentBits[component] << (8u + component * 6u);
+            bytes |= GetFormatComponentByteOffset(info, component) << (component * 8u);
+            bits |= info.componentBitOffset[component] << (component * 8u);
+        }
+        text += ", " + U32(layout) + ", " + U32(bytes) + ", " + U32(bits);
+    }
+    return Replace(std::string(FormatText), "$TABLE", text + "};") ;
+}
+
 std::string PreciseText(bool strict) {
     const std::string prefix = strict ? "aps5_s_" : "aps5_i_";
     const std::string pragma = strict ? "#pragma METAL fp math_mode(safe)\n" : "#pragma METAL fp math_mode(relaxed)\n";
@@ -597,14 +949,26 @@ std::string PreciseText(bool strict) {
     const auto test = [&](std::string_view name, std::string_view expression) { define("bool", name, 2u, "    return " + std::string(expression) + ";\n"); };
     value("add", 2u, "x + y");
     value("sub", 2u, "x - y");
-    value("mul", 2u, "x * y");
-    define("uint", "mad", 3u, "    float product = x * y;\n    return as_type<uint>(product + z);\n");
-    value("fma", 3u, "fma(x, y, z)");
+    if (strict) {
+        text += StrictTrigText;
+        define("uint", "mul", 2u, "    uint r = as_type<uint>(x * y);\n    return (r & 0x7fffffffu) == 0u ? aps5_s_tiny(a, b, r) : r;\n");
+        define("uint", "mad", 3u, "    uint product = as_type<uint>(x * y);\n    if ((product & 0x7fffffffu) == 0u) product = aps5_s_tiny(a, b, product);\n    return as_type<uint>(as_type<float>(product) + z);\n");
+        define("uint", "fma", 3u, "    uint r = as_type<uint>(fma(x, y, z));\n    return (r & 0x7fffffffu) == 0u ? aps5_s_tiny_fma(a, b, c, r) : r;\n");
+    } else {
+        value("mul", 2u, "x * y");
+        define("uint", "mad", 3u, "    float product = x * y;\n    return as_type<uint>(product + z);\n");
+        value("fma", 3u, "fma(x, y, z)");
+    }
     value("recip", 1u, "1.0f / x");
     value("rsqrt", 1u, "rsqrt(x)");
     value("sqrt", 1u, "sqrt(x)");
-    value("sin", 1u, "sinpi(2.0f * x)");
-    value("cos", 1u, "cospi(2.0f * x)");
+    if (strict) {
+        define("uint", "sin", 1u, "    return aps5_s_sin_turns(a);\n");
+        define("uint", "cos", 1u, "    return aps5_s_cos_turns(a);\n");
+    } else {
+        value("sin", 1u, "sinpi(2.0f * x)");
+        value("cos", 1u, "cospi(2.0f * x)");
+    }
     value("exp2", 1u, "exp2(x)");
     value("log2", 1u, "log2(x)");
     value("rint", 1u, "rint(x)");
@@ -612,18 +976,18 @@ std::string PreciseText(bool strict) {
     value("ceil", 1u, "ceil(x)");
     value("trunc", 1u, "trunc(x)");
     define("uint", "fract", 1u, "    float magnitude = abs(x);\n    float part = magnitude - floor(magnitude);\n    return as_type<uint>(x < 0.0f && part != 0.0f ? 1.0f - part : part);\n");
-    test("eq", "x == y");
-    test("one", "x < y || x > y");
-    test("lt", "x < y");
-    test("gt", "x > y");
-    test("le", "x <= y");
-    test("ge", "x >= y");
-    test("ueq", "!(x < y || x > y)");
-    test("une", "!(x == y)");
-    test("ult", "!(x >= y)");
-    test("ugt", "!(x <= y)");
-    test("ule", "!(x > y)");
-    test("uge", "!(x < y)");
+    test("eq", "!aps5_nan(a) && !aps5_nan(b) && x == y");
+    test("one", "!aps5_nan(a) && !aps5_nan(b) && x != y");
+    test("lt", "!aps5_nan(a) && !aps5_nan(b) && x < y");
+    test("gt", "!aps5_nan(a) && !aps5_nan(b) && x > y");
+    test("le", "!aps5_nan(a) && !aps5_nan(b) && x <= y");
+    test("ge", "!aps5_nan(a) && !aps5_nan(b) && x >= y");
+    test("ueq", "aps5_nan(a) || aps5_nan(b) || x == y");
+    test("une", "aps5_nan(a) || aps5_nan(b) || x != y");
+    test("ult", "aps5_nan(a) || aps5_nan(b) || x < y");
+    test("ugt", "aps5_nan(a) || aps5_nan(b) || x > y");
+    test("ule", "aps5_nan(a) || aps5_nan(b) || x <= y");
+    test("uge", "aps5_nan(a) || aps5_nan(b) || x >= y");
     define("uint", "min", 2u, "    if (aps5_nan(b)) return a;\n    if (((a | b) & 0x7fffffffu) == 0u) return a | b;\n    return x < y ? a : b;\n");
     define("uint", "max", 2u, "    if (aps5_nan(b)) return a;\n    if (((a | b) & 0x7fffffffu) == 0u) return a & b;\n    return x >= y ? a : b;\n");
     text += "static inline uint " + prefix + "min3(uint a, uint b, uint c) { return " + prefix + "min(" + prefix + "min(a, b), c); }\n";
@@ -652,7 +1016,7 @@ std::string Prelude(const State& state) {
         text += '\n';
     }
     if (has(Dot2)) text += Dot2Text;
-    if (has(Half)) text += HalfText;
+    if (has(Half)) text += state.target.relaxedFloat ? HalfText : ExactHalfText;
     if (has(Wave)) text += WaveText;
     if (has(Permute)) text += PermuteText;
     if (has(Fault | Bda | GuestBuffers)) text += FaultText;
@@ -692,6 +1056,20 @@ std::string Prelude(const State& state) {
         if (has(Bda)) {
             auto gpu = Replace(std::string(GpuBuffersText), "$INVALID_DESCRIPTOR", Reason(BdaAbi::FaultReason::InvalidDescriptor));
             text += Replace(gpu, "$READ_WRITE", U32(BdaAbi::Read | BdaAbi::Write));
+        }
+        if (has(Formatted)) {
+            text += Replace(FormatTable(), "$FORMATS", U32(static_cast<std::uint32_t>(IrBufferFormat::Format32_32_32_32Float)));
+            if (has(GuestBuffers)) {
+                auto direct = Replace(Replace(std::string(FormatAccessText), "NAME", ""), "BAD", "{}");
+                direct = Replace(direct, "READ(", "aps5_buffer_load(c, element, r, ");
+                text += Replace(direct, "WRITE(", "aps5_buffer_store(c, element, r, ");
+            }
+            if (has(Bda)) {
+                auto gpu = Replace(Replace(std::string(FormatAccessText), "NAME", "_gpu"), "BAD", "aps5_fault(c, " + Reason(BdaAbi::FaultReason::InvalidDescriptor) + ", r.base, 0u, pc)");
+                gpu = Replace(gpu, "READ(bytes[part], packed ? 4u : bits >> 3u)", "aps5_vsharp_load(c, r, bytes[part], packed ? 4u : bits >> 3u, pc)");
+                gpu = Replace(gpu, "WRITE(bytes[part], bits >> 3u, encoded)", "aps5_vsharp_store(c, r, bytes[part], bits >> 3u, encoded, pc)");
+                text += Replace(gpu, "WRITE(bytes[0], 4u, word)", "aps5_vsharp_store(c, r, bytes[0], 4u, word, pc)");
+            }
         }
     }
     if (has(Lds)) {

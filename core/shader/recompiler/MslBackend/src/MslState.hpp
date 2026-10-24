@@ -32,6 +32,7 @@ enum Feature : std::uint32_t {
     FloatClass = 1u << 16u,
     Descriptors = 1u << 17u,
     Wave = 1u << 18u,
+    Formatted = 1u << 19u,
     Permute = 1u << 20u,
     Images = 1u << 21u,
     Samplers = 1u << 22u,
