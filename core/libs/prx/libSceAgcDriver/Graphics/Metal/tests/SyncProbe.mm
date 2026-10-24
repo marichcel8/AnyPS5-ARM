@@ -57,7 +57,7 @@ std::uint32_t Heavy(std::uint32_t x) {
 }
 
 std::uint32_t Load(const void* address) {
-    return std::atomic_ref<const std::uint32_t>(*static_cast<const std::uint32_t*>(address)).load(std::memory_order_relaxed);
+    return std::atomic_ref<std::uint32_t>(*static_cast<std::uint32_t*>(const_cast<void*>(address))).load(std::memory_order_relaxed);
 }
 
 struct Probe {
@@ -76,7 +76,7 @@ struct Probe {
         return resolved.deviceAddress;
     }
 
-    void EncodeHeavy(Recording& recording, std::uint64_t address, std::uint32_t count) {
+    void EncodeHeavy(Recording& recording, std::uint64_t address, std::uint32_t count, bool producerBarrier = false) {
         NativeBuffer args = device.NewSharedBuffer(sizeof(HostArgs), "probe args");
         *static_cast<HostArgs*>(args.contents) = {address, count, HeavyRounds};
         id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)recording.commands;
@@ -85,6 +85,7 @@ struct Probe {
         [table setAddress:args.gpuAddress atIndex:0];
         [encoder setArgumentTable:table];
         [encoder dispatchThreads:MTLSizeMake(count, 1, 1) threadsPerThreadgroup:MTLSizeMake(64, 1, 1)];
+        if (producerBarrier) [encoder barrierAfterStages:MTLStageDispatch beforeQueueStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         [encoder endEncoding];
         device.ReleaseBuffer(args);
     }
@@ -129,30 +130,47 @@ void Outcomes(Probe& probe) {
     Check(!probe.sync.HasQueuedLabels(QueueKind::Graphics), "no outcome left a queued label behind");
 }
 
-void Ordering(Probe& probe) {
+std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, double* worst) {
     const std::uint32_t count = 4 * 1024 * 1024;
     auto* data = reinterpret_cast<std::uint32_t*>(probe.region + 4096);
     auto* label = reinterpret_cast<std::uint32_t*>(probe.region + 4096 + count * 4 + 64);
     const auto dataDevice = probe.DeviceAddress(data, count * 4ull);
     const auto labelAddress = reinterpret_cast<std::uint64_t>(label);
-    double worst = 0;
+    std::uint32_t violations = 0;
     for (std::uint32_t round = 1; round <= 12; ++round) {
         for (std::uint32_t index = 0; index < count; ++index) data[index] = index ^ round;
         *label = 0;
         auto recording = probe.sync.Begin(QueueKind::Compute, "ordering");
-        probe.EncodeHeavy(recording, dataDevice, count);
+        probe.EncodeHeavy(recording, dataDevice, count, producerBarrier);
         const std::uint32_t mark = 0xc0de0000u + round;
         Check(probe.sync.WriteLabel(QueueKind::Compute, labelAddress, Bytes(&mark, 4), round, true) == LabelOutcome::Queued, "the ordering label is queued");
         Check(probe.sync.EncodeLabels(recording) == 1, "the ordering label is encoded");
         const auto begin = Clock::now();
         probe.sync.Submit(&recording, 1);
         while (Load(label) != mark) std::this_thread::yield();
-        worst = std::max(worst, Microseconds(begin));
-        for (std::uint32_t index = 0; index < count; index += 997) Check(data[index] == Heavy(index ^ round), "the label never lands before earlier work");
-        Check(data[count - 1] == Heavy((count - 1) ^ round), "the last element is complete when the label is visible");
+        *worst = std::max(*worst, Microseconds(begin));
+        std::uint32_t pending = 0, wrong = 0, first = count;
+        for (std::uint32_t index = 0; index < count; index += 61) {
+            const auto value = Load(&data[index]);
+            if (value == Heavy(index ^ round)) continue;
+            ++(value == (index ^ round) ? pending : wrong);
+            first = std::min(first, index);
+        }
+        if (pending + wrong != 0) {
+            ++violations;
+            std::printf("sync.ordering violation producer_barrier=%d round=%u unprocessed=%u wrong=%u first_index=%u\n", producerBarrier ? 1 : 0, round, pending, wrong, first);
+        }
+        probe.device.WaitIdle(10000);
     }
-    probe.device.WaitIdle(10000);
-    std::printf("sync.ordering ok rounds=12 worst_us=%.1f\n", worst);
+    return violations;
+}
+
+void Ordering(Probe& probe) {
+    double worst = 0;
+    const auto queueOnly = OrderingRun(probe, false, &worst);
+    const auto withProducer = OrderingRun(probe, true, &worst);
+    std::printf("sync.ordering queue_barrier_violations=%u producer_barrier_violations=%u worst_us=%.1f\n", queueOnly, withProducer, worst);
+    Check(queueOnly == 0, "the label never lands before earlier work");
 }
 
 void SameAddress(Probe& probe) {
