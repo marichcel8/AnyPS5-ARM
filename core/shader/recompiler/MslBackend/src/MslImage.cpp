@@ -465,6 +465,8 @@ void EmitAtomic(Access& access, const std::string& texture, const std::string& r
     const auto numeric = access.image.numericClass;
     if (access.image.resourceClass != ImageResourceClass::Storage || (numeric != IrTextureNumericClass::Uint && numeric != IrTextureNumericClass::Sint && !kind.wide) || shape.multisampled || access.image.dimension == RdnaImageDimension::Dim3D) throw MslUnsupported("MSL backend: image atomics need a single-sample 1D or 2D unsigned or signed integer storage image");
     const bool wide = kind.wide;
+    if (wide && !kind.native) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(opcode)) + " is not emitted (a Metal ulong texture only has atomic_min and atomic_max)");
+    if (wide && access.inst.HasUses()) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(opcode)) + " returns the old value, which Metal's ulong texture atomic_min and atomic_max do not");
     if (wide) state.features |= Atomic64;
     if (!kind.native) state.features |= UpdateTable;
     Open(state, "{");
@@ -486,7 +488,6 @@ void EmitAtomic(Access& access, const std::string& texture, const std::string& r
     const auto current = Temp(state);
     Line(state, "atomic_thread_fence(mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);");
     if (kind.native && wide) {
-        if (access.inst.HasUses()) Line(state, result + " = " + view + ".atomic_load(" + position + ").x;");
         Line(state, view + "." + kind.method + "(" + position + ", " + vec(value) + ");");
     } else if (kind.native) {
         Line(state, result + " = " + (kind.scalar == "int" ? "uint(" : "(") + view + "." + kind.method + "(" + position + ", " + vec(value) + ").x);");

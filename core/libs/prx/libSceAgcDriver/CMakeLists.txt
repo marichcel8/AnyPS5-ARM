@@ -804,6 +804,13 @@ if(APPLE)
 endif()
 
 if(APPLE)
+    add_test_executable(agc_msl_atomic64_probe_metal EXCLUDE_FROM_ALL tests/MslAtomic64ProbeMetal.mm)
+    target_link_libraries(agc_msl_atomic64_probe_metal PRIVATE "-framework Metal" "-framework Foundation")
+    target_compile_options(agc_msl_atomic64_probe_metal PRIVATE -fobjc-arc)
+    set_target_properties(agc_msl_atomic64_probe_metal PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)
+endif()
+
+if(APPLE)
     add_test_executable(agc_msl_compute_metal_tests EXCLUDE_FROM_ALL tests/MslComputeMetal.mm)
     target_link_libraries(agc_msl_compute_metal_tests PRIVATE shader_recompiler_agc_driver libc "-framework Metal" "-framework Foundation")
     target_compile_options(agc_msl_compute_metal_tests PRIVATE -fobjc-arc)
