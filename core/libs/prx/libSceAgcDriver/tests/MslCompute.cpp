@@ -13,14 +13,14 @@ void Require(bool condition, const std::string& message) {
 }
 
 void CheckProgram(const MslComputePrograms::Program& program, std::uint64_t address, std::uint32_t waveSize) {
-    const auto userData = MslComputePrograms::UserData();
+    const auto userData = MslComputePrograms::UserData(program.threads);
     const auto result = Recompile(MslComputePrograms::Request(program, address, userData, waveSize));
     const auto source = std::string(result.msl.Source());
     const auto name = std::string(program.name) + " (wave" + std::to_string(waveSize) + ")";
     Require(result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
     Require(result.spirv.empty(), name + ": an MSL artifact also carries SPIR-V");
     Require(source.find("kernel void " + std::string(MslEntryPoint) + "(") != std::string::npos, name + ": the source has no " + std::string(MslEntryPoint) + " kernel");
-    Require(source.find("[[max_total_threads_per_threadgroup(" + std::to_string(MslComputePrograms::HostThreads(waveSize)) + ")]]") != std::string::npos, name + ": the kernel does not declare its threadgroup size");
+    Require(source.find("[[max_total_threads_per_threadgroup(" + std::to_string(MslComputePrograms::HostThreads(waveSize, program.threads)) + ")]]") != std::string::npos, name + ": the kernel does not declare its threadgroup size");
     Require(source.find(program.marker) != std::string::npos, name + ": the source lacks " + std::string(program.marker));
     Require(source.find("#pragma") == std::string::npos, name + ": the source carries a pragma");
     if (!program.bda) return;
