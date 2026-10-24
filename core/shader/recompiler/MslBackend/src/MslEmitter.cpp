@@ -326,7 +326,7 @@ void EmitInstruction(State& state, const IrValue& inst) {
     default:
         break;
     }
-    if (EmitAlu(state, inst) || EmitMemory(state, inst)) return;
+    if (EmitWave(state, inst) || EmitAlu(state, inst) || EmitMemory(state, inst)) return;
     Fail(inst, "has no MSL emitter");
 }
 
@@ -335,15 +335,19 @@ void EmitInstruction(State& state, const IrValue& inst) {
 std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInfo& inputInfo, const CompiledBindingLayout& bindings, const MslTarget& target) const {
     using namespace Msl;
     if (program.Resources().stage != IrShaderStage::Compute) throw MslUnsupported("MSL backend: only compute programs are emitted (graphics stages are section S6)");
-    if (program.WaveSize() != 32u || target.simdgroupSize != 32u) throw MslUnsupported("MSL backend: only wave32 programs on 32-wide SIMD-groups are emitted (wave64 is section S4)");
+    if (target.simdgroupSize != 32u || (program.WaveSize() != 32u && program.WaveSize() != 64u)) throw MslUnsupported("MSL backend: only wave32 and wave64 programs on 32-wide SIMD-groups are emitted");
     if (program.Info().sharedMemoryBytes != 0u) throw MslUnsupported("MSL backend: LDS in device memory is not emitted (section S9)");
     State state{program, inputInfo, bindings.layout, target};
     const ShaderWorkgroupInputInfo* workgroup = inputInfo.compute;
+    state.spanned = program.WaveSize() == 64u;
+    if (state.spanned && (workgroup == nullptr || std::max(workgroup->threadsNum[0], 1u) * std::max(workgroup->threadsNum[1], 1u) * std::max(workgroup->threadsNum[2], 1u) != 64u)) {
+        throw MslUnsupported("MSL backend: wave64 programs are emitted only for 64-thread threadgroups, where one wave is two SIMD-groups (other sizes need two guest lanes per thread, section S4b)");
+    }
     state.ldsDwords = workgroup != nullptr ? workgroup->ldsSizeDwords : 0u;
     state.scratchDwords = program.Info().scratchDwords;
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
-    state.stopAllowed = state.waveLds == 0u && !HasBarrier(program);
+    state.stopAllowed = state.waveLds == 0u && !HasBarrier(program) && !state.spanned;
     Hoister{state}.Run();
     EmitFlow(state);
 
@@ -356,6 +360,10 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if ((state.features & (Bda | Fault | GuestBuffers)) != 0u) {
         const auto pointer = [&](std::uint32_t feature, std::string_view name) { return (state.features & feature) != 0u ? std::string(name) : std::string("nullptr"); };
         declare("aps5_ctx aps5_c = {" + pointer(Bda, "aps5_bda_table") + ", " + pointer(Fault, "aps5_fault_buffer") + ", " + pointer(GuestBuffers, "aps5_buffers") + ", " + U32(static_cast<std::uint32_t>(program.Resources().stage)) + ", false};");
+    }
+    if ((state.features & WaveExchange) != 0u) {
+        declare("threadgroup uint aps5_wave[132];");
+        declare("uint aps5_phase = 0u;");
     }
     if ((state.features & Lds) != 0u) declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
     if ((state.features & Scratch) != 0u) declare("uint aps5_scratch[" + std::to_string(std::max(state.scratchDwords, 1u)) + "];");

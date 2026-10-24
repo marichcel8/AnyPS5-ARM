@@ -66,8 +66,7 @@ std::string VSharp(State& state, const IrValue& inst, const MemoryInfo& mem) {
     for (std::size_t index = 0; index < 4u; ++index) words += Arg(state, *handle, index) + ", ";
     std::string element = "0u";
     if (mem.kind == ResourceKind::Buffer) {
-        state.features |= Lane;
-        element = Typed(state, inst, 1u) + " + (extract_bits(" + Arg(state, *handle, 3u) + ", 23u, 1u) != 0u ? aps5_lane : 0u)";
+        element = Typed(state, inst, 1u) + " + (extract_bits(" + Arg(state, *handle, 3u) + ", 23u, 1u) != 0u ? " + WaveLane(state) + " : 0u)";
     }
     state.features |= Descriptors | Fault;
     const auto name = Temp(state);

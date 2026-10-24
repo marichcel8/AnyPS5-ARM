@@ -255,28 +255,6 @@ bool EmitAlu(State& state, const IrValue& inst) {
     case IrOpcode::GetUserData: Out(state, inst, UserData(state, inst)); return true;
     case IrOpcode::GetShaderBase: Out(state, inst, "0ul"); return true;
     case IrOpcode::GetBuiltin: Out(state, inst, Builtin(state, inst)); return true;
-    case IrOpcode::LaneId: state.features |= Lane; Out(state, inst, "aps5_lane"); return true;
-    case IrOpcode::WriteLane: state.features |= Lane; Out(state, inst, "(" + a(1) + " & 31u) == aps5_lane ? " + a(0) + " : " + a(2)); return true;
-    case IrOpcode::Ballot: Out(state, inst, "uint4(uint(static_cast<simd_vote::vote_t>(simd_ballot(" + a(0) + "))), 0u, 0u, 0u)"); return true;
-    case IrOpcode::ReadLane: Out(state, inst, "simd_shuffle(" + a(0) + ", ushort(" + a(1) + " & 31u))"); return true;
-    case IrOpcode::ReadFirstLane: {
-        const IrValue* active = inst.Argument(1)->Resolve();
-        if (active->HasImmediate() && active->ImmediateBool()) {
-            Out(state, inst, "simd_broadcast_first(" + a(0) + ")");
-            return true;
-        }
-        const auto mask = Temp(state);
-        Line(state, "const uint " + mask + " = uint(static_cast<simd_vote::vote_t>(simd_ballot(" + a(1) + ")));");
-        Out(state, inst, mask + " != 0u ? simd_shuffle(" + a(0) + ", ushort(ctz(" + mask + "))) : simd_broadcast_first(" + a(0) + ")");
-        return true;
-    }
-    case IrOpcode::DppMoveU32:
-    case IrOpcode::DppUpdateU32:
-    case IrOpcode::Permlane16U32:
-    case IrOpcode::BpermuteU32:
-    case IrOpcode::PermuteU32:
-    case IrOpcode::SwizzleU32:
-        throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(inst.Opcode())) + " is not emitted (cross-lane permutes are section S4)");
     case IrOpcode::FPDot2F32F16:
         throw MslUnsupported("MSL backend: FPDot2F32F16 is not emitted (section S5)");
     case IrOpcode::ShaderClock:
