@@ -94,7 +94,11 @@ double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputeProg
     const auto* values = static_cast<const std::uint32_t*>(output.contents);
     for (std::uint32_t lane = 0; lane < MslComputePrograms::Threads; ++lane) {
         const auto expected = MslComputePrograms::Expected(program.expect, lane);
-        Require(values[lane] == expected, name + ": thread " + std::to_string(lane) + " wrote " + std::to_string(values[lane]) + ", expected " + std::to_string(expected));
+        if (values[lane] != expected) {
+            std::string words;
+            for (std::uint32_t word = 0; word < 8u; ++word) words += " " + std::to_string(values[word]);
+            Require(false, name + ": thread " + std::to_string(lane) + " wrote " + std::to_string(values[lane]) + ", expected " + std::to_string(expected) + "; first words:" + words);
+        }
     }
     if (program.bda) Require(faultWords[BdaAbi::WrittenCountWord] != 0u, name + ": the BDA store did not note its written page");
     return compileMs;

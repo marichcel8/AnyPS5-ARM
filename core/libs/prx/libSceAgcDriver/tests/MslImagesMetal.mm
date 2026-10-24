@@ -66,7 +66,7 @@ std::uint32_t BindingIndex(IrTextureNumericClass numeric, ImageResourceClass res
 
 id<MTLTexture> MakeTexture(id<MTLDevice> device, Kind kind) {
     const bool storage = kind == Kind::Store || IsAtomic(kind);
-    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kind == IsAtomic(kind) ? MTLPixelFormatR32Uint : MTLPixelFormatRGBA8Unorm width:MslImagePrograms::Width height:1 mipmapped:NO];
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:IsAtomic(kind) ? MTLPixelFormatR32Uint : MTLPixelFormatRGBA8Unorm width:MslImagePrograms::Width height:1 mipmapped:NO];
     descriptor.storageMode = MTLStorageModeShared;
     descriptor.usage = IsAtomic(kind) ? (MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageShaderAtomic) : storage ? (MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite) : MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
