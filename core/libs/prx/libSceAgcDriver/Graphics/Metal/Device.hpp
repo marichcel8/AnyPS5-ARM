@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestWindows.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -61,6 +62,10 @@ public:
     NativeBuffer NewSharedBuffer(std::uint64_t bytes, const char* label);
     NativeBuffer NewPrivateBuffer(std::uint64_t bytes, const char* label);
     void ReleaseBuffer(const NativeBuffer& buffer);
+
+    void AddResidentAllocation(void* allocation);
+    void RetireAllocation(void* allocation, std::function<void()> destroy);
+    void Defer(std::function<void()> destroy);
 
     void FlushResidency();
     std::uint64_t Submit(QueueKind queue, void* const* commandBuffers, std::size_t count);

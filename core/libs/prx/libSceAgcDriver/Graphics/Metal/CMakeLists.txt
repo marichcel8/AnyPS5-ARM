@@ -30,6 +30,41 @@ if(APPLE)
     endif()
 endif()
 
+get_filename_component(ANYPS5_METAL_REPO_DIR "${ANYPS5_METAL_LIBS_DIR}/../.." ABSOLUTE)
+get_filename_component(ANYPS5_METAL_GRAPHICS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+find_path(ANYPS5_METAL_VULKAN_HEADERS vulkan/vulkan.h HINTS "${ANYPS5_METAL_REPO_DIR}/3rdparty/Vulkan-Headers/include")
+
+if(ANYPS5_METAL_VULKAN_HEADERS)
+    file(GLOB ANYPS5_METAL_RECOMPILER_INCLUDES LIST_DIRECTORIES true "${ANYPS5_METAL_RECOMPILER_DIR}/*/include")
+    set(ANYPS5_METAL_LAYOUT_INCLUDES ${ANYPS5_METAL_LIBS_DIR} ${ANYPS5_METAL_LIBS_DIR}/.. ${ANYPS5_METAL_RECOMPILER_DIR} ${ANYPS5_METAL_RECOMPILER_INCLUDES} ${ANYPS5_METAL_VULKAN_HEADERS})
+    add_library(agc_metal_texture_layout STATIC
+        TextureFormat.cpp
+        TextureJobs.cpp
+        LayoutSymbols.cpp
+        ${ANYPS5_METAL_GRAPHICS_DIR}/src/GuestTextureResource.cpp
+        ${ANYPS5_METAL_GRAPHICS_DIR}/src/TextureTiling.cpp)
+    target_include_directories(agc_metal_texture_layout PUBLIC ${ANYPS5_METAL_LAYOUT_INCLUDES})
+    target_compile_features(agc_metal_texture_layout PUBLIC cxx_std_20)
+    set_target_properties(agc_metal_texture_layout PROPERTIES CXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
+    target_compile_definitions(agc_metal_texture_layout PUBLIC VK_NO_PROTOTYPES)
+
+    if(APPLE)
+        set(ANYPS5_METAL_KERNEL_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/TextureKernelsSource.inc")
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/TextureAddress.h" ANYPS5_METAL_ADDRESS_TEXT)
+        file(READ "${CMAKE_CURRENT_SOURCE_DIR}/TextureKernels.metal" ANYPS5_METAL_KERNEL_TEXT)
+        string(REPLACE "#pragma once\n" "" ANYPS5_METAL_ADDRESS_TEXT "${ANYPS5_METAL_ADDRESS_TEXT}")
+        file(WRITE "${ANYPS5_METAL_KERNEL_SOURCE}" "static const char* const kTextureKernelsSource = R\"AGCMSL(\n${ANYPS5_METAL_ADDRESS_TEXT}\n${ANYPS5_METAL_KERNEL_TEXT})AGCMSL\";\n")
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS TextureAddress.h TextureKernels.metal)
+        add_library(agc_metal_textures STATIC Textures.mm TextureDetiler.mm)
+        target_include_directories(agc_metal_textures PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+        target_link_libraries(agc_metal_textures PUBLIC agc_metal agc_metal_texture_layout)
+        target_compile_options(agc_metal_textures PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+        set_target_properties(agc_metal_textures PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF POSITION_INDEPENDENT_CODE ON)
+    endif()
+else()
+    message(STATUS "agc_metal: Vulkan headers not found, texture targets are skipped")
+endif()
+
 if(BUILD_TESTING)
     add_executable(agc_metal_guest_windows_tests tests/GuestWindowsTest.cpp)
     target_link_libraries(agc_metal_guest_windows_tests PRIVATE agc_metal_windows)
@@ -42,5 +77,28 @@ if(BUILD_TESTING)
         set_target_properties(agc_metal_guest_memory_probe PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)
         add_test(NAME agc_metal_guest_memory_probe COMMAND agc_metal_guest_memory_probe)
         set_tests_properties(agc_metal_guest_memory_probe PROPERTIES TIMEOUT 120)
+    endif()
+    if(ANYPS5_METAL_VULKAN_HEADERS)
+        add_executable(agc_metal_texture_tests
+            tests/TextureTests.cpp
+            TextureFormat.cpp
+            TextureJobs.cpp
+            ${ANYPS5_METAL_GRAPHICS_DIR}/src/TextureFormat.cpp
+            ${ANYPS5_METAL_GRAPHICS_DIR}/src/GuestTextureResource.cpp
+            ${ANYPS5_METAL_GRAPHICS_DIR}/src/TextureTiling.cpp)
+        target_include_directories(agc_metal_texture_tests PRIVATE ${ANYPS5_METAL_LAYOUT_INCLUDES} ${CMAKE_CURRENT_SOURCE_DIR})
+        target_compile_features(agc_metal_texture_tests PRIVATE cxx_std_20)
+        target_compile_definitions(agc_metal_texture_tests PRIVATE VK_NO_PROTOTYPES)
+        set_target_properties(agc_metal_texture_tests PROPERTIES CXX_EXTENSIONS OFF)
+        add_test(NAME agc_metal_texture COMMAND agc_metal_texture_tests)
+        set_tests_properties(agc_metal_texture PROPERTIES TIMEOUT 60)
+        if(APPLE)
+            add_executable(agc_metal_texture_probe tests/TextureProbe.mm)
+            target_link_libraries(agc_metal_texture_probe PRIVATE agc_metal_textures)
+            target_compile_options(agc_metal_texture_probe PRIVATE -fobjc-arc)
+            set_target_properties(agc_metal_texture_probe PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)
+            add_test(NAME agc_metal_texture_probe COMMAND agc_metal_texture_probe)
+            set_tests_properties(agc_metal_texture_probe PROPERTIES TIMEOUT 300)
+        endif()
     endif()
 endif()
