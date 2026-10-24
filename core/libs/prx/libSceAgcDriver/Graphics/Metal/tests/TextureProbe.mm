@@ -394,7 +394,12 @@ int main() {
             std::fprintf(stderr, "FAIL: %s\n", failure.c_str());
             return 1;
         }
-        auto textures = TextureManager::Create(*device, &failure);
+        auto compiler = MetalCompiler::Create(*device, CompilerConfig{}, &failure);
+        if (compiler == nullptr) {
+            std::fprintf(stderr, "FAIL: compiler: %s\n", failure.c_str());
+            return 1;
+        }
+        auto textures = TextureManager::Create(*device, *compiler, &failure);
         if (textures == nullptr) {
             std::fprintf(stderr, "FAIL: texture manager: %s\n", failure.c_str());
             return 1;
