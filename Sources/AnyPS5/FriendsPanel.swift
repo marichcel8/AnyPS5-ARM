@@ -19,6 +19,7 @@ extension AppModel {
                 self?.openMyProfile()
             }),
         ]
+        rows += socialRows()
         for person in togetherRequests.incoming {
             rows.append(PanelRow(id: "accept-\(person.userId)", title: T.format(.friendsAccept, person.displayName), detail: "@\(person.handle) · \(T.text(.friendsWantsToBe))",
                                  symbol: "person.crop.circle.badge.checkmark", kind: .action(destructive: false) { [weak self] in self?.answerFriend(person, accept: true) },
@@ -27,6 +28,7 @@ extension AppModel {
                                  kind: .action(destructive: true) { [weak self] in self?.answerFriend(person, accept: false) }))
         }
         rows += gameRows()
+        rows += shareRows()
         rows.append(PanelRow(id: "friends-handle", title: T.text(.friendsAddByHandle), symbol: "at", kind: .text(friendHandle) { [weak self] text in self?.friendHandle = text }))
         rows.append(PanelRow(id: "friends-ask", title: T.text(.friendsSendRequest), symbol: "person.badge.plus", kind: .action(destructive: false) { [weak self] in self?.askFriend() }))
         if togetherFriends.isEmpty {
@@ -136,10 +138,12 @@ extension AppModel {
             partyEvent(event)
         case let type where type.hasPrefix("game_session."):
             gameSessionEvent(event)
+        case let type where type.hasPrefix("share_play."):
+            sharePlayEvent(event)
         case let type where type == "signal" || type.hasPrefix("call."):
             callEvent(event)
         default:
-            break
+            socialEvent(event)
         }
     }
 }
