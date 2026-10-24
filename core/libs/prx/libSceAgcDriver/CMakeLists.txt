@@ -1,3 +1,13 @@
+set(ANYPS5_GPU_BACKEND "Vulkan" CACHE STRING "Graphics backend of libSceAgcDriver: Vulkan or Metal")
+set_property(CACHE ANYPS5_GPU_BACKEND PROPERTY STRINGS Vulkan Metal)
+if(NOT ANYPS5_GPU_BACKEND STREQUAL "Vulkan" AND NOT ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    message(FATAL_ERROR "ANYPS5_GPU_BACKEND must be Vulkan or Metal, got '${ANYPS5_GPU_BACKEND}'")
+endif()
+if(ANYPS5_GPU_BACKEND STREQUAL "Metal" AND NOT APPLE)
+    message(FATAL_ERROR "ANYPS5_GPU_BACKEND=Metal needs an Apple platform")
+endif()
+string(TOUPPER "${ANYPS5_GPU_BACKEND}" agcGpuBackendUpper)
+
 function(ensure_agc_glslang)
     if(TARGET glslang AND TARGET SPIRV AND TARGET glslang-standalone)
         return()
@@ -139,11 +149,10 @@ foreach(agcPresentationStage IN ITEMS Vert Frag)
     list(APPEND agcPresentationShaderHeaders ${agcPresentationShaderHeader})
 endforeach()
 
-set(agcDriverSources
-        ${CMAKE_CURRENT_SOURCE_DIR}/Unimplemented.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ComputePipelineCapture.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
+set(agcDriverCommonSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayFormat.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Unimplemented.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/HostHdr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/DeviceAccess.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Diagnostics.cpp
@@ -203,13 +212,26 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ThreadPriority.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/GuestMemory.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderMemory.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionCapture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Event.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Query.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Resource/src/Lifecycle.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Resource/src/Registration.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/State/src/Configuration.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/State/src/Status.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Acb.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/CommandBuffer.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Dcb.cpp
+)
+
+set(agcDriverVulkanSources
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ComputePipelineCapture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubgroupClock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderDeviceProfile.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Pm4.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubmissionCapture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/VulkanDevice.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/AspectFit.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationScaler.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/PresentationPass.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/Draw.cpp
@@ -251,16 +273,17 @@ set(agcDriverSources
         ${agcSampleCounterShaderHeader}
         ${agcSampleDumpsShaderHeader}
         ${agcPresentationShaderHeaders}
-        ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Event.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Eq/src/Query.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Resource/src/Lifecycle.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Resource/src/Registration.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/State/src/Configuration.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/State/src/Status.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Acb.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/CommandBuffer.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Submit/src/Dcb.cpp
 )
+
+set(agcDriverMetalSources
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Null/NullBackend.cpp
+)
+
+if(ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    set(agcDriverSources ${agcDriverCommonSources} ${agcDriverMetalSources})
+else()
+    set(agcDriverSources ${agcDriverCommonSources} ${agcDriverVulkanSources})
+endif()
 
 find_package(Git QUIET)
 set(agcTraceRevisionHeader ${agcTextureDetileGeneratedRoot}/prx/libSceAgcDriver/TraceRevision.hpp)
@@ -278,6 +301,8 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
         ${agcDriverSources}
 )
 add_dependencies(libSceAgcDriver agc_trace_revision)
+
+target_compile_definitions(libSceAgcDriver PUBLIC ANYPS5_GPU_BACKEND_${agcGpuBackendUpper}=1)
 
 target_include_directories(libSceAgcDriver PRIVATE
         ${LIBS_INCLUDE_DIR}
@@ -308,6 +333,10 @@ target_link_libraries(libSceAgcDriver PRIVATE
 )
 if(APS5_ENABLE_TRACY)
     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
+endif()
+if(APPLE AND ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    target_link_options(libSceAgcDriver PRIVATE
+            "$<$<STREQUAL:$<TARGET_PROPERTY:SDL2-static,TYPE>,STATIC_LIBRARY>:LINKER:-force_load,$<TARGET_FILE:SDL2-static>>")
 endif()
 
 if(BUILD_TESTING)
@@ -464,6 +493,19 @@ if(BUILD_TESTING)
         set_tests_properties(agc_driver_key_miss PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+endif()
+
+if(BUILD_TESTING AND ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    add_test_executable(agc_null_backend_tests tests/NullBackend.cpp)
+    target_include_directories(agc_null_backend_tests PRIVATE
+            ${LIBS_INCLUDE_DIR}
+            ${CMAKE_SOURCE_DIR}/core/shader/recompiler
+            ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR}
+    )
+    target_link_libraries(agc_null_backend_tests PRIVATE libSceAgcDriver libkernel libc)
+    set_target_properties(agc_null_backend_tests PROPERTIES CXX_EXTENSIONS OFF)
+    add_test(NAME agc_null_backend COMMAND agc_null_backend_tests)
+    set_tests_properties(agc_null_backend PROPERTIES TIMEOUT 20)
 endif()
 
 add_test_executable(agc_driver_tests EXCLUDE_FROM_ALL
@@ -2780,4 +2822,20 @@ if(BUILD_TESTING)
     get_directory_property(agcRegisteredTests TESTS)
     list(FILTER agcRegisteredTests EXCLUDE REGEX "^(agc_pipeline_journal|agc_driver_pipeline_journal)$")
     set_property(TEST ${agcRegisteredTests} APPEND PROPERTY ENVIRONMENT "APS5_NO_PIPELINE_JOURNAL=1")
+endif()
+
+if(ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    get_directory_property(agcDirectoryTargets BUILDSYSTEM_TARGETS)
+    foreach(agcTarget IN LISTS agcDirectoryTargets)
+        get_target_property(agcTargetType ${agcTarget} TYPE)
+        if(agcTargetType STREQUAL "EXECUTABLE" AND NOT agcTarget STREQUAL "agc_null_backend_tests")
+            set_target_properties(${agcTarget} PROPERTIES EXCLUDE_FROM_ALL ON)
+        endif()
+    endforeach()
+    get_directory_property(agcDirectoryTests TESTS)
+    foreach(agcTest IN LISTS agcDirectoryTests)
+        if(NOT agcTest STREQUAL "agc_null_backend")
+            set_tests_properties(${agcTest} PROPERTIES DISABLED TRUE)
+        endif()
+    endforeach()
 endif()
