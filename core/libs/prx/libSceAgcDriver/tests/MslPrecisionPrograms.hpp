@@ -44,15 +44,16 @@ inline std::vector<std::uint32_t> FmaLoop(std::uint32_t iterations) {
 
 inline std::vector<Program> Programs() {
     const std::vector<std::uint32_t> isNan{0x7c1a0301u, 0xd5010001u, 0x01a90280u};
+    const std::vector<std::uint32_t> maxOne{0xd5100001u, 0x0001e501u};
     auto observed = FmaLoop(0x1000u);
-    observed.insert(observed.end(), isNan.begin(), isNan.end());
+    observed.insert(observed.end(), maxOne.begin(), maxOne.end());
     return {
-        {"nan max", {0xd5100001u, 0x0001e501u}, {"aps5_i_max("}, {"aps5_s_"}, Check::MaxOne},
+        {"nan max", maxOne, {"aps5_i_max("}, {"aps5_s_"}, Check::MaxOne},
         {"nan compare", isNan, {"aps5_i_une(", "math_mode(relaxed)"}, {"aps5_s_"}, Check::IsNan},
         {"fp64 fma sqrt", {0x7e042101u, 0xd54c0002u, 0x03ca0502u, 0x7e046902u, 0x7e021f02u}, {"aps5_f64_fma(", "aps5_f64_sqrt(", "aps5_f64_to_f32("}, {"double"}, Check::Float64},
         {"dot2", {0xcc134001u, 0x1a020301u}, {"aps5_dot2_f32_f16("}, {}, Check::Dot2},
         {"fma loop fast", FmaLoop(0x1000u), {"fma("}, {"#pragma", "aps5_i_", "aps5_s_"}, Check::Timing},
-        {"fma loop observed", observed, {"aps5_i_fma(", "aps5_i_une("}, {"aps5_s_"}, Check::Timing},
+        {"fma loop observed", observed, {"aps5_i_fma(", "aps5_i_max("}, {"aps5_s_"}, Check::Timing},
         {"fma loop strict", FmaLoop(0x1000u), {"aps5_s_fma(", "math_mode(safe)"}, {"aps5_i_"}, Check::Timing, false},
     };
 }
