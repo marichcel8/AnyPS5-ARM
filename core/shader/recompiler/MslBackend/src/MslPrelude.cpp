@@ -141,6 +141,23 @@ static inline uint aps5_half2(uint bits, uint other, bool multiply) {
 }
 )";
 
+constexpr std::string_view TableFaultText = R"(static inline void aps5_table_fault(thread aps5_ctx& c, ulong address, uint code, uint pc) {
+    if (c.fault == nullptr) return;
+    uint expected = 0u;
+    while (!atomic_compare_exchange_weak_explicit(&c.fault[0], &expected, 1u, memory_order_relaxed, memory_order_relaxed)) {
+        if (expected != 0u) return;
+    }
+    atomic_store_explicit(&c.fault[1], $REASON, memory_order_relaxed);
+    atomic_store_explicit(&c.fault[2], uint(address), memory_order_relaxed);
+    atomic_store_explicit(&c.fault[3], uint(address >> 32u), memory_order_relaxed);
+    atomic_store_explicit(&c.fault[4], code & 0x7fffffffu, memory_order_relaxed);
+    atomic_store_explicit(&c.fault[5], c.stage, memory_order_relaxed);
+    atomic_store_explicit(&c.fault[6], pc, memory_order_relaxed);
+    atomic_store_explicit(&c.fault[7], 0u, memory_order_relaxed);
+    atomic_store_explicit(&c.fault[0], 2u, memory_order_relaxed);
+}
+)";
+
 constexpr std::string_view FaultText = R"(static inline void aps5_fault(thread aps5_ctx& c, uint reason, ulong address, uint bytes, uint pc) {
     c.stop = true;
     if (c.fault == nullptr) return;
@@ -1020,6 +1037,7 @@ std::string Prelude(const State& state) {
     if (has(Wave)) text += WaveText;
     if (has(Permute)) text += PermuteText;
     if (has(Fault | Bda | GuestBuffers)) text += FaultText;
+    if (has(Tables)) text += Replace(std::string(TableFaultText), "$REASON", Reason(BdaAbi::FaultReason::ImageTable));
     if (has(Bda)) {
         auto bda = std::string(BdaText);
         bda = Replace(bda, "$INVALID_TABLE", Reason(BdaAbi::FaultReason::InvalidTable));
@@ -1050,6 +1068,7 @@ std::string Prelude(const State& state) {
         store = Replace(store, "$WRITE", U32(BdaAbi::Write));
         text += store;
     }
+    if (has(Formatted)) text += Replace(FormatTable(), "$FORMATS", U32(static_cast<std::uint32_t>(IrBufferFormat::Format32_32_32_32Float)));
     if (has(Descriptors)) {
         text += DescriptorsText;
         if (has(GuestBuffers)) text += Replace(std::string(DirectBuffersText), "$UNALIGNED", Reason(BdaAbi::FaultReason::Unaligned));
@@ -1058,7 +1077,6 @@ std::string Prelude(const State& state) {
             text += Replace(gpu, "$READ_WRITE", U32(BdaAbi::Read | BdaAbi::Write));
         }
         if (has(Formatted)) {
-            text += Replace(FormatTable(), "$FORMATS", U32(static_cast<std::uint32_t>(IrBufferFormat::Format32_32_32_32Float)));
             if (has(GuestBuffers)) {
                 auto direct = Replace(Replace(std::string(FormatAccessText), "NAME", ""), "BAD", "{}");
                 direct = Replace(direct, "READ(", "aps5_buffer_load(c, element, r, ");
@@ -1103,7 +1121,7 @@ std::string Prelude(const State& state) {
         if (has(Lds)) text += Replace(Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "threadgroup"), "NAME", "_lds"), "MINMAX", "");
     }
     for (std::size_t index = 0; index < state.imageTypes.size(); ++index) text += "struct aps5_img" + std::to_string(index) + " { " + state.imageTypes[index] + " t; };\n";
-    if (has(Samplers)) text += "struct aps5_sampler { sampler s; };\n";
+    if (has(Samplers | Tables)) text += "struct aps5_sampler { sampler s; };\n";
     for (const auto& [id, fallback] : state.constants) {
         const auto name = std::to_string(id);
         text += "constant uint aps5_fc" + name + " [[function_constant(" + name + ")]];\n";
