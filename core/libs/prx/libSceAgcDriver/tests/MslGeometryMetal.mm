@@ -321,8 +321,9 @@ void DrawTrianglePatches(id<MTLDevice> device, id<MTLCommandQueue> queue, double
     const auto* faultWords = static_cast<const std::uint32_t*>(fault.contents);
     Require(faultWords[0] == 0u, "tessellation: a stage recorded fault reason " + std::to_string(faultWords[1]));
     const auto* factorHalves = static_cast<const std::uint16_t*>(factors.contents);
+    const auto edges = halves == 6u ? 4u : 3u;
     for (std::uint32_t half = 0; half < halves; ++half) {
-        Require(factorHalves[halves + half] == 0u, "tessellation: the level-0 patch has a nonzero factor at half " + std::to_string(half));
+        Require(half >= edges || factorHalves[halves + half] == 0u, "tessellation: the level-0 patch has a nonzero edge factor at half " + std::to_string(half));
         Require(factorHalves[half] != 0u && factorHalves[2u * halves + half] != 0u, "tessellation: a drawn patch has a zero factor at half " + std::to_string(half));
     }
     const auto center = Row(-0.5f + 1.0f / 3.0f);
