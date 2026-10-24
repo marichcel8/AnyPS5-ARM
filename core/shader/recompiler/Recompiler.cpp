@@ -1133,7 +1133,12 @@ RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& 
     return result;
 }
 
+void RequireSpirvBackend(const RecompileRequest& request) {
+    if (request.backend != ShaderBackendKind::Spirv) throw std::runtime_error("Shader recompiler: the MSL backend is not available in this build");
+}
+
 RecompileResult RecompileImpl(const RecompileRequest& request) {
+    RequireSpirvBackend(request);
     static_cast<void>(RequestInputInfo(request));
     RequestMemoryView memory(request.context.memory);
     const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
@@ -1385,6 +1390,7 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
 // The capture already resolved the source entry (stage input validation included) and materialized
 // the request over exactly the words the driver captured, so neither is repeated here.
 std::shared_ptr<const RecompileResult> RecompileImpl(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit) {
+    RequireSpirvBackend(request);
     if (!request.useCache || capture.source == nullptr) {
         auto program = PrepareResourceProgram(request);
         const auto variant = compileVariant(request, std::move(program));

@@ -433,7 +433,7 @@ int main() {
         auto bytes = DecodeBase64(encoded);
         Require(bytes.size() >= 8u && bytes[4] == 33u && bytes[5] == 0u && bytes[6] == 0u && bytes[7] == 0u);
         auto future = bytes;
-        future[4] = 34u;
+        future[4] = 35u;
         bool futureRejected = false;
         try {
             static_cast<void>(serializer.Deserialize(EncodeBase64(future)));

@@ -84,9 +84,9 @@ std::filesystem::path ShaderCacheDirectory() {
 namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
-static_assert(sizeof(CompiledShaderArtifact) == 240, "CompiledShaderArtifact changed: update the artifact encoder");
+static_assert(sizeof(CompiledShaderArtifact) == 264, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 200, "ShaderInvocation changed: update the invocation encoder");
-static_assert(sizeof(RecompileResult) == 472, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(RecompileResult) == 496, "RecompileResult changed: update EncodeResult and DecodeResult");
 static_assert(sizeof(DescriptorBinding) == 592, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
@@ -355,6 +355,15 @@ public:
         return SharedSpirv(std::move(words));
     }
 
+    SharedMsl Msl() {
+        const auto count = Count(1);
+        const auto* first = reinterpret_cast<const char*>(bytes.data() + position);
+        position += count;
+        if (count == 0) return {};
+        if (owner != nullptr) return SharedMsl(owner, std::string_view(first, count));
+        return SharedMsl(std::string(first, count));
+    }
+
     void Flags(std::vector<bool>& flags) {
         const auto count = Count(1);
         flags.assign(count, false);
@@ -461,6 +470,8 @@ void decodeBinding(Reader& reader, DescriptorBinding& binding) {
 void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
     writer.Value(result.runtimeAbiVersion);
     writer.Values(std::span<const std::uint32_t>(result.spirv.Words()));
+    writer.Value(result.backend);
+    writer.Values(std::span<const char>(result.msl.Source().data(), result.msl.Source().size()));
     writer.Value(result.bdaAbiVersion);
     writer.Value(result.memoryOffsetDword);
     writer.Value(result.shaderDataDwords);
@@ -509,6 +520,9 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
 void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
     reader.Value(result.runtimeAbiVersion);
     result.spirv = reader.Spirv();
+    result.backend = reader.Get<ShaderBackendKind>();
+    if (result.backend != ShaderBackendKind::Spirv && result.backend != ShaderBackendKind::Msl) reader.Fail();
+    result.msl = reader.Msl();
     reader.Value(result.bdaAbiVersion);
     reader.Value(result.memoryOffsetDword);
     reader.Value(result.shaderDataDwords);
@@ -1763,7 +1777,7 @@ bool DecodeResult(std::span<const std::byte> bytes, RecompileResult& result, std
 
 std::vector<std::byte> EncodeEntry(std::span<const std::byte> key, const CompiledVariant& variant) {
     std::vector<std::byte> payload;
-    payload.reserve(variant.artifact.spirv.size() * sizeof(std::uint32_t) + 4096);
+    payload.reserve(variant.artifact.spirv.size() * sizeof(std::uint32_t) + variant.artifact.msl.size() + 4096);
     Writer writer(payload);
     encodeArtifact(writer, variant.artifact);
     encodeInfo(writer, variant.info);
