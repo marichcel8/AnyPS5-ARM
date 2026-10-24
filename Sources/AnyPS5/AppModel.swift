@@ -91,6 +91,8 @@ enum Overlay: Equatable {
     /// The themes on this Mac and on the Hub, and the Theme Studio.
     case themes
     case studio
+    /// Friends on AnyTogether.
+    case friends
 }
 
 struct Toast: Identifiable, Equatable {
@@ -180,7 +182,7 @@ final class AppModel: ObservableObject {
     private var trophiesRead: Set<String> = []
     private let discord = DiscordPresence(applicationID: DiscordPresence.anyps5ApplicationID)
     private var starts: [String: Date] = [:]
-    private var remote: RemoteServer?
+    private(set) var remote: RemoteServer?
     /// iPhones on a cable reach the phone server through it, with no Wi-Fi.
     private var cable: UsbTunnel?
     /// Android phones on a cable, through adb when it is installed.
@@ -207,6 +209,10 @@ final class AppModel: ObservableObject {
         self.preferences = preferences ?? Preferences.load()
         themes = preferences == nil ? ThemeLibrary() : ThemeLibrary(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-themes"))
         designs = themes.all
+        if persists {
+            togetherUser = together.user
+            if togetherUser != nil { DispatchQueue.main.async { [weak self] in self?.startTogetherSocket() } }
+        }
         apply()
         if persists {
             AppModel.opener = { [weak self] urls in self?.open(urls) }
@@ -366,6 +372,24 @@ final class AppModel: ObservableObject {
 
     var accent: Color { activeDesign.map { Color(rgb: $0.accentRGB) } ?? preferences.accentColor }
 
+    // MARK: AnyTogether
+
+    let together = AppModel.makeTogetherClient()
+    @Published var togetherUser: TogetherUser?
+    @Published var togetherStep = TogetherStep.idle
+    @Published var togetherConnected = false
+    var togetherEmail = ""
+    var togetherCode = ""
+    var togetherSocket: TogetherSocket?
+    var togetherWait: Task<Void, Never>?
+    var togetherFlush: Task<Void, Never>?
+    lazy var togetherSync = TogetherSync(client: together, deviceName: Host.current().localizedName ?? "Mac", model: AppModel.machineModel)
+    /// When the running game started, for the play session AnyTogether keeps.
+    var sessionStart: Date?
+    @Published var togetherFriends: [TogetherFriend] = []
+    @Published var togetherRequests = TogetherRequests(incoming: [], outgoing: [])
+    var friendHandle = ""
+
     // MARK: Themes
 
     /// Previews keep their themes in a folder of their own.
@@ -458,12 +482,15 @@ final class AppModel: ObservableObject {
         let languages = trophyLanguages(game)
         Task.detached(priority: .utility) {
             let set = Trophies.load(game, bundle: bundle, languages: languages)
-            await MainActor.run { self.trophies[game.id] = set }
+            await MainActor.run {
+                self.trophies[game.id] = set
+                if let set { self.recordTrophies(game, set) }
+            }
         }
     }
 
     /// The trophy texts follow the language the game runs in.
-    private func trophyLanguages(_ game: Game) -> [String] {
+    func trophyLanguages(_ game: Game) -> [String] {
         let number = settings(for: game).language ?? preferences.language.consoleLanguage
         return ConsoleLanguage.tag(number).map { [$0] } ?? []
     }
@@ -659,6 +686,7 @@ final class AppModel: ObservableObject {
                 }
                 if let app {
                     self.running = (game, app)
+                    self.sessionStart = Date()
                     self.watchTrophies(game)
                     self.watchForExit(of: app.processIdentifier)
                     self.watchForWindow(of: app)
@@ -805,6 +833,8 @@ final class AppModel: ObservableObject {
                 for wish in wishes { remote.tell(.streaming(state: "noPermission"), deviceID: wish.deviceID) }
                 TrophyBanner.shared.notice(T.text(.remotePlayPermissionTitle), detail: T.text(.remotePlayNeedsPermission), symbol: "iphone.gen3", sounds: self.preferences.sounds)
             } catch {
+                // `log stream --predicate 'subsystem == "org.anyps5.launcher"'` shows why.
+                RemoteServer.log.error("remote play: \(String(describing: error), privacy: .public)")
                 for wish in wishes { remote.tell(.streaming(state: "noGame"), deviceID: wish.deviceID) }
             }
         }
@@ -904,6 +934,7 @@ final class AppModel: ObservableObject {
             startClips(for: app)
             gameWindowShown = true
             updateRemotePlay()
+            updateTogetherPresence()
             withAnimation(Motion.overlay) { starting = nil }
             if preferences.hideWhilePlaying { hideWindows() }
         }
@@ -945,9 +976,12 @@ final class AppModel: ObservableObject {
     private func applicationEnded(_ pid: pid_t?) {
         guard let running, running.app.processIdentifier == pid else { return }
         self.running = nil
+        if let start = sessionStart { recordPlay(running.game, from: start) }
+        sessionStart = nil
         clipRecorder.stop()
         gameWindowShown = false
         updateRemotePlay()
+        updateTogetherPresence()
         syncSaves(running.game) {}
         discord.clear()
         loadTrophies(running.game, again: true)
@@ -1217,6 +1251,8 @@ final class AppModel: ObservableObject {
         case .saveLayout(let id, let layout):
             guard let game = games.first(where: { $0.id == id }) else { return }
             update(game) { $0.phoneLayout = layout }
+        case .togetherHandoff, .togetherHandoffAnswer:
+            togetherPhoneAsked(message)
         default:
             break
         }
@@ -1265,6 +1301,7 @@ final class AppModel: ObservableObject {
                 let earned = set.trophies.filter { fresh.contains($0.id) }
                 await MainActor.run {
                     self.trophies[game.id] = set
+                    self.recordTrophies(game, set)
                     for trophy in earned {
                         TrophyBanner.shared.show(trophy, sounds: self.preferences.sounds)
                         self.tellPhone(trophy)
@@ -1534,7 +1571,8 @@ final class AppModel: ObservableObject {
         if next == .trophies { trophyIndex = 0 }
         if next == .gallery { loadGallery() }
         if next == .advanced { panelRow = 1 }
-        panelInRows = panelInRows || next == .advanced || next == .themes || next == .studio
+        panelInRows = panelInRows || next == .advanced || next == .themes || next == .studio || next == .friends
+        if next == .friends { refreshFriends() }
         if next == .themes {
             panelRow = themeRows().firstIndex { row in row.id == "design-\(preferences.customTheme ?? "")" || row.id == "builtin-\(preferences.theme.rawValue)" && preferences.customTheme == nil } ?? 1
             loadHub()
