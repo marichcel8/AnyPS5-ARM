@@ -106,8 +106,8 @@ constexpr std::string_view ExactHalfText = R"(static inline uint aps5_f32_to_f16
     uint shift = exponent < 113u ? 126u - exponent : 13u;
     uint rounded = exponent < 113u ? mantissa >> shift : ((exponent - 112u) << 10u) + ((mantissa >> 13u) & 0x3ffu);
     uint rest = mantissa & ((1u << shift) - 1u);
-    uint half = 1u << (shift - 1u);
-    return sign | (rounded + (rest > half || (rest == half && (rounded & 1u) != 0u) ? 1u : 0u));
+    uint halfway = 1u << (shift - 1u);
+    return sign | (rounded + (rest > halfway || (rest == halfway && (rounded & 1u) != 0u) ? 1u : 0u));
 }
 static inline uint aps5_f32_to_f16_rtz(uint bits) {
     uint sign = (bits >> 16u) & 0x8000u;
@@ -419,8 +419,8 @@ static inline uint aps5_fmt_int16(uint value) {
     uint quotient = (value << (wide ? 0u : 10u - msb)) >> right;
     uint unit = 1u << right;
     uint remainder = value & (unit - 1u);
-    uint half = unit >> 1u;
-    bool up = wide && (remainder > half || (remainder == half && (quotient & 1u) != 0u));
+    uint halfway = unit >> 1u;
+    bool up = wide && (remainder > halfway || (remainder == halfway && (quotient & 1u) != 0u));
     return min(((msb + 15u) << 10u) + quotient + (up ? 1u : 0u) - 1024u, 0x7bffu);
 }
 static inline uint aps5_fmt_small(uint bits, uint width, bool signedFormat) {
@@ -452,8 +452,8 @@ static inline uint aps5_fmt_norm_store(uint bits, uint maximum, bool signedForma
     uint safe = min(extra, 16u);
     uint quotient = (fixed >> 16u) >> safe;
     uint remainder = fixed - ((quotient << 16u) << safe);
-    uint half = (1u << 15u) << safe;
-    bool up = remainder > half || (remainder == half && (sticky || (quotient & 1u) != 0u));
+    uint halfway = (1u << 15u) << safe;
+    bool up = remainder > halfway || (remainder == halfway && (sticky || (quotient & 1u) != 0u));
     uint result = extra > 16u ? 0u : quotient + (up ? 1u : 0u);
     if (magnitude >= 0x3f800000u && magnitude <= 0x7f800000u) result = maximum;
     bool positive = signedFormat ? magnitude != 0u && magnitude <= 0x7f800000u : int(bits) > 0 && bits <= 0x7f800000u;
@@ -850,6 +850,15 @@ constexpr std::string_view StrictTrigText = R"(static inline uint aps5_s_tiny(ui
     uint magnitude = scaled & 0x7fffffffu;
     return magnitude >= 0x20800000u ? (scaled & 0x80000000u) | (magnitude - 0x20000000u) : r;
 }
+static inline uint aps5_s_tiny_fma(uint a, uint b, uint c, uint r) {
+#pragma METAL fp math_mode(safe)
+    if ((c & 0x7fffffffu) == 0u) return aps5_s_tiny(a, b, r);
+    if ((a & 0x7fffffffu) >= 0x5f800000u || (b & 0x7f800000u) == 0x7f800000u || (c & 0x7fffffffu) >= 0x5f800000u) return r;
+    float scale = as_type<float>(0x5f800000u);
+    uint scaled = as_type<uint>(fma(as_type<float>(a) * scale, as_type<float>(b), as_type<float>(c) * scale));
+    uint magnitude = scaled & 0x7fffffffu;
+    return magnitude >= 0x20800000u && magnitude < 0x7f800000u ? (scaled & 0x80000000u) | (magnitude - 0x20000000u) : r;
+}
 static inline float aps5_s_sin_series(float t) {
 #pragma METAL fp math_mode(safe)
     float square = t * t;
@@ -944,7 +953,7 @@ std::string PreciseText(bool strict) {
         text += StrictTrigText;
         define("uint", "mul", 2u, "    uint r = as_type<uint>(x * y);\n    return (r & 0x7fffffffu) == 0u ? aps5_s_tiny(a, b, r) : r;\n");
         define("uint", "mad", 3u, "    uint product = as_type<uint>(x * y);\n    if ((product & 0x7fffffffu) == 0u) product = aps5_s_tiny(a, b, product);\n    return as_type<uint>(as_type<float>(product) + z);\n");
-        define("uint", "fma", 3u, "    uint r = as_type<uint>(fma(x, y, z));\n    return (r & 0x7fffffffu) == 0u && (c & 0x7fffffffu) == 0u ? aps5_s_tiny(a, b, r) : r;\n");
+        define("uint", "fma", 3u, "    uint r = as_type<uint>(fma(x, y, z));\n    return (r & 0x7fffffffu) == 0u ? aps5_s_tiny_fma(a, b, c, r) : r;\n");
     } else {
         value("mul", 2u, "x * y");
         define("uint", "mad", 3u, "    float product = x * y;\n    return as_type<uint>(product + z);\n");
