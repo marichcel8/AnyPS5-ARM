@@ -287,6 +287,29 @@ bool Device::WaitIdle(std::uint32_t timeoutMs) {
     return idle;
 }
 
+void* Device::NativeTimeline(QueueKind queue) const {
+    return (__bridge void*)state->timelines[queueIndex(queue)];
+}
+
+void Device::WaitOnQueue(QueueKind waiter, QueueKind signaler, std::uint64_t serial) {
+    if (waiter == signaler || serial == 0) return;
+    auto& s = *state;
+    id<MTLSharedEvent> timeline = s.timelines[queueIndex(signaler)];
+    if (timeline.signaledValue >= serial) return;
+    const auto index = queueIndex(waiter);
+    std::lock_guard lock(s.submitMutex[index]);
+    [s.queues[index] waitForEvent:timeline value:serial];
+}
+
+void Device::WaitOnEvent(QueueKind waiter, void* sharedEvent, std::uint64_t value) {
+    if (sharedEvent == nullptr) return;
+    auto& s = *state;
+    id<MTLEvent> event = (__bridge id<MTLEvent>)sharedEvent;
+    const auto index = queueIndex(waiter);
+    std::lock_guard lock(s.submitMutex[index]);
+    [s.queues[index] waitForEvent:event value:value];
+}
+
 void Device::Collect() {
     auto& s = *state;
     std::array<std::uint64_t, QueueCount> completed{};
