@@ -41,7 +41,8 @@ enum Feature : std::uint32_t {
     Float64 = 1u << 25u,
     Dot2 = 1u << 26u,
     Atomic64 = 1u << 27u,
-    UpdateTable = 1u << 28u
+    UpdateTable = 1u << 28u,
+    Tables = 1u << 29u
 };
 
 enum : std::uint8_t {

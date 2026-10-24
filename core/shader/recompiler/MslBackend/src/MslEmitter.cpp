@@ -261,6 +261,12 @@ std::string Parameters(const State& state) {
     if (has(GuestBuffers)) parameters.push_back("device const aps5_guest_buffer* aps5_buffers [[buffer(" + slot(MetalAbi::BufferSlot::GuestBuffers) + ")]]");
     if (has(Images)) parameters.push_back("device const ulong* aps5_images [[buffer(" + slot(MetalAbi::BufferSlot::GuestImages) + ")]]");
     if (has(Samplers)) parameters.push_back("device const ulong* aps5_samplers [[buffer(" + slot(MetalAbi::BufferSlot::GuestSamplers) + ")]]");
+    if (has(Tables)) {
+        parameters.push_back("device const ulong* aps5_image_table [[buffer(" + slot(MetalAbi::BufferSlot::ImageTable) + ")]]");
+        parameters.push_back("device const ulong* aps5_storage_table [[buffer(" + slot(MetalAbi::BufferSlot::ImageStorageTable) + ")]]");
+        parameters.push_back("device const ulong* aps5_sampler_table [[buffer(" + slot(MetalAbi::BufferSlot::SamplerTable) + ")]]");
+        parameters.push_back("device const uint* aps5_table_map [[buffer(" + slot(MetalAbi::BufferSlot::ImageTableMap) + ")]]");
+    }
     if (has(WorkgroupId)) parameters.push_back("uint3 aps5_group [[threadgroup_position_in_grid]]");
     if (has(LocalId)) parameters.push_back("uint3 aps5_local [[thread_position_in_threadgroup]]");
     if (has(GlobalId)) parameters.push_back("uint3 aps5_global [[thread_position_in_grid]]");
