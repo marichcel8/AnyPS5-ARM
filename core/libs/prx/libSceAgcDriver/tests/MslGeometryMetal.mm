@@ -368,7 +368,7 @@ bool Near(const std::array<std::uint8_t, 4>& got, const std::array<std::uint8_t,
 }
 
 void DrawMesh(id<MTLDevice> device, id<MTLCommandQueue> queue, double& compileMs) {
-    const auto mesh = Compile(device, Mesh(MslGeometryPrograms::Wave32GeometryCode, MslGeometryPrograms::SmallSubgroup, 32u), "wave32 mesh", compileMs);
+    const auto mesh = Compile(device, Mesh(MslGeometryPrograms::Wave32GeometryCode, MslGeometryPrograms::SmallSubgroup, 32u, 3u * Triangles), "wave32 mesh", compileMs);
     const auto pixel = Compile(device, MslGeometryPrograms::Pixel(), "pixel", compileMs);
     Require(mesh.layout.kind == MslGeometryKind::Mesh && mesh.layout.meshThreads != 0u && mesh.layout.meshPrimitives != 0u, "mesh: the program has no mesh layout");
     id<MTLRenderPipelineState> pipeline = MeshPipeline(device, mesh, pixel, "wave32 mesh");

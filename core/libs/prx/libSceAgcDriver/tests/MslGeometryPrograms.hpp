@@ -127,14 +127,14 @@ ShaderRecompiler::RecompileRequest Tessellation(ShaderRecompiler::ShaderStage st
     return Tessellation(stage, std::span<const std::uint32_t>(code), configuration, std::as_bytes(std::span(code)));
 }
 
-inline ShaderRecompiler::RecompileRequest Mesh(std::span<const std::uint32_t> code, const ShaderRecompiler::MeshConfiguration& configuration, std::uint32_t waveSize) {
+inline ShaderRecompiler::RecompileRequest Mesh(std::span<const std::uint32_t> code, const ShaderRecompiler::MeshConfiguration& configuration, std::uint32_t waveSize, std::uint32_t records = 64u) {
     using namespace ShaderRecompiler;
     static thread_local std::array<MemoryRegion, 1> memory{};
     static thread_local std::array<std::uint32_t, 12> userData{};
     userData = {};
     userData[8] = 0x10000u;
     userData[9] = 32u << 16u;
-    userData[10] = 64u;
+    userData[10] = records;
     userData[11] = 0x01016facu;
     memory[0] = MemoryRegion{reinterpret_cast<std::uintptr_t>(code.data()), std::as_bytes(code)};
     RecompileRequest request{};
