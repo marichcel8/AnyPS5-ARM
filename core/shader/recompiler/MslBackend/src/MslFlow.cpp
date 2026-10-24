@@ -116,9 +116,9 @@ private:
         const auto value = Value(state, info.condition);
         switch (info.terminator.condition) {
         case BranchCondition::ExecNonZero:
-        case BranchCondition::VccNonZero: return "simd_any(" + value + ")";
+        case BranchCondition::VccNonZero: return WaveAny(state, value);
         case BranchCondition::ExecZero:
-        case BranchCondition::VccZero: return "!simd_any(!" + value + ")";
+        case BranchCondition::VccZero: return "!" + WaveAny(state, "!" + value);
         default: return value;
         }
     }

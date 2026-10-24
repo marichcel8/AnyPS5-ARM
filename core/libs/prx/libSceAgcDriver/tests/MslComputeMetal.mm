@@ -54,10 +54,10 @@ id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, const std::string& so
     return pipeline;
 }
 
-double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputePrograms::Program& program, std::uint64_t address) {
-    const auto name = std::string(program.name);
+double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputePrograms::Program& program, std::uint64_t address, std::uint32_t waveSize) {
+    const auto name = std::string(program.name) + " (wave" + std::to_string(waveSize) + ")";
     const auto userData = MslComputePrograms::UserData();
-    const auto result = Recompile(MslComputePrograms::Request(program, address, userData));
+    const auto result = Recompile(MslComputePrograms::Request(program, address, userData, waveSize));
     Require(result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
     const auto source = std::string(result.msl.Source());
     const auto compileStart = std::chrono::steady_clock::now();
@@ -111,9 +111,12 @@ int main() {
             Require(queue != nil, "no Metal command queue");
             std::uint64_t address = 0x80000u;
             for (const auto& program : MslComputePrograms::Programs()) {
-                const auto compileMs = Run(device, queue, program, address);
-                std::printf("MslComputeMetal: %s ok (Metal compile %.1f ms)\n", std::string(program.name).c_str(), compileMs);
-                address += 0x1000u;
+                for (const auto waveSize : {32u, 64u}) {
+                    if ((program.waves & (waveSize == 32u ? MslComputePrograms::Wave32 : MslComputePrograms::Wave64)) == 0u) continue;
+                    const auto compileMs = Run(device, queue, program, address, waveSize);
+                    std::printf("MslComputeMetal: %s wave%u ok (Metal compile %.1f ms)\n", std::string(program.name).c_str(), waveSize, compileMs);
+                    address += 0x1000u;
+                }
             }
         } catch (const std::exception& error) {
             std::fprintf(stderr, "MslComputeMetal: %s\n", error.what());

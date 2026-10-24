@@ -29,7 +29,10 @@ enum Feature : std::uint32_t {
     BdaWrites = 1u << 14u,
     Half = 1u << 15u,
     FloatClass = 1u << 16u,
-    Descriptors = 1u << 17u
+    Descriptors = 1u << 17u,
+    Wave = 1u << 18u,
+    WaveExchange = 1u << 19u,
+    Permute = 1u << 20u
 };
 
 struct State {
@@ -46,6 +49,7 @@ struct State {
     std::uint32_t windowDwords = 0;
     std::uint32_t waveLds = 0;
     bool stopAllowed = false;
+    bool spanned = false;
     std::unordered_set<const IrValue*> hoisted;
     std::unordered_set<const IrValue*> defined;
     std::vector<const IrValue*> hoistOrder;
@@ -71,6 +75,9 @@ const MemoryInfo& Memory(const State& state, const IrValue& inst);
 
 bool EmitAlu(State& state, const IrValue& inst);
 bool EmitMemory(State& state, const IrValue& inst);
+bool EmitWave(State& state, const IrValue& inst);
+std::string WaveLane(State& state);
+std::string WaveAny(State& state, const std::string& predicate);
 void EmitInstruction(State& state, const IrValue& inst);
 void EmitBlockBody(State& state, const IrBlock& block);
 void EmitFlow(State& state);
