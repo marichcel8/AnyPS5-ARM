@@ -432,7 +432,7 @@ std::string ResultVector(Access& access, const std::string& value, IrTextureNume
                 packed[word] = "((" + Bits(low, valueClass) + " & 0xffffu) | ((" + Bits(high, valueClass) + " & 0xffffu) << 16u))";
             } else {
                 state.features |= Half;
-                packed[word] = "(aps5_f32_to_f16(" + low + ") | (aps5_f32_to_f16(" + high + ") << 16u))";
+                packed[word] = "(aps5_f32_to_f16(as_type<uint>(" + low + ")) | (aps5_f32_to_f16(as_type<uint>(" + high + ")) << 16u))";
             }
         }
         return "uint4(" + packed[0] + ", " + packed[1] + ", " + packed[2] + ", " + packed[3] + ")";
@@ -592,7 +592,7 @@ std::string StoreTexel(Access& access, const std::string& data, bool integer) {
             }
             raw = "(" + RegisterSelector(access, source) + " == " + U32(component + 4u) + " ? " + candidate + " : " + raw + ")";
         }
-        if (component < sint.componentCount && sint.componentBits[component] < 32u) {
+        if (component < sint.componentCount && (sint.componentBits[component] < 32u || mem.dataBits == 16u)) {
             values[component] = std::string(mem.dataBits == 16u ? "aps5_fmt_encode16(" : "aps5_fmt_encode(") + raw + ", 2u, " + U32(sint.componentBits[component]) + ")";
         } else if (integer) {
             values[component] = raw;
@@ -846,7 +846,6 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     const auto shape = ShapeOf(image.dimension);
     const bool gather = access.inst.Opcode() == IrOpcode::ImageGatherRaw;
     if (shape.multisampled) throw MslUnsupported("MSL backend: multisampled images cannot be sampled");
-    if (image.numericClass != IrTextureNumericClass::Float && !image.depthCompare && !gather) throw MslUnsupported("MSL backend: sampling integer images has no Metal sample function");
     const auto conversion = ConversionFormat(image);
     if (conversion.format != IrBufferFormat::Invalid && !gather) throw MslUnsupported("MSL backend: sampling a converted image needs filtering in the shader and is not emitted");
     const auto layout = LayoutOf(mem);
@@ -872,9 +871,12 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
             return;
         }
     } else if (HasFlag(mem, RdnaImageSampleFlagDerivative)) {
-        if (shape.spatial == 1u) throw MslUnsupported("MSL backend: gradients on 1D images have no Metal sample option");
-        const auto gradX = CoordF32(access, layout.gradX, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
-        const auto gradY = CoordF32(access, layout.gradY, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
+        auto gradX = CoordF32(access, layout.gradX, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
+        auto gradY = CoordF32(access, layout.gradY, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
+        if (shape.spatial == 1u) {
+            gradX = "float2(" + gradX + ", 0.0f)";
+            gradY = "float2(" + gradY + ", 0.0f)";
+        }
         options = std::string(shape.spatial == 3u ? "gradient3d(" : "gradient2d(") + gradX + ", " + gradY + ")";
         if (layout.clamp != NoComponent) options += ", min_lod_clamp(" + AddressF32(access, layout.clamp) + ")";
     } else if (explicitLod) {
@@ -887,9 +889,9 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     }
 
     const bool hasOffset = layout.offset != NoComponent;
-    if (hasOffset && shape.spatial == 1u) throw MslUnsupported("MSL backend: texel offsets on 1D images have no Metal sample option");
-    const auto constantOffset = hasOffset ? ConstantOffset(access, layout, shape) : std::nullopt;
-    const bool foldOffset = hasOffset && FoldsTexelOffsets(sampler) && ResourceMaterializer::UnnormalizedSampleMismatch(image) == nullptr;
+    auto constantOffset = hasOffset ? ConstantOffset(access, layout, shape) : std::nullopt;
+    if (constantOffset && shape.spatial == 1u) constantOffset = "int2(" + *constantOffset + ", 0)";
+    const bool foldOffset = hasOffset && shape.spatial != 1u && FoldsTexelOffsets(sampler) && ResourceMaterializer::UnnormalizedSampleMismatch(image) == nullptr;
     if (hasOffset && !constantOffset && !foldOffset) throw MslUnsupported("MSL backend: a texel offset that is not constant has no Metal sample option");
 
     const auto call = [&](const std::string& coord, const std::string& layer, const std::string& opts, const std::optional<std::string>& offset) {
