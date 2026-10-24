@@ -41,6 +41,16 @@ std::atomic<std::uint32_t>& RegisterReadLogsOpen() {
     return open;
 }
 
+const char* DccKeysName(DccKeys) { return ""; }
+
+std::size_t DccKeyCount(TextureTileMode, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t) { return 0; }
+
+bool IsDccClear(DccKeys) { return false; }
+
+DccKeys CurrentDccKeys(std::uint64_t, std::uint64_t, std::size_t) { return {}; }
+
+bool FillDccClear(VkFormat, DccKeys, bool, std::span<std::byte>) { return false; }
+
 DepthPlaneClear::DepthPlaneClear(const StorageImageClear&) {}
 
 DepthPlaneClear::~DepthPlaneClear() = default;

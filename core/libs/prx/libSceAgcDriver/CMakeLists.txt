@@ -150,6 +150,8 @@ foreach(agcPresentationStage IN ITEMS Vert Frag)
 endforeach()
 
 set(agcDriverCommonSources
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayFormat.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Unimplemented.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/HostHdr.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/DeviceAccess.cpp
@@ -225,9 +227,7 @@ set(agcDriverCommonSources
 )
 
 set(agcDriverVulkanSources
-        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ComputePipelineCapture.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/DisplayFormat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/BdaFeatures.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/SubgroupClock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/ShaderDeviceProfile.cpp
