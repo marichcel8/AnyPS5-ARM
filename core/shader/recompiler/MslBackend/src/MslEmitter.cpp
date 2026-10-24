@@ -351,6 +351,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     state.waveLds = WaveLdsScope(program, workgroup);
     state.stopAllowed = state.waveLds == 0u && !HasBarrier(program) && !state.spanned;
     Hoister{state}.Run();
+    AnalyzePrecision(state);
     EmitFlow(state);
 
     std::string declarations;
