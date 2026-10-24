@@ -260,6 +260,11 @@ std::shared_ptr<void> MetalWorker::Library(const LibrarySource& source, std::str
     return owner.state->library(source, (__bridge id<MTL4Compiler>)compiler, error);
 }
 
+void MetalWorker::NoteKey(const CompileKey& key) {
+    std::lock_guard keysLock(owner.state->keysMutex);
+    owner.state->sessionKeys.insert(key);
+}
+
 void MetalWorker::NotePipeline(double milliseconds) {
     auto& state = *owner.state;
     ++state.pipelinesBuilt;
