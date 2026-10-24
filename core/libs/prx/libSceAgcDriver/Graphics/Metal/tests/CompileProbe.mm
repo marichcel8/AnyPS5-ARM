@@ -27,7 +27,10 @@ double millisecondsSince(std::chrono::steady_clock::time_point start) {
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 }
 
+int seed = 0;
+
 std::string KernelSource(int variant, int depth) {
+    variant += seed * 100000;
     std::string text = "#include <metal_stdlib>\nusing namespace metal;\nkernel void probe_main(device uint* out [[buffer(0)]], constant uint& n [[buffer(1)]], uint tid [[thread_position_in_grid]]) {\n    uint a = tid + " + std::to_string(variant) + "u;\n    uint b = tid * 2654435761u;\n";
     for (int step = 0; step < depth; ++step) {
         text += "    a = (a ^ (b >> " + std::to_string(step % 13 + 1) + ")) * " + std::to_string(2246822519u + step * 2u) + "u + (b << " + std::to_string(step % 7 + 1) + ");\n";
@@ -123,6 +126,8 @@ int main(int argc, char** argv) {
                 count = std::atoi(argv[++index]);
             } else if (std::strcmp(argv[index], "--depth") == 0 && index + 1 < argc) {
                 depth = std::atoi(argv[++index]);
+            } else if (std::strcmp(argv[index], "--seed") == 0 && index + 1 < argc) {
+                seed = std::atoi(argv[++index]);
             } else if (std::strcmp(argv[index], "--require-archive") == 0) {
                 requireArchive = true;
             }

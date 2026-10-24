@@ -300,9 +300,8 @@ std::unique_ptr<MetalCompiler> MetalCompiler::Create(Device& device, const Compi
                 state->archives = archives;
                 MTL4PipelineDataSetSerializerDescriptor* serializerDescriptor = [MTL4PipelineDataSetSerializerDescriptor new];
                 const char* mode = std::getenv("APS5_METAL_SERIALIZER");
-                if (mode != nullptr && std::strcmp(mode, "binaries") == 0) serializerDescriptor.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
-                else if (mode != nullptr && std::strcmp(mode, "descriptors") == 0) serializerDescriptor.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors;
-                else serializerDescriptor.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors | MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
+                if (mode != nullptr && std::strcmp(mode, "descriptors") == 0) serializerDescriptor.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors;
+                else if (mode != nullptr && std::strcmp(mode, "both") == 0) serializerDescriptor.configuration = MTL4PipelineDataSetSerializerConfigurationCaptureDescriptors | MTL4PipelineDataSetSerializerConfigurationCaptureBinaries;
                 state->serializer = [state->native newPipelineDataSetSerializerWithDescriptor:serializerDescriptor];
             }
         }
