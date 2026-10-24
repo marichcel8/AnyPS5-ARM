@@ -132,7 +132,7 @@ std::string ScalarName(const ImageResource& image) {
     Fail("an image has an unsupported numeric class");
 }
 
-std::string TextureType(const ImageResource& image) {
+std::string TextureType(const ImageResource& image, const std::string& scalar = {}) {
     const auto shape = ShapeOf(image.dimension);
     std::string name(shape.texture);
     if (image.depthCompare) {
@@ -142,7 +142,7 @@ std::string TextureType(const ImageResource& image) {
     const char* access = "sample";
     if (image.resourceClass == ImageResourceClass::Storage) access = image.atomic ? "read_write" : "write";
     else if (shape.multisampled) access = "read";
-    return name + "<" + ScalarName(image) + ", access::" + access + ">";
+    return name + "<" + (scalar.empty() ? ScalarName(image) : scalar) + ", access::" + access + ">";
 }
 
 std::string Wrapper(State& state, const std::string& type) {
@@ -152,10 +152,10 @@ std::string Wrapper(State& state, const std::string& type) {
     return "aps5_img" + std::to_string(state.imageTypes.size() - 1u);
 }
 
-std::string TextureRef(State& state, const ImageResource& image, std::uint32_t element) {
+std::string TextureRef(State& state, const ImageResource& image, std::uint32_t element, const std::string& scalar = {}) {
     const auto kind = DescriptorBindingForImage(image);
     state.features |= Images;
-    const auto type = TextureType(image);
+    const auto type = TextureType(image, scalar);
     return "((device const " + Wrapper(state, type) + "*)aps5_images)[" + U32(MetalAbi::GuestImageIndex(static_cast<std::uint32_t>(kind), element)) + "].t";
 }
 
@@ -415,33 +415,97 @@ void EmitWrite(Access& access, const std::string& texture) {
     Close(state);
 }
 
-std::string AtomicName(IrOpcode opcode) {
+struct AtomicKind {
+    std::string method;
+    std::string scalar = "uint";
+    std::uint32_t op = 0;
+    bool native = false;
+    bool wide = false;
+};
+
+AtomicKind AtomicOf(IrOpcode opcode) {
     switch (opcode) {
-    case IrOpcode::ImageAtomicIAdd32: return "atomic_fetch_add";
-    case IrOpcode::ImageAtomicISub32: return "atomic_fetch_sub";
-    case IrOpcode::ImageAtomicUMin32: return "atomic_fetch_min";
-    case IrOpcode::ImageAtomicUMax32: return "atomic_fetch_max";
-    case IrOpcode::ImageAtomicAnd32: return "atomic_fetch_and";
-    case IrOpcode::ImageAtomicOr32: return "atomic_fetch_or";
-    case IrOpcode::ImageAtomicXor32: return "atomic_fetch_xor";
+    case IrOpcode::ImageAtomicIAdd32: return {"atomic_fetch_add", "uint", 2u, true};
+    case IrOpcode::ImageAtomicISub32: return {"atomic_fetch_sub", "uint", 3u, true};
+    case IrOpcode::ImageAtomicUMin32: return {"atomic_fetch_min", "uint", 5u, true};
+    case IrOpcode::ImageAtomicUMax32: return {"atomic_fetch_max", "uint", 7u, true};
+    case IrOpcode::ImageAtomicSMin32: return {"atomic_fetch_min", "int", 4u, true};
+    case IrOpcode::ImageAtomicSMax32: return {"atomic_fetch_max", "int", 6u, true};
+    case IrOpcode::ImageAtomicAnd32: return {"atomic_fetch_and", "uint", 8u, true};
+    case IrOpcode::ImageAtomicOr32: return {"atomic_fetch_or", "uint", 9u, true};
+    case IrOpcode::ImageAtomicXor32: return {"atomic_fetch_xor", "uint", 10u, true};
+    case IrOpcode::ImageAtomicSwap32: return {"atomic_exchange", "uint", 0u, true};
+    case IrOpcode::ImageAtomicCmpSwap32: return {{}, "uint", 1u};
+    case IrOpcode::ImageAtomicInc32: return {{}, "uint", 11u};
+    case IrOpcode::ImageAtomicDec32: return {{}, "uint", 12u};
+    case IrOpcode::ImageAtomicFMin32: return {{}, "uint", 15u};
+    case IrOpcode::ImageAtomicFMax32: return {{}, "uint", 16u};
+    case IrOpcode::ImageAtomicFCmpSwap32: return {{}, "uint", 20u};
+    case IrOpcode::ImageAtomicSwap64: return {{}, "ulong", 0u, false, true};
+    case IrOpcode::ImageAtomicCmpSwap64: return {{}, "ulong", 1u, false, true};
+    case IrOpcode::ImageAtomicIAdd64: return {{}, "ulong", 2u, false, true};
+    case IrOpcode::ImageAtomicISub64: return {{}, "ulong", 3u, false, true};
+    case IrOpcode::ImageAtomicSMin64: return {{}, "ulong", 4u, false, true};
+    case IrOpcode::ImageAtomicSMax64: return {{}, "ulong", 6u, false, true};
+    case IrOpcode::ImageAtomicUMin64: return {"atomic_min", "ulong", 5u, true, true};
+    case IrOpcode::ImageAtomicUMax64: return {"atomic_max", "ulong", 7u, true, true};
+    case IrOpcode::ImageAtomicAnd64: return {{}, "ulong", 8u, false, true};
+    case IrOpcode::ImageAtomicOr64: return {{}, "ulong", 9u, false, true};
+    case IrOpcode::ImageAtomicXor64: return {{}, "ulong", 10u, false, true};
     default: break;
     }
-    return {};
+    Fail("an image atomic has no Metal lowering");
 }
 
 void EmitAtomic(Access& access, const std::string& texture, const std::string& result) {
     State& state = access.state;
-    const auto name = AtomicName(access.inst.Opcode());
-    if (name.empty()) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(access.inst.Opcode())) + " has no Metal texture atomic (add, sub, unsigned min and max, and, or and xor only)");
+    const auto opcode = access.inst.Opcode();
+    const auto kind = AtomicOf(opcode);
     const auto shape = ShapeOf(access.image.dimension);
-    if (access.image.resourceClass != ImageResourceClass::Storage || access.image.numericClass != IrTextureNumericClass::Uint || shape.multisampled || access.image.dimension == RdnaImageDimension::Dim3D) throw MslUnsupported("MSL backend: image atomics need a single-sample 1D or 2D unsigned storage image");
+    const auto numeric = access.image.numericClass;
+    if (access.image.resourceClass != ImageResourceClass::Storage || (numeric != IrTextureNumericClass::Uint && numeric != IrTextureNumericClass::Sint && !kind.wide) || shape.multisampled || access.image.dimension == RdnaImageDimension::Dim3D) throw MslUnsupported("MSL backend: image atomics need a single-sample 1D or 2D unsigned or signed integer storage image");
+    const bool wide = kind.wide;
+    if (wide && !kind.native) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(opcode)) + " is not emitted (a Metal ulong texture only has atomic_min and atomic_max)");
+    if (wide && access.inst.HasUses()) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(opcode)) + " returns the old value, which Metal's ulong texture atomic_min and atomic_max do not");
+    if (wide) state.features |= Atomic64;
+    if (!kind.native) state.features |= UpdateTable;
     Open(state, "{");
     const auto coord = Temp(state);
     Line(state, "const auto " + coord + " = " + CoordU32(access) + ";");
-    const auto value = "uint4(" + Typed(state, access.inst, 2u) + ", 0u, 0u, 0u)";
     const auto position = shape.arrayed ? HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") : HostPlane(coord, shape, false);
+    std::string view = texture;
+    if (wide || kind.scalar != ScalarName(access.image)) {
+        view = Temp(state);
+        const auto element = access.element;
+        Line(state, "const " + TextureType(access.image, kind.scalar) + " " + view + " = " + TextureRef(state, access.image, element, kind.scalar) + ";");
+    }
+    const auto vec = [&](const std::string& value) { return kind.scalar + "4(" + value + ", " + kind.scalar + "(0), " + kind.scalar + "(0), " + kind.scalar + "(0))"; };
+    const auto data = Typed(state, access.inst, 2u);
+    const auto value = kind.scalar == "int" ? "int(" + data + ")" : data;
+    const bool compare = kind.op == 1u;
+    const bool comparing = compare || kind.op == 20u;
+    const auto operand = comparing ? Typed(state, access.inst, 3u) : std::string("0u");
+    const auto current = Temp(state);
     Line(state, "atomic_thread_fence(mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);");
-    Line(state, result + " = " + texture + "." + name + "(" + position + ", " + value + ").x;");
+    if (kind.native && wide) {
+        Line(state, view + "." + kind.method + "(" + position + ", " + vec(value) + ");");
+    } else if (kind.native) {
+        Line(state, result + " = " + (kind.scalar == "int" ? "uint(" : "(") + view + "." + kind.method + "(" + position + ", " + vec(value) + ").x);");
+    } else {
+        const auto desired = Temp(state);
+        Line(state, kind.scalar + "4 " + current + " = " + view + ".atomic_load(" + position + ");");
+        Open(state, "while (true) {");
+        if (compare) {
+            Line(state, "if (" + current + ".x != " + operand + ") break;");
+            Line(state, "const " + kind.scalar + " " + desired + " = " + data + ";");
+        } else {
+            Line(state, "const " + kind.scalar + " " + desired + " = " + (wide ? "aps5_update64(" : "aps5_update(") + U32(kind.op) + ", " + current + ".x, " + data + ", " + operand + ");");
+            Line(state, "if (" + desired + " == " + current + ".x) break;");
+        }
+        Line(state, "if (" + view + ".atomic_compare_exchange_weak(" + position + ", &" + current + ", " + vec(desired) + ")) break;");
+        Close(state);
+        Line(state, result + " = " + current + ".x;");
+    }
     Close(state);
 }
 
@@ -574,7 +638,6 @@ bool EmitImage(State& state, const IrValue& inst) {
     const auto& images = state.program.Info().images;
     if (mem.resource >= images.size()) Fail(inst, "names an image the program does not have");
     const auto& base = images[mem.resource];
-    if (IsImageAtomic64Opcode(opcode)) throw MslUnsupported("MSL backend: " + std::string(name) + " is not emitted (64-bit atomics are section S5)");
     if (base.table != NoTable) throw MslUnsupported("MSL backend: " + std::string(name) + " reads an image through a bindless image table, which is not emitted yet");
     if (info.needsSampler && state.program.Info().samplers.at(mem.sampler).table != NoTable) throw MslUnsupported("MSL backend: " + std::string(name) + " uses a sampler from a bindless sampler table, which is not emitted yet");
     if (base.srgbDecode) throw MslUnsupported("MSL backend: " + std::string(name) + " decodes an sRGB image in the shader, which is not emitted");

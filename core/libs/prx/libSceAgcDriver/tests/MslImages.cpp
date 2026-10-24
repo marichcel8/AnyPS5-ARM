@@ -27,23 +27,6 @@ void CheckProgram(const MslImagePrograms::Program& program, std::uint64_t addres
     Require(source.find("#pragma") == std::string::npos, name + ": the source carries a pragma");
 }
 
-void CheckUnsupportedRejected() {
-    const auto programs = MslImagePrograms::Programs();
-    auto program = programs[3];
-    for (auto& word : program.code) {
-        if (word == MslImagePrograms::Mimg(0x11u, 0x1u)) word = MslImagePrograms::Mimg(0x0fu, 0x1u);
-    }
-    bool rejected = false;
-    try {
-        static_cast<void>(Recompile(MslImagePrograms::Request(program, 0x7f000u, MslImagePrograms::UserData(program.format))));
-    } catch (const MslUnsupported&) {
-        rejected = true;
-    } catch (const std::exception&) {
-        rejected = true;
-    }
-    Require(rejected, "an image op the Metal backend cannot express recompiled to MSL");
-}
-
 }
 
 int main() {
@@ -53,7 +36,6 @@ int main() {
             CheckProgram(program, address);
             address += 0x1000u;
         }
-        CheckUnsupportedRejected();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "MslImages: %s\n", error.what());
         return 1;

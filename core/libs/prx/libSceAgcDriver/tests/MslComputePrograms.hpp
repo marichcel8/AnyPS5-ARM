@@ -20,7 +20,7 @@ inline constexpr std::uint32_t BufferStore = 0xe0702000u;
 inline constexpr std::uint32_t BufferStoreOperands = 0x80000100u;
 inline constexpr std::uint32_t EndProgram = 0xbf810000u;
 
-enum class Expect { Plus5, Swapped, FirstLanePlus, LowHalfSeven, Half, Times4, CounterAt0, QuadSwap, RowShift, Mirror, SwapHalf, ReverseHalf, RotateHalf, ReadLane5, Ballot32, Ballot64, ReadLane37, FirstUpperPlus };
+enum class Expect { Plus5, Swapped, FirstLanePlus, LowHalfSeven, Half, Times4, CounterAt0, QuadSwap, RowShift, Mirror, SwapHalf, ReverseHalf, RotateHalf, ReadLane5, Ballot32, Ballot64, ReadLane37, FirstUpperPlus, Carry64, MaxPair64, OrPair64, AllOne };
 
 inline constexpr std::uint32_t Wave32 = 1u;
 inline constexpr std::uint32_t Wave64 = 2u;
@@ -55,6 +55,10 @@ inline std::uint32_t Expected(Expect expect, std::uint32_t lane) {
     case Expect::Ballot64: return lane < 64u ? 0x001fffffu : 0u;
     case Expect::ReadLane37: return (lane & ~63u) + 37u;
     case Expect::FirstUpperPlus: return lane < 64u ? (lane > 32u ? 33u + lane : 0u) : (lane & ~63u) + lane;
+    case Expect::Carry64: return lane == 1u ? Threads / 64u : 0u;
+    case Expect::MaxPair64: return lane == 0u ? Threads - 1u : (lane == 1u ? 1u : 0u);
+    case Expect::OrPair64: return lane < 2u ? 0xffffffffu : 0u;
+    case Expect::AllOne: return 1u;
     }
     return 0u;
 }
@@ -83,6 +87,11 @@ inline std::vector<Program> Programs() {
         {"wave64 readlane", {0xd7600004u, 0x00014b00u, 0x7e020204u, BufferStore, BufferStoreOperands, EndProgram}, ">= 32u ? ", Expect::ReadLane37, false, Wave64},
         {"wave64 readfirstlane", {0xd4c10008u, 0x000200a0u, 0xbefe0408u, 0x7e080500u, 0x4a020004u, BufferStore, BufferStoreOperands, EndProgram}, "ctz(", Expect::FirstUpperPlus, false, Wave64},
         {"wave64 execz branch", {0x7e020283u, 0xd4c40008u, 0x00020090u, 0xbe8a2408u, 0xbf880001u, 0x7e020287u, 0xbefe040au, BufferStore, BufferStoreOperands, EndProgram}, "simd_any", Expect::LowHalfSeven, false, Wave64},
+        {"buffer atomic add64", {0x7e0202ffu, 0x04000000u, 0x7e040280u, 0xe1480000u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::Carry64, false, BothWaves},
+        {"buffer atomic umax64", {0x7e040281u, 0x7e020300u, 0xe1600000u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::MaxPair64, false, BothWaves},
+        {"buffer atomic or64", {0x7e060281u, 0x34020700u, 0x7e040301u, 0xe1680000u, 0x80000100u, EndProgram}, "aps5_atomic64(", Expect::OrPair64, false, BothWaves},
+        {"global atomic add64", {0x7e0602ffu, 0x04000000u, 0x7e080280u, 0x7e040280u, 0xdd488000u, 0x00040302u, EndProgram}, "aps5_bda_atomic8", Expect::Carry64, true, BothWaves},
+        {"lds atomic add64", {0x7e0602ffu, 0x04000000u, 0x7e080280u, 0x7e0a0280u, 0x7e0c0280u, 0x7e0e0280u, 0xd9340000u, 0x00000605u, 0xbf8cc07fu, 0xbf8a0000u, 0xd9000000u, 0x00000305u, 0xbf8cc07fu, 0xbf8a0000u, 0xd8d80004u, 0x01000005u, 0xbf8cc07fu, 0x34040082u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_atomic64_lds", Expect::AllOne, false, BothWaves},
     };
 }
 
