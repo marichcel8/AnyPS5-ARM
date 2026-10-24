@@ -3,6 +3,7 @@
 ### Silent stubs
 
 - [sceAgcDriverRegisterDefaultOwner](../../../core/libs/prx/libSceAgcDriver/Unimplemented.cpp) (libSceAgcDriver) - takes one uint32 owner by value (OpenAGC `include/agcdriver.h`, SharpEmu `AgcExports.DriverResources.cs`) and returns 0 without recording it. PPSA21480 treats the code 0x8A6C9018 it returned before as fatal. Console behaviour is unverified: OpenAGC describes the function as a firmware 5.50 stub that returns 0x8A6C9018, SharpEmu returns 0
+- [Null graphics device](../../../core/libs/prx/libSceAgcDriver/Graphics/Backend/Null/NullBackend.cpp) (libSceAgcDriver) - with `ANYPS5_GPU_BACKEND=Metal` the driver links this device in place of the Vulkan graphics layer until the Metal backend lands. Draws, dispatches, presents and texture work are accepted and dropped, `Presentable` is false, labels, copies and fills take their CPU paths, and the register decoders return empty states. Not valid for running titles
 
 ### Unknown function info
 
