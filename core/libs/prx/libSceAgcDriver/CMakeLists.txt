@@ -281,6 +281,8 @@ set(agcDriverMetalSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestSamplerResource.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestTextureResource.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ShaderInputState.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/State.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
 )

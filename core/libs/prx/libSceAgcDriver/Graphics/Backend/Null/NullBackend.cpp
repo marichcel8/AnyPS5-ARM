@@ -19,16 +19,6 @@
 
 namespace AgcDriver::Graphics {
 
-std::vector<RegisterRead>*& RegisterReadLog() {
-    static thread_local std::vector<RegisterRead>* log = nullptr;
-    return log;
-}
-
-std::atomic<std::uint32_t>& RegisterReadLogsOpen() {
-    static std::atomic<std::uint32_t> open{0};
-    return open;
-}
-
 const char* DccKeysName(DccKeys) { return ""; }
 
 std::size_t DccKeyCount(TextureTileMode, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t) { return 0; }
@@ -50,43 +40,47 @@ bool AnyShadowedOverlaps(std::span<const std::pair<std::uint64_t, std::uint64_t>
 
 bool AnyShadowedOverlaps(std::uint64_t, std::size_t) { return false; }
 
-std::uint32_t ColorWriteMask(const Registers&) { return 0; }
-
 void CountDrawSkip(DrawSkip, double) {}
 
 void CountIndirectDraw(IndirectDrawPath, double, bool) {}
 
-std::optional<ColorMetadataPass> DecodeColorMetadataPass(const QueueState&) { return {}; }
+std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel) {
+    const std::uint32_t blockWidth = bytesPerTexel == 4 ? 128u : 256u;
+    const std::uint32_t blockHeight = bytesPerTexel == 1 ? 256u : 128u;
+    const auto width = static_cast<std::uint64_t>((extent.width + blockWidth - 1) / blockWidth * blockWidth);
+    const auto height = static_cast<std::uint64_t>((extent.height + blockHeight - 1) / blockHeight * blockHeight);
+    return width * height * bytesPerTexel;
+}
 
-ShaderRecompiler::ShaderComputeStageInfo DecodeComputeStageInfo(const Registers&, std::span<const std::byte>) { return {}; }
+std::uint64_t HtileMetadataBytes(VkExtent2D extent) {
+    const auto blocks = static_cast<std::uint64_t>((extent.width + 1023u) / 1024u) * ((extent.height + 511u) / 512u);
+    return blocks * 32768u;
+}
 
-ShaderRecompiler::ShaderPixelStageInfo DecodePixelStageInfo(const Registers&, const std::array<std::uint8_t, 8>&, bool) { return {}; }
-
-ShaderStages DecodeShaderStages(const QueueState&, bool) { return {}; }
-
-State DecodeState(const QueueState&, bool) { return {}; }
-
-ShaderRecompiler::ShaderVertexStageInfo DecodeVertexStageInfo(std::span<const std::byte>, std::uint64_t, std::span<const std::uint32_t>, std::vector<DecodeRead>*, bool, std::uint32_t) { return {}; }
-
-ShaderRecompiler::ShaderPixelStageInfo DefaultUnexportedInputs(ShaderRecompiler::ShaderPixelStageInfo, std::span<const std::uint32_t>) { return {}; }
-
-std::string DepthMaintenanceRejection(const QueueState&) { return {}; }
-
-bool DepthResummarizeDrawsNothing(const QueueState&) { return false; }
-
-std::uint64_t DepthSliceBytes(VkExtent2D, std::uint32_t) { return 0; }
+bool DccAlphaOnMsb(VkFormat format, std::uint32_t componentSwap) {
+    constexpr std::uint32_t standardReversed = 2;
+    constexpr std::uint32_t alternateReversed = 3;
+    switch (format) {
+    case VK_FORMAT_R8_UNORM:
+    case VK_FORMAT_R8_UINT:
+    case VK_FORMAT_R8_SRGB:
+    case VK_FORMAT_R16_UNORM:
+    case VK_FORMAT_R16_SNORM:
+    case VK_FORMAT_R16_UINT:
+    case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R16_SFLOAT:
+    case VK_FORMAT_R32_UINT:
+    case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R32_SFLOAT:
+        return componentSwap == alternateReversed;
+    default:
+        return componentSwap != standardReversed && componentSwap != alternateReversed;
+    }
+}
 
 bool DepthSurfaceAt(std::uint64_t) { return false; }
 
-bool DrawKeyCovers(RegisterRead) { return false; }
-
 bool DrawRecipes() { return false; }
-
-std::string DrawRejection(const QueueState&, bool) { return {}; }
-
-std::array<std::uint8_t, 8> ExportMappings(const State&) { return {}; }
-
-std::array<ShaderRecompiler::ColorExportPacking, 8> ExportPackings(const State&) { return {}; }
 
 void FlushPipelineJournal() {}
 
@@ -113,16 +107,6 @@ void NoteHtileDepthClear(std::uint64_t, std::size_t, std::size_t) {}
 void NoteKeysFillOnGpu(std::uint64_t, std::size_t, DccKeys) {}
 
 void NoteMemoryValueFill(const MemoryValueFill&) {}
-
-std::string NullPixelProgramRejection(const QueueState&) { return {}; }
-
-bool PixelProgramSkipped(const QueueState&) { return false; }
-
-std::uint8_t QuadPixelMask(const State&) { return 0; }
-
-std::array<std::uint16_t, 4> QuadSampleMasks(const State&) { return {}; }
-
-ShaderRecompiler::RasterPrimitive RasterPrimitiveOf(const State&) { return {}; }
 
 auto Recorder::Active() -> Recorder* { return nullptr; }
 
@@ -185,8 +169,6 @@ void RequireNoMultisampleTarget(std::uint64_t, std::size_t, const char*) {}
 auto ShaderResources::DataWordsHash(const CompiledShader&) -> std::uint64_t { return 0; }
 
 void ShutdownGuestBufferWorkers() {}
-
-bool StencilReferenceUnused(const State&) { return false; }
 
 void StopCompareHelpers() {}
 
