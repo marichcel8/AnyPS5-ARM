@@ -20,7 +20,8 @@ namespace AgcDriver::Graphics::Metal {
 
 namespace {
 
-constexpr std::uint32_t CompileCacheVersion = 1;
+constexpr std::uint32_t CompileCacheVersion = 2;
+constexpr MTLLanguageVersion DefaultLanguageVersion = MTLLanguageVersion3_2;
 constexpr std::uint64_t PipelineDomain = 0x4d504c31ull;
 constexpr std::uint64_t FlushDomain = 0x4d464c31ull;
 
@@ -134,7 +135,7 @@ struct MetalCompiler::State {
             descriptor.source = nsString(source.text);
             MTLCompileOptions* options = [MTLCompileOptions new];
             options.mathMode = source.fastMath ? MTLMathModeFast : MTLMathModeSafe;
-            if (source.languageVersion != 0) options.languageVersion = static_cast<MTLLanguageVersion>(source.languageVersion);
+            options.languageVersion = source.languageVersion != 0 ? static_cast<MTLLanguageVersion>(source.languageVersion) : DefaultLanguageVersion;
             descriptor.options = options;
             if (!source.name.empty()) descriptor.name = nsString(source.name);
             NSError* failure = nil;
@@ -257,6 +258,11 @@ void* MetalWorker::TaskOptions() const {
 
 std::shared_ptr<void> MetalWorker::Library(const LibrarySource& source, std::string* error) {
     return owner.state->library(source, (__bridge id<MTL4Compiler>)compiler, error);
+}
+
+void MetalWorker::NoteKey(const CompileKey& key) {
+    std::lock_guard keysLock(owner.state->keysMutex);
+    owner.state->sessionKeys.insert(key);
 }
 
 void MetalWorker::NotePipeline(double milliseconds) {

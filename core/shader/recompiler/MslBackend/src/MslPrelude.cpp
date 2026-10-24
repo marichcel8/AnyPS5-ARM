@@ -30,7 +30,7 @@ static inline uint aps5_lsb(uint value) { return value == 0u ? 0xffffffffu : ctz
 static inline uint aps5_med3(uint a, uint b, uint c) { return max(min(a, b), min(max(a, b), c)); }
 static inline int aps5_smed3(int a, int b, int c) { return max(min(a, b), min(max(a, b), c)); }
 static inline float aps5_fract(float value) { float magnitude = abs(value); float part = magnitude - floor(magnitude); return value < 0.0f && part != 0.0f ? 1.0f - part : part; }
-static inline float aps5_saturate(float value) { uint bits = as_type<uint>(value); return bits - 1u < 0x7f800000u ? as_type<float>(min(bits, 0x3f800000u)) : 0.0f; }
+static inline float aps5_saturate(uint bits) { return as_type<float>(bits - 1u < 0x7f800000u ? min(bits, 0x3f800000u) : 0u); }
 static inline uint aps5_pick(uint lhs, uint rhs, bool maximum) {
     uint either = lhs | rhs;
     if ((either & 0x7fffffffu) == 0u) return maximum ? (lhs & rhs) : either;
@@ -54,8 +54,7 @@ static inline uint aps5_wqm(uint value) {
 }
 )";
 
-constexpr std::string_view FloatClassText = R"(static inline bool aps5_class(float value, uint mask) {
-    uint bits = as_type<uint>(value);
+constexpr std::string_view FloatClassText = R"(static inline bool aps5_class(uint bits, uint mask) {
     uint magnitude = bits & 0x7fffffffu;
     bool negative = (bits >> 31u) != 0u;
     uint kind;
@@ -68,16 +67,18 @@ constexpr std::string_view FloatClassText = R"(static inline bool aps5_class(flo
 }
 )";
 
-constexpr std::string_view HalfText = R"(static inline uint aps5_f32_to_f16(float value) {
-    uint bits = as_type<uint>(value);
+constexpr std::string_view HalfText = R"(static inline uint aps5_f32_to_f16(uint bits) {
+#pragma METAL fp math_mode(relaxed)
+    float value = as_type<float>(bits);
     uint sign = (bits >> 16u) & 0x8000u;
     if (aps5_nan(bits)) return sign | 0x7e00u | ((bits & 0x007fffffu) >> 13u);
     return sign | (uint(as_type<ushort>(half(value))) & 0x7fffu);
 }
-static inline uint aps5_f32_to_f16_rtz(float value) {
-    uint bits = as_type<uint>(value);
-    if (aps5_nan(bits)) return aps5_f32_to_f16(value);
-    uint nearest = aps5_f32_to_f16(value);
+static inline uint aps5_f32_to_f16_rtz(uint bits) {
+#pragma METAL fp math_mode(relaxed)
+    float value = as_type<float>(bits);
+    if (aps5_nan(bits)) return aps5_f32_to_f16(bits);
+    uint nearest = aps5_f32_to_f16(bits);
     float back = float(as_type<half>(ushort(nearest)));
     return abs(back) > abs(value) ? nearest - 1u : nearest;
 }
@@ -549,12 +550,138 @@ constexpr std::string_view PermuteText = R"(static inline uint aps5_permute(uint
 }
 )";
 
+#define APS5_MSL_SOURCE(...) #__VA_ARGS__
+constexpr std::string_view SoftFloatText =
+#include "MslSoftFloat64.inc"
+    ;
+#undef APS5_MSL_SOURCE
+
+constexpr std::string_view Dot2Text = R"(static inline uint aps5_dot2_widen(uint pair, uint shift) {
+#pragma METAL fp math_mode(safe)
+    uint bits = (pair >> shift) & 0xffffu;
+    uint magnitude = bits & 0x7fffu;
+    uint normal = (magnitude << 13u) + (112u << 23u);
+    uint subnormal = as_type<uint>(float(magnitude) * as_type<float>(0x33800000u));
+    return (magnitude < 0x400u ? subnormal : normal) | ((bits & 0x8000u) << 16u);
+}
+static inline uint2 aps5_dot2_fast(uint a, uint b, uint c) {
+#pragma METAL fp math_mode(safe)
+    uint magnitudeC = c & 0x7fffffffu;
+    bool flushedC = magnitudeC < 0x00800000u;
+    bool fast = magnitudeC < 0x7f800000u && (flushedC || magnitudeC >= 0x0d800000u);
+    fast = fast && (a & 0x7c00u) != 0x7c00u && (a & 0x7c000000u) != 0x7c000000u && (b & 0x7c00u) != 0x7c00u && (b & 0x7c000000u) != 0x7c000000u;
+    float valueC = as_type<float>(flushedC ? (c & 0x80000000u) : c);
+    float productLow = as_type<float>(aps5_dot2_widen(a, 0u)) * as_type<float>(aps5_dot2_widen(b, 0u));
+    float productHigh = as_type<float>(aps5_dot2_widen(a, 16u)) * as_type<float>(aps5_dot2_widen(b, 16u));
+    float upper = productHigh + valueC;
+    float upperRight = upper - productHigh;
+    float upperLeft = upper - upperRight;
+    float upperLeftError = productHigh - upperLeft;
+    float upperRightError = valueC - upperRight;
+    float upperError = upperLeftError + upperRightError;
+    float total = productLow + upper;
+    float totalRight = total - productLow;
+    float totalLeft = total - totalRight;
+    float totalLeftError = productLow - totalLeft;
+    float totalRightError = upper - totalRight;
+    float totalError = totalLeftError + totalRightError;
+    float nearest = totalError + upperError;
+    float nearestRight = nearest - totalError;
+    float nearestLeft = nearest - nearestRight;
+    float nearestLeftError = totalError - nearestLeft;
+    float nearestRightError = upperError - nearestRight;
+    float error = nearestLeftError + nearestRightError;
+    uint nearestBits = as_type<uint>(nearest);
+    uint errorBits = as_type<uint>(error);
+    bool inexact = (errorBits & 0x7fffffffu) != 0u;
+    bool even = (nearestBits & 1u) == 0u;
+    bool sameSign = ((nearestBits ^ errorBits) & 0x80000000u) == 0u;
+    uint odd = nearestBits + (sameSign ? 1u : 0xffffffffu);
+    float roundedToOdd = as_type<float>(inexact && even ? odd : nearestBits);
+    uint result = as_type<uint>(total + roundedToOdd);
+    uint magnitude = result & 0x7fffffffu;
+    fast = fast && magnitude >= 0x0d800000u && magnitude < 0x7f000000u;
+    return uint2(result, fast ? 1u : 0u);
+}
+static inline uint aps5_dot2_f32_f16(uint a, uint b, uint c) {
+    uint2 fast = aps5_dot2_fast(a, b, c);
+    return fast.y != 0u ? fast.x : aps5_dot2_exact(a, b, c);
+}
+)";
+
+std::string PreciseText(bool strict) {
+    const std::string prefix = strict ? "aps5_s_" : "aps5_i_";
+    const std::string pragma = strict ? "#pragma METAL fp math_mode(safe)\n" : "#pragma METAL fp math_mode(relaxed)\n";
+    std::string text;
+    const auto define = [&](std::string_view result, std::string_view name, std::uint32_t count, std::string_view body) {
+        static constexpr std::string_view Parameters[3] = {"uint a", "uint b", "uint c"};
+        static constexpr std::string_view Floats[3] = {"    float x = as_type<float>(a);\n", "    float y = as_type<float>(b);\n", "    float z = as_type<float>(c);\n"};
+        text += "static inline " + std::string(result) + " " + prefix + std::string(name) + "(";
+        for (std::uint32_t index = 0; index < count; ++index) text += (index == 0u ? "" : ", ") + std::string(Parameters[index]);
+        text += ") {\n" + pragma;
+        for (std::uint32_t index = 0; index < count; ++index) text += Floats[index];
+        text += body;
+        text += "}\n";
+    };
+    const auto value = [&](std::string_view name, std::uint32_t count, std::string_view expression) { define("uint", name, count, "    return as_type<uint>(" + std::string(expression) + ");\n"); };
+    const auto test = [&](std::string_view name, std::string_view expression) { define("bool", name, 2u, "    return " + std::string(expression) + ";\n"); };
+    value("add", 2u, "x + y");
+    value("sub", 2u, "x - y");
+    value("mul", 2u, "x * y");
+    define("uint", "mad", 3u, "    float product = x * y;\n    return as_type<uint>(product + z);\n");
+    value("fma", 3u, "fma(x, y, z)");
+    value("recip", 1u, "1.0f / x");
+    value("rsqrt", 1u, "rsqrt(x)");
+    value("sqrt", 1u, "sqrt(x)");
+    value("sin", 1u, "sinpi(2.0f * x)");
+    value("cos", 1u, "cospi(2.0f * x)");
+    value("exp2", 1u, "exp2(x)");
+    value("log2", 1u, "log2(x)");
+    value("rint", 1u, "rint(x)");
+    value("floor", 1u, "floor(x)");
+    value("ceil", 1u, "ceil(x)");
+    value("trunc", 1u, "trunc(x)");
+    define("uint", "fract", 1u, "    float magnitude = abs(x);\n    float part = magnitude - floor(magnitude);\n    return as_type<uint>(x < 0.0f && part != 0.0f ? 1.0f - part : part);\n");
+    test("eq", "x == y");
+    test("one", "x < y || x > y");
+    test("lt", "x < y");
+    test("gt", "x > y");
+    test("le", "x <= y");
+    test("ge", "x >= y");
+    test("ueq", "!(x < y || x > y)");
+    test("une", "!(x == y)");
+    test("ult", "!(x >= y)");
+    test("ugt", "!(x <= y)");
+    test("ule", "!(x > y)");
+    test("uge", "!(x < y)");
+    define("uint", "min", 2u, "    if (aps5_nan(b)) return a;\n    if (((a | b) & 0x7fffffffu) == 0u) return a | b;\n    return x < y ? a : b;\n");
+    define("uint", "max", 2u, "    if (aps5_nan(b)) return a;\n    if (((a | b) & 0x7fffffffu) == 0u) return a & b;\n    return x >= y ? a : b;\n");
+    text += "static inline uint " + prefix + "min3(uint a, uint b, uint c) { return " + prefix + "min(" + prefix + "min(a, b), c); }\n";
+    text += "static inline uint " + prefix + "max3(uint a, uint b, uint c) { return " + prefix + "max(" + prefix + "max(a, b), c); }\n";
+    define("uint", "pick", 2u, "    if (((a | b) & 0x7fffffffu) == 0u) return a | b;\n    return x < y ? a : b;\n");
+    define("uint", "pickmax", 2u, "    if (((a | b) & 0x7fffffffu) == 0u) return a & b;\n    return x >= y ? a : b;\n");
+    text += "static inline uint " + prefix + "med3(uint a, uint b, uint c) {\n"
+            "    uint low = aps5_nan(b) ? a : " + prefix + "pick(a, b);\n"
+            "    uint lowest = aps5_nan(c) ? low : " + prefix + "pick(low, c);\n"
+            "    uint median = " + prefix + "pickmax(low, " + prefix + "pick(" + prefix + "pickmax(a, b), c));\n"
+            "    return aps5_nan(a) || aps5_nan(b) || aps5_nan(c) ? lowest : median;\n"
+            "}\n";
+    return text;
+}
+
 }
 
 std::string Prelude(const State& state) {
     const auto has = [&](std::uint32_t feature) { return (state.features & feature) != 0u; };
     std::string text(BaseText);
     if (has(FloatClass)) text += FloatClassText;
+    if (has(IeeeFloat)) text += PreciseText(false);
+    if (has(StrictFloat)) text += PreciseText(true);
+    if (has(Float64 | Dot2)) {
+        text += SoftFloatText;
+        text += '\n';
+    }
+    if (has(Dot2)) text += Dot2Text;
     if (has(Half)) text += HalfText;
     if (has(Wave | WaveExchange)) text += WaveText;
     if (has(WaveExchange)) text += WaveExchangeText;

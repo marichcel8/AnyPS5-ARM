@@ -36,8 +36,18 @@ enum Feature : std::uint32_t {
     Permute = 1u << 20u,
     Images = 1u << 21u,
     Samplers = 1u << 22u,
-    Atomic64 = 1u << 23u,
-    UpdateTable = 1u << 24u
+    IeeeFloat = 1u << 23u,
+    StrictFloat = 1u << 24u,
+    Float64 = 1u << 25u,
+    Dot2 = 1u << 26u,
+    Atomic64 = 1u << 27u,
+    UpdateTable = 1u << 28u
+};
+
+enum : std::uint8_t {
+    PrecisionFast = 0,
+    PrecisionIeee = 1,
+    PrecisionStrict = 2
 };
 
 struct State {
@@ -60,6 +70,7 @@ struct State {
     std::vector<const IrValue*> hoistOrder;
     std::map<std::uint32_t, std::uint32_t> constants;
     std::vector<std::string> imageTypes;
+    std::unordered_map<const IrValue*, std::uint8_t> precision;
 };
 
 [[noreturn]] void Fail(const IrValue& inst, std::string_view reason);
@@ -80,6 +91,8 @@ void Define(State& state, const IrValue& inst, std::string_view expression);
 void DefineZero(State& state, const IrValue& inst);
 const MemoryInfo& Memory(const State& state, const IrValue& inst);
 
+void AnalyzePrecision(State& state);
+std::uint8_t Precision(const State& state, const IrValue& inst);
 bool EmitAlu(State& state, const IrValue& inst);
 bool EmitMemory(State& state, const IrValue& inst);
 bool EmitWave(State& state, const IrValue& inst);

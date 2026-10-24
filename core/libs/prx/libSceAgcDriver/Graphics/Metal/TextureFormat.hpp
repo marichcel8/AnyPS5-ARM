@@ -39,6 +39,8 @@ enum class PixelFormat : std::uint16_t {
     RGBA8Snorm = 72,
     RGBA8Uint = 73,
     RGBA8Sint = 74,
+    BGRA8Unorm = 80,
+    BGRA8UnormSrgb = 81,
     RGB10A2Unorm = 90,
     RGB10A2Uint = 91,
     RG11B10Float = 92,
@@ -67,7 +69,11 @@ enum class PixelFormat : std::uint16_t {
     BC6HRGBFloat = 150,
     BC6HRGBUfloat = 151,
     BC7RGBAUnorm = 152,
-    BC7RGBAUnormSrgb = 153
+    BC7RGBAUnormSrgb = 153,
+    Depth16Unorm = 250,
+    Depth32Float = 252,
+    Stencil8 = 253,
+    Depth32FloatStencil8 = 260
 };
 
 enum class TextureTransform : std::uint8_t {
