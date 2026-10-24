@@ -9,6 +9,7 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/Passes/PassBuilder.h>
+#include <llvm/Passes/StandardInstrumentations.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/Path.h>
@@ -70,7 +71,10 @@ void Optimize(llvm::Module& module, llvm::TargetMachine& machine, const std::vec
     llvm::FunctionAnalysisManager functions;
     llvm::CGSCCAnalysisManager cgscc;
     llvm::ModuleAnalysisManager modules;
-    llvm::PassBuilder builder(&machine);
+    llvm::PassInstrumentationCallbacks callbacks;
+    llvm::StandardInstrumentations instrumentations(module.getContext(), false);
+    instrumentations.registerCallbacks(callbacks, &modules);
+    llvm::PassBuilder builder(&machine, llvm::PipelineTuningOptions(), std::nullopt, &callbacks);
     builder.registerModuleAnalyses(modules);
     builder.registerCGSCCAnalyses(cgscc);
     builder.registerFunctionAnalyses(functions);
