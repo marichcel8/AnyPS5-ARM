@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace AgcDriver::Graphics::Metal {
 
@@ -79,6 +80,9 @@ struct MetalCompiler::State {
 
     std::mutex flushMutex;
     std::filesystem::path sessionShard;
+    std::mutex keysMutex;
+    std::unordered_set<CompileKey, CompileKeyHash> sessionKeys;
+    std::atomic<std::uint64_t> shardsCompacted{0};
     std::atomic<std::uint64_t> newSinceFlush{0};
     std::atomic<std::uint64_t> nextFlushAt{0};
     std::atomic<bool> flushQueued{false};
@@ -156,6 +160,11 @@ struct MetalCompiler::State {
             return;
         }
         const auto started = std::chrono::steady_clock::now();
+        std::vector<CompileKey> keys;
+        {
+            std::lock_guard keysLock(keysMutex);
+            keys.assign(sessionKeys.begin(), sessionKeys.end());
+        }
         const auto partial = directory->NewShardPath();
         bool committed = false;
         @autoreleasepool {
@@ -172,8 +181,13 @@ struct MetalCompiler::State {
             auto name = partial.string();
             const auto shard = directory->Directory() / partial.filename();
             std::error_code error;
-            if (!sessionShard.empty() && sessionShard != shard) std::filesystem::remove(sessionShard, error);
+            if (!sessionShard.empty() && sessionShard != shard) {
+                std::filesystem::remove(sessionShard, error);
+                std::filesystem::remove(sessionShard.string() + ".keys", error);
+            }
             sessionShard = shard;
+            directory->WriteKeys(shard, keys);
+            shardsCompacted += directory->Compact();
         } else {
             newSinceFlush += pending;
         }
@@ -283,6 +297,7 @@ std::unique_ptr<MetalCompiler> MetalCompiler::Create(Device& device, const Compi
                 environment.compilerVersion = CompileCacheVersion;
                 state->directory = std::make_unique<CompileCacheDirectory>(root, environment, config.archiveBudgetBytes, config.maxShards);
                 state->directory->Prune();
+                state->shardsCompacted += state->directory->Compact();
                 state->journal = std::make_unique<WarmJournal>(state->directory->Directory() / "warm.txt", config.journalEntries);
                 NSMutableArray<id<MTL4Archive>>* archives = [NSMutableArray new];
                 for (const auto& shard : state->directory->Shards()) {
@@ -343,7 +358,8 @@ CompileKey MetalCompiler::ComputeKey(const ComputePipelineRequest& request) cons
 
 std::shared_ptr<CompileTicket> MetalCompiler::Compute(const ComputePipelineRequest& request) {
     auto* s = state.get();
-    return s->service->Submit(ComputeKey(request), request.priority, [s, request](CompileWorker& base) {
+    const auto key = ComputeKey(request);
+    return s->service->Submit(key, request.priority, [s, request, key](CompileWorker& base) {
         auto& worker = static_cast<MetalWorker&>(base);
         CompileOutcome outcome;
         @autoreleasepool {
@@ -389,6 +405,10 @@ std::shared_ptr<CompileTicket> MetalCompiler::Compute(const ComputePipelineReque
             product->buildMilliseconds = milliseconds;
             product->archiveHit = milliseconds < s->config.archiveHitMilliseconds;
             product->native = (__bridge_retained void*)pipeline;
+            {
+                std::lock_guard keysLock(s->keysMutex);
+                s->sessionKeys.insert(key);
+            }
             worker.NotePipeline(milliseconds);
             outcome.costBytes = s->config.pipelineCostBytes;
             outcome.product = std::move(product);
@@ -443,6 +463,7 @@ CompilerReport MetalCompiler::Report() const {
     report.pipelineNanos = state->pipelineNanos;
     report.archiveShardsLoaded = state->shardsLoaded;
     report.archiveShardsRejected = state->shardsRejected;
+    report.archiveShardsCompacted = state->shardsCompacted;
     report.flushes = state->flushes;
     report.flushNanos = state->flushNanos;
     report.pendingPipelines = state->newSinceFlush;

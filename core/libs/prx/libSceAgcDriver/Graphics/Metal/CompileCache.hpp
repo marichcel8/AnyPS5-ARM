@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,9 @@ public:
     bool CommitShard(const std::filesystem::path& partial);
     void AbandonShard(const std::filesystem::path& partial);
     void Quarantine(const std::filesystem::path& shard);
+    bool WriteKeys(const std::filesystem::path& shard, const std::vector<CompileKey>& keys) const;
+    [[nodiscard]] std::vector<CompileKey> ReadKeys(const std::filesystem::path& shard) const;
+    std::uint32_t Compact();
     void Prune();
     [[nodiscard]] std::uint64_t Bytes() const;
 

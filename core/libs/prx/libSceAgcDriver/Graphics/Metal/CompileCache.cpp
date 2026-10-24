@@ -12,6 +12,7 @@ namespace {
 
 constexpr std::string_view ShardSuffix = ".mtl4a";
 constexpr std::string_view StagingDirectory = "tmp";
+constexpr std::string_view KeysSuffix = ".keys";
 constexpr std::string_view BadSuffix = ".bad";
 constexpr auto StalePartial = std::chrono::minutes(1);
 constexpr auto StaleDirectory = std::chrono::hours(24 * 30);
@@ -25,6 +26,18 @@ struct ShardFile {
 
 bool endsWith(const std::string& text, std::string_view suffix) {
     return text.size() >= suffix.size() && text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+std::filesystem::path keysPath(const std::filesystem::path& shard) {
+    auto path = shard;
+    path += KeysSuffix;
+    return path;
+}
+
+void removeShard(const std::filesystem::path& shard) {
+    std::error_code error;
+    std::filesystem::remove(shard, error);
+    std::filesystem::remove(keysPath(shard), error);
 }
 
 std::vector<ShardFile> listFiles(const std::filesystem::path& directory, std::string_view suffix) {
@@ -101,6 +114,53 @@ void CompileCacheDirectory::Quarantine(const std::filesystem::path& shard) {
     bad += BadSuffix;
     std::filesystem::rename(shard, bad, error);
     if (error) std::filesystem::remove(shard, error);
+    std::filesystem::remove(keysPath(shard), error);
+}
+
+bool CompileCacheDirectory::WriteKeys(const std::filesystem::path& shard, const std::vector<CompileKey>& keys) const {
+    std::vector<std::uint64_t> words;
+    words.reserve(keys.size() * 2);
+    for (const auto& key : keys) {
+        words.push_back(key.low);
+        words.push_back(key.high);
+    }
+    return ShaderRecompiler::WriteFileAtomically(keysPath(shard), {reinterpret_cast<const std::byte*>(words.data()), words.size() * sizeof(std::uint64_t)});
+}
+
+std::vector<CompileKey> CompileCacheDirectory::ReadKeys(const std::filesystem::path& shard) const {
+    std::vector<CompileKey> keys;
+    std::ifstream stream(keysPath(shard), std::ios::binary | std::ios::ate);
+    if (!stream) return keys;
+    const auto bytes = static_cast<std::size_t>(stream.tellg());
+    if (bytes == 0 || bytes % (2 * sizeof(std::uint64_t)) != 0) return keys;
+    std::vector<std::uint64_t> words(bytes / sizeof(std::uint64_t));
+    stream.seekg(0);
+    stream.read(reinterpret_cast<char*>(words.data()), static_cast<std::streamsize>(bytes));
+    if (!stream) return {};
+    for (std::size_t index = 0; index < words.size(); index += 2) keys.push_back({words[index], words[index + 1]});
+    return keys;
+}
+
+std::uint32_t CompileCacheDirectory::Compact() {
+    std::unordered_set<CompileKey, CompileKeyHash> covered;
+    std::uint32_t removed = 0;
+    bool first = true;
+    for (const auto& shard : listFiles(directory, ShardSuffix)) {
+        const auto keys = ReadKeys(shard.path);
+        if (first) {
+            first = false;
+            covered.insert(keys.begin(), keys.end());
+            continue;
+        }
+        const bool redundant = !keys.empty() && std::all_of(keys.begin(), keys.end(), [&](const CompileKey& key) { return covered.contains(key); });
+        if (redundant) {
+            removeShard(shard.path);
+            ++removed;
+            continue;
+        }
+        covered.insert(keys.begin(), keys.end());
+    }
+    return removed;
 }
 
 void CompileCacheDirectory::Prune() {
@@ -116,7 +176,7 @@ void CompileCacheDirectory::Prune() {
     for (const auto& shard : shards) total += shard.bytes;
     for (std::size_t index = shards.size(); index > 1 && (total > budgetBytes || index > maxShards); --index) {
         const auto& oldest = shards[index - 1];
-        std::filesystem::remove(oldest.path, error);
+        removeShard(oldest.path);
         total -= oldest.bytes;
     }
     for (std::filesystem::directory_iterator it(root, error), end; !error && it != end; it.increment(error)) {

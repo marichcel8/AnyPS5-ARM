@@ -77,6 +77,7 @@ struct CompilerReport {
     std::uint64_t pipelineNanos = 0;
     std::uint64_t archiveShardsLoaded = 0;
     std::uint64_t archiveShardsRejected = 0;
+    std::uint64_t archiveShardsCompacted = 0;
     std::uint64_t archiveBytes = 0;
     std::uint64_t flushes = 0;
     std::uint64_t flushNanos = 0;
