@@ -73,6 +73,9 @@ public:
     std::uint64_t CompletedSerial(QueueKind queue) const;
     bool WaitSerial(QueueKind queue, std::uint64_t serial, std::uint32_t timeoutMs);
     bool WaitIdle(std::uint32_t timeoutMs);
+    void* NativeTimeline(QueueKind queue) const;
+    void WaitOnQueue(QueueKind waiter, QueueKind signaler, std::uint64_t serial);
+    void WaitOnEvent(QueueKind waiter, void* sharedEvent, std::uint64_t value);
     void Collect();
 
     MemoryReport Memory() const;
