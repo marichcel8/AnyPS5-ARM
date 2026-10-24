@@ -8,7 +8,6 @@ namespace ShaderRecompiler::Msl {
 namespace {
 
 constexpr const char* HalfLane = "aps5_lane";
-constexpr const char* Exchange = "aps5_index, aps5_wave, aps5_phase";
 
 struct Move {
     std::string lane;
@@ -162,29 +161,38 @@ bool EmitPermlane(State& state, const IrValue& inst) {
 }
 
 bool EmitBallot(State& state, const IrValue& inst) {
-    if (!state.spanned) {
+    if (state.lanes == 1u) {
         Define(state, inst, "uint4(" + Ballot32(state, Arg(state, inst, 0)) + ", 0u, 0u, 0u)");
         return true;
     }
-    state.features |= Wave | WaveExchange | LocalIndex;
-    Define(state, inst, "uint4(aps5_ballot64(" + Arg(state, inst, 0) + ", " + Exchange + "), 0u, 0u)");
+    const auto low = Ballot32(state, HalfArg(state, inst, 0, 0u));
+    const auto high = Ballot32(state, HalfArg(state, inst, 0, 1u));
+    const auto joined = Temp(state);
+    Line(state, "const uint4 " + joined + " = uint4(" + low + ", " + high + ", 0u, 0u);");
+    DefineHalves(state, inst, joined, joined);
     return true;
 }
 
 bool EmitReadLane(State& state, const IrValue& inst) {
-    if (!state.spanned) {
+    if (state.lanes == 1u) {
         Define(state, inst, "simd_shuffle(" + Arg(state, inst, 0) + ", ushort(" + Arg(state, inst, 1) + " & 31u))");
         return true;
     }
-    state.features |= WaveExchange | LocalIndex;
-    Define(state, inst, "aps5_read64(" + Arg(state, inst, 0) + ", " + Arg(state, inst, 1) + " & 63u, " + Exchange + ")");
+    const auto lane = Temp(state);
+    const auto low = Temp(state);
+    const auto high = Temp(state);
+    Line(state, "const uint " + lane + " = " + HalfArg(state, inst, 1, 0u) + " & 63u;");
+    Line(state, "const uint " + low + " = simd_shuffle(" + HalfArg(state, inst, 0, 0u) + ", ushort(" + lane + " & 31u));");
+    Line(state, "const uint " + high + " = simd_shuffle(" + HalfArg(state, inst, 0, 1u) + ", ushort(" + lane + " & 31u));");
+    const auto joined = lane + " >= 32u ? " + high + " : " + low;
+    DefineHalves(state, inst, joined, joined);
     return true;
 }
 
 bool EmitReadFirstLane(State& state, const IrValue& inst) {
     const IrValue* active = inst.Argument(1)->Resolve();
     const bool everyone = active->HasImmediate() && active->ImmediateBool();
-    if (!state.spanned) {
+    if (state.lanes == 1u) {
         if (everyone) {
             Define(state, inst, "simd_broadcast_first(" + Arg(state, inst, 0) + ")");
             return true;
@@ -194,24 +202,52 @@ bool EmitReadFirstLane(State& state, const IrValue& inst) {
         Define(state, inst, mask + " != 0u ? simd_shuffle(" + Arg(state, inst, 0) + ", ushort(ctz(" + mask + "))) : simd_broadcast_first(" + Arg(state, inst, 0) + ")");
         return true;
     }
-    state.features |= Wave | WaveExchange | LocalIndex;
-    if (everyone) Define(state, inst, "aps5_read64(" + Arg(state, inst, 0) + ", 0u, " + Exchange + ")");
-    else Define(state, inst, "aps5_readfirst64(" + Arg(state, inst, 0) + ", " + Arg(state, inst, 1) + ", " + Exchange + ")");
+    if (everyone) {
+        const auto first = Temp(state);
+        Line(state, "const uint " + first + " = simd_broadcast_first(" + HalfArg(state, inst, 0, 0u) + ");");
+        DefineHalves(state, inst, first, first);
+        return true;
+    }
+    const auto low = Temp(state);
+    const auto high = Temp(state);
+    const auto lane = Temp(state);
+    const auto fromLow = Temp(state);
+    const auto fromHigh = Temp(state);
+    Line(state, "const uint " + low + " = " + Ballot32(state, HalfArg(state, inst, 1, 0u)) + ";");
+    Line(state, "const uint " + high + " = " + Ballot32(state, HalfArg(state, inst, 1, 1u)) + ";");
+    Line(state, "const uint " + lane + " = " + low + " != 0u ? ctz(" + low + ") : (" + high + " != 0u ? 32u + ctz(" + high + ") : 0u);");
+    Line(state, "const uint " + fromLow + " = simd_shuffle(" + HalfArg(state, inst, 0, 0u) + ", ushort(" + lane + " & 31u));");
+    Line(state, "const uint " + fromHigh + " = simd_shuffle(" + HalfArg(state, inst, 0, 1u) + ", ushort(" + lane + " & 31u));");
+    const auto joined = lane + " >= 32u ? " + fromHigh + " : " + fromLow;
+    DefineHalves(state, inst, joined, joined);
     return true;
 }
 
 }
 
-std::string WaveLane(State& state) {
-    if (!state.spanned) return SimdLane(state);
-    state.features |= LocalIndex;
-    return "(aps5_index & 63u)";
+bool IsCrossLane(IrOpcode opcode) {
+    return opcode == IrOpcode::Ballot || opcode == IrOpcode::ReadLane || opcode == IrOpcode::ReadFirstLane;
 }
 
-std::string WaveAny(State& state, const std::string& predicate) {
-    if (!state.spanned) return "simd_any(" + predicate + ")";
-    state.features |= Wave | WaveExchange | LocalIndex;
-    return "aps5_any64(" + predicate + ", " + Exchange + ")";
+std::string HalfArg(State& state, const IrValue& inst, std::size_t index, std::uint32_t half) {
+    std::string text;
+    ForEachHalf(state, [&](std::uint32_t current) {
+        if (current == half) text = Arg(state, inst, index);
+    });
+    return text;
+}
+
+void DefineHalves(State& state, const IrValue& inst, std::string_view zero, std::string_view one) {
+    ForEachHalf(state, [&](std::uint32_t half) { Define(state, inst, half == 0u ? zero : one); });
+}
+
+std::string WaveLane(State& state) {
+    const auto lane = SimdLane(state);
+    return state.lanes == 2u && CurrentHalf() != 0u ? "(" + lane + " + " + U32(CurrentHalf() * 32u) + ")" : lane;
+}
+
+std::string WaveAny(State& state, const std::string& zero, const std::string& one) {
+    return "simd_any(" + (one.empty() ? zero : "(" + zero + ") || (" + one + ")") + ")";
 }
 
 bool EmitWave(State& state, const IrValue& inst) {
@@ -220,7 +256,7 @@ bool EmitWave(State& state, const IrValue& inst) {
         Define(state, inst, WaveLane(state));
         return true;
     case IrOpcode::WriteLane:
-        Define(state, inst, "(" + Arg(state, inst, 1) + " & " + U32(state.spanned ? 63u : 31u) + ") == " + WaveLane(state) + " ? " + Arg(state, inst, 0) + " : " + Arg(state, inst, 2));
+        Define(state, inst, "(" + Arg(state, inst, 1) + " & " + U32(state.lanes == 2u ? 63u : 31u) + ") == " + WaveLane(state) + " ? " + Arg(state, inst, 0) + " : " + Arg(state, inst, 2));
         return true;
     case IrOpcode::Ballot: return EmitBallot(state, inst);
     case IrOpcode::ReadLane: return EmitReadLane(state, inst);

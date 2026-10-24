@@ -21,8 +21,17 @@ void Fail(std::string_view reason) {
     throw MslUnsupported("MSL backend: " + std::string(reason));
 }
 
+std::uint32_t& CurrentHalf() {
+    static thread_local std::uint32_t half = 0u;
+    return half;
+}
+
+std::string HalfSuffix() {
+    return CurrentHalf() == 0u ? std::string() : "_" + std::to_string(CurrentHalf());
+}
+
 std::string Name(const IrValue& value) {
-    return "v" + std::to_string(value.Id());
+    return "v" + std::to_string(value.Id()) + HalfSuffix();
 }
 
 std::string U32(std::uint32_t value) {
@@ -288,7 +297,17 @@ void EmitBlockBody(State& state, const IrBlock& block) {
                 ldsRead |= access != SharedAccess::Write;
             }
         }
-        EmitInstruction(state, *inst);
+        if (state.lanes == 1u) {
+            EmitInstruction(state, *inst);
+            continue;
+        }
+        if (IsCrossLane(inst->Opcode())) {
+            EmitWave(state, *inst);
+            continue;
+        }
+        ForEachHalf(state, [&](std::uint32_t half) {
+            if (half == 0u || inst->Opcode() != IrOpcode::Barrier) EmitInstruction(state, *inst);
+        });
     }
 }
 
@@ -341,15 +360,13 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if (program.Info().sharedMemoryBytes != 0u) throw MslUnsupported("MSL backend: LDS in device memory is not emitted (section S9)");
     State state{program, inputInfo, bindings.layout, target};
     const ShaderWorkgroupInputInfo* workgroup = inputInfo.compute;
-    state.spanned = program.WaveSize() == 64u;
-    if (state.spanned && (workgroup == nullptr || std::max(workgroup->threadsNum[0], 1u) * std::max(workgroup->threadsNum[1], 1u) * std::max(workgroup->threadsNum[2], 1u) != 64u)) {
-        throw MslUnsupported("MSL backend: wave64 programs are emitted only for 64-thread threadgroups, where one wave is two SIMD-groups (other sizes need two guest lanes per thread, section S4b)");
-    }
+    state.lanes = program.WaveSize() == 64u ? 2u : 1u;
+    if (state.lanes == 2u && workgroup == nullptr) throw MslUnsupported("MSL backend: a wave64 program needs its workgroup size");
     state.ldsDwords = workgroup != nullptr ? workgroup->ldsSizeDwords : 0u;
     state.scratchDwords = program.Info().scratchDwords;
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
-    state.stopAllowed = state.waveLds == 0u && !HasBarrier(program) && !state.spanned;
+    state.stopAllowed = state.waveLds == 0u && !HasBarrier(program) && state.lanes == 1u;
     Hoister{state}.Run();
     AnalyzePrecision(state);
     EmitFlow(state);
@@ -364,23 +381,21 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
         const auto pointer = [&](std::uint32_t feature, std::string_view name) { return (state.features & feature) != 0u ? std::string(name) : std::string("nullptr"); };
         declare("aps5_ctx aps5_c = {" + pointer(Bda, "aps5_bda_table") + ", " + pointer(Fault, "aps5_fault_buffer") + ", " + pointer(GuestBuffers, "aps5_buffers") + ", " + U32(static_cast<std::uint32_t>(program.Resources().stage)) + ", false};");
     }
-    if ((state.features & WaveExchange) != 0u) {
-        declare("threadgroup uint aps5_wave[132];");
-        declare("uint aps5_phase = 0u;");
-    }
     if ((state.features & Lds) != 0u) declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
-    if ((state.features & Scratch) != 0u) declare("uint aps5_scratch[" + std::to_string(std::max(state.scratchDwords, 1u)) + "];");
-    if ((state.features & VectorWindow) != 0u) declare("uint aps5_window[" + std::to_string(std::max(state.windowDwords, 1u)) + "];");
-    for (const auto* value : state.hoistOrder) {
-        const auto type = TypeName(value->Type());
-        if (type.empty()) Fail(*value, "is carried across blocks with a type MSL does not hold");
-        declare(type + " " + Name(*value) + " = " + (type == "bool" ? std::string("false") : type + "(0)") + ";");
-    }
+    ForEachHalf(state, [&](std::uint32_t) {
+        if ((state.features & Scratch) != 0u) declare("uint aps5_scratch" + HalfSuffix() + "[" + std::to_string(std::max(state.scratchDwords, 1u)) + "];");
+        if ((state.features & VectorWindow) != 0u) declare("uint aps5_window" + HalfSuffix() + "[" + std::to_string(std::max(state.windowDwords, 1u)) + "];");
+        for (const auto* value : state.hoistOrder) {
+            const auto type = TypeName(value->Type());
+            if (type.empty()) Fail(*value, "is carried across blocks with a type MSL does not hold");
+            declare(type + " " + Name(*value) + " = " + (type == "bool" ? std::string("false") : type + "(0)") + ";");
+        }
+    });
 
     std::string text = Prelude(state);
     if (workgroup != nullptr) {
         const auto threads = std::max(workgroup->threadsNum[0], 1u) * std::max(workgroup->threadsNum[1], 1u) * std::max(workgroup->threadsNum[2], 1u);
-        text += "[[max_total_threads_per_threadgroup(" + std::to_string(threads) + ")]] ";
+        text += "[[max_total_threads_per_threadgroup(" + std::to_string(state.lanes == 2u ? (threads + 63u) / 64u * 32u : threads) + ")]] ";
     }
     text += "kernel void " + std::string(MslEntryPoint) + "(" + Parameters(state) + ")\n{\n";
     text += declarations;

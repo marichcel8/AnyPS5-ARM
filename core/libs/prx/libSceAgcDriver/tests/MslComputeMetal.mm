@@ -83,7 +83,7 @@ double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputeProg
     [encoder setBuffer:fault offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::FaultBuffer)];
     [encoder setBuffer:buffers offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::GuestBuffers)];
     [encoder useResource:output usage:MTLResourceUsageRead | MTLResourceUsageWrite];
-    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(MslComputePrograms::Threads, 1, 1)];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(MslComputePrograms::HostThreads(waveSize), 1, 1)];
     [encoder endEncoding];
     [commands commit];
     [commands waitUntilCompleted];

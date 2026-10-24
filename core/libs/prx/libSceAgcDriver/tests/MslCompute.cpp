@@ -20,7 +20,7 @@ void CheckProgram(const MslComputePrograms::Program& program, std::uint64_t addr
     Require(result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
     Require(result.spirv.empty(), name + ": an MSL artifact also carries SPIR-V");
     Require(source.find("kernel void " + std::string(MslEntryPoint) + "(") != std::string::npos, name + ": the source has no " + std::string(MslEntryPoint) + " kernel");
-    Require(source.find("[[max_total_threads_per_threadgroup(64)]]") != std::string::npos, name + ": the kernel does not declare its threadgroup size");
+    Require(source.find("[[max_total_threads_per_threadgroup(" + std::to_string(MslComputePrograms::HostThreads(waveSize)) + ")]]") != std::string::npos, name + ": the kernel does not declare its threadgroup size");
     Require(source.find(program.marker) != std::string::npos, name + ": the source lacks " + std::string(program.marker));
     Require(source.find("#pragma") == std::string::npos, name + ": the source carries a pragma");
     if (!program.bda) return;
@@ -28,18 +28,13 @@ void CheckProgram(const MslComputePrograms::Program& program, std::uint64_t addr
     Require(source.find("aps5_note_write(thread aps5_ctx& c, ulong address)") != std::string::npos, name + ": a BDA store does not note written pages");
 }
 
-void CheckWave64Rejected() {
+void CheckWave64Partial() {
     const auto programs = MslComputePrograms::Programs();
     const auto userData = MslComputePrograms::UserData();
     auto request = MslComputePrograms::Request(programs.front(), 0x7f000u, userData, 64u);
-    request.context.compute = ShaderComputeStageInfo{{128u, 1u, 1u}, 128u, {false, false, false}, false, 1u};
-    bool rejected = false;
-    try {
-        static_cast<void>(Recompile(request));
-    } catch (const std::exception&) {
-        rejected = true;
-    }
-    Require(rejected, "a wave64 program with 128 threads recompiled to MSL although a wave there needs two guest lanes per thread");
+    request.context.compute = ShaderComputeStageInfo{{96u, 1u, 1u}, 96u, {false, false, false}, false, 1u};
+    const auto source = std::string(Recompile(request).msl.Source());
+    Require(source.find("[[max_total_threads_per_threadgroup(64)]]") != std::string::npos, "a 96-thread wave64 program does not run in 64 host threads");
 }
 
 }
@@ -54,7 +49,7 @@ int main() {
                 address += 0x1000u;
             }
         }
-        CheckWave64Rejected();
+        CheckWave64Partial();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "MslCompute: %s\n", error.what());
         return 1;

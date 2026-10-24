@@ -9,7 +9,11 @@
 
 namespace MslComputePrograms {
 
-inline constexpr std::uint32_t Threads = 64u;
+inline constexpr std::uint32_t Threads = 128u;
+
+inline constexpr std::uint32_t HostThreads(std::uint32_t waveSize) {
+    return waveSize == 64u ? (Threads + 63u) / 64u * 32u : Threads;
+}
 inline constexpr std::uint32_t BufferGuestBase = 0x10000000u;
 inline constexpr std::uint64_t BdaGuestBase = 0x120000000ull;
 inline constexpr std::uint32_t BufferStore = 0xe0702000u;
@@ -48,9 +52,9 @@ inline std::uint32_t Expected(Expect expect, std::uint32_t lane) {
     case Expect::RotateHalf: return (lane & ~31u) | ((lane + 31u) & 31u);
     case Expect::ReadLane5: return (lane & ~31u) + 5u;
     case Expect::Ballot32: return lane < 32u ? 0xffe00000u : 0xffffffffu;
-    case Expect::Ballot64: return 0x001fffffu;
-    case Expect::ReadLane37: return 37u;
-    case Expect::FirstUpperPlus: return lane > 32u ? 33u + lane : 0u;
+    case Expect::Ballot64: return lane < 64u ? 0x001fffffu : 0u;
+    case Expect::ReadLane37: return (lane & ~63u) + 37u;
+    case Expect::FirstUpperPlus: return lane < 64u ? (lane > 32u ? 33u + lane : 0u) : (lane & ~63u) + lane;
     }
     return 0u;
 }
@@ -75,10 +79,10 @@ inline std::vector<Program> Programs() {
         {"permlane16", {0xbe8403ffu, 0x89abcdefu, 0xbe8503ffu, 0x01234567u, 0xd7770001u, 0x00140900u, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle", Expect::Mirror, false, BothWaves},
         {"readlane", {0xd7600004u, 0x00010b00u, 0x7e020204u, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle(", Expect::ReadLane5},
         {"ballot", {0xd4c10008u, 0x00020094u, 0x7e020208u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_ballot32", Expect::Ballot32},
-        {"wave64 ballot", {0xd4c10008u, 0x00020094u, 0x7e020209u, 0x3a020208u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_ballot64", Expect::Ballot64, false, Wave64},
-        {"wave64 readlane", {0xd7600004u, 0x00014b00u, 0x7e020204u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_read64", Expect::ReadLane37, false, Wave64},
-        {"wave64 readfirstlane", {0xd4c10008u, 0x000200a0u, 0xbefe0408u, 0x7e080500u, 0x4a020004u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_readfirst64", Expect::FirstUpperPlus, false, Wave64},
-        {"wave64 execz branch", {0x7e020283u, 0xd4c40008u, 0x00020090u, 0xbe8a2408u, 0xbf880001u, 0x7e020287u, 0xbefe040au, BufferStore, BufferStoreOperands, EndProgram}, "aps5_any64", Expect::LowHalfSeven, false, Wave64},
+        {"wave64 ballot", {0xd4c10008u, 0x00020094u, 0x7e020209u, 0x3a020208u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_ballot32", Expect::Ballot64, false, Wave64},
+        {"wave64 readlane", {0xd7600004u, 0x00014b00u, 0x7e020204u, BufferStore, BufferStoreOperands, EndProgram}, ">= 32u ? ", Expect::ReadLane37, false, Wave64},
+        {"wave64 readfirstlane", {0xd4c10008u, 0x000200a0u, 0xbefe0408u, 0x7e080500u, 0x4a020004u, BufferStore, BufferStoreOperands, EndProgram}, "ctz(", Expect::FirstUpperPlus, false, Wave64},
+        {"wave64 execz branch", {0x7e020283u, 0xd4c40008u, 0x00020090u, 0xbe8a2408u, 0xbf880001u, 0x7e020287u, 0xbefe040au, BufferStore, BufferStoreOperands, EndProgram}, "simd_any", Expect::LowHalfSeven, false, Wave64},
     };
 }
 
