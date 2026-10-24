@@ -152,6 +152,12 @@ function(add_shader_recompiler target runtimeTarget)
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/src/SpirvMemory/SpirvEmitterHelpers.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/src/SpirvMemory/SpirvMemoryInstructions.cpp
 
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslEmitter.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslPrelude.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslAlu.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslMemory.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslFlow.cpp
+
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/DummyShaders.cpp
     )
 
@@ -164,6 +170,7 @@ function(add_shader_recompiler target runtimeTarget)
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Translation/include
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/Optimization/include
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/SpirvBackend/include
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/include
             ${ANYPS5_SPIRV_HEADERS_INCLUDE_DIR}
             ${ANYPS5_GLSLANG_INCLUDE_DIRS}
     )

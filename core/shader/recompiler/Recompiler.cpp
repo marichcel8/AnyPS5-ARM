@@ -12,6 +12,7 @@
 #include "VertexInputSpecialization.hpp"
 #include "FragmentOutputSpecialization.hpp"
 #include "SpirvBackend/SpirvSpecialization.hpp"
+#include "MslBackend/MslEmitter.hpp"
 #include "RdnaDecoder/RdnaDescriptorFormat.hpp"
 #include "ShaderDiskCache.hpp"
 #include <list>
@@ -524,8 +525,26 @@ void prepareInterface(const RecompileRequest& request, IrProgram& program) {
     shaderInfoCollector.Collect(program, inputInfo);
 }
 
+CompiledVariant emitMslVariant(const RecompileRequest& request, IrProgram& program, const ShaderStageInputInfo& inputInfo) {
+    if (request.target.subgroupSize != request.msl.simdgroupSize) throw std::runtime_error("Shader recompiler: the MSL frontend target disagrees with the SIMD-group width");
+    program.Metadata().bindingLayoutComplete = false;
+    auto bindings = BindingAllocator{}.Allocate(program, request.layout, false, false);
+    CompiledShaderArtifact result;
+    result.variantId = nextVariantId();
+    result.backend = ShaderBackendKind::Msl;
+    result.msl = SharedMsl(MslEmitter{}.Emit(program, inputInfo, bindings, request.msl));
+    result.bdaAbiVersion = program.Info().usesDma || program.Info().usesFaultBuffer ? request.msl.bdaAbiVersion : 0u;
+    result.memoryOffsetDword = bindings.layout.memoryOffsetDword;
+    result.shaderDataDwords = bindings.layout.ShaderDataDwords();
+    result.imageMetadataDword = bindings.layout.ImageMetadataDword();
+    result.runtimeImageCount = bindings.layout.runtimeImageCount;
+    result.hostSubgroupSize = HostSubgroupSize(request);
+    return {request.layout, {}, std::move(static_cast<CompiledBindingLayout&>(bindings)), std::move(result)};
+}
+
 CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program) {
     const auto inputInfo = RequestInputInfo(request);
+    if (request.backend == ShaderBackendKind::Msl) return emitMslVariant(request, program, inputInfo);
     constexpr BindingAllocator bindingAllocator;
     bool registration = request.target.registrationModules && (request.shader.stage == ShaderStage::Vertex || request.shader.stage == ShaderStage::Fragment);
     program.Metadata().bindingLayoutComplete = false;
@@ -956,7 +975,9 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
             if (artifact.registrationModule) runtimeSelectors.at(input.location / RuntimeAbi::VertexSelectorsPerDword) |= (selectors & 0xfffu) << (input.location % RuntimeAbi::VertexSelectorsPerDword * 16u);
         }
     }
-    if (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !artifact.vertexInputPatches.empty() || request.context.pixel) {
+    result.backend = artifact.backend;
+    result.msl = artifact.msl;
+    if (artifact.backend == ShaderBackendKind::Spirv && (!plan->bindings.specialization.empty() || variant.bindings.layout.UsesPushData() || !artifact.vertexInputPatches.empty() || request.context.pixel)) {
         {
             std::shared_lock lock(plan->mutex);
             if (const auto found = plan->modules.find(moduleKey); found != plan->modules.end()) entry = found->second;
@@ -1133,12 +1154,7 @@ RecompileResult materializeVariant(SourceEntry& source, const RecompileRequest& 
     return result;
 }
 
-void RequireSpirvBackend(const RecompileRequest& request) {
-    if (request.backend != ShaderBackendKind::Spirv) throw std::runtime_error("Shader recompiler: the MSL backend is not available in this build");
-}
-
 RecompileResult RecompileImpl(const RecompileRequest& request) {
-    RequireSpirvBackend(request);
     static_cast<void>(RequestInputInfo(request));
     RequestMemoryView memory(request.context.memory);
     const auto runtime = memory.MakeRuntime(request.context.userData, request.shader.codeAddress);
@@ -1390,7 +1406,6 @@ std::shared_ptr<const RecompileResult> materializeMemoized(SourceEntry& source, 
 // The capture already resolved the source entry (stage input validation included) and materialized
 // the request over exactly the words the driver captured, so neither is repeated here.
 std::shared_ptr<const RecompileResult> RecompileImpl(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit) {
-    RequireSpirvBackend(request);
     if (!request.useCache || capture.source == nullptr) {
         auto program = PrepareResourceProgram(request);
         const auto variant = compileVariant(request, std::move(program));

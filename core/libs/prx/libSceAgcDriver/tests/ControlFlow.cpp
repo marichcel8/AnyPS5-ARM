@@ -3,6 +3,7 @@
 #include "ControlFlow/Structurizer.hpp"
 #include "RdnaDecoder/RdnaInstructionDecoder.hpp"
 #include "Recompiler.hpp"
+#include "MslBackend/MslEmitter.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdio>
@@ -270,7 +271,28 @@ void verifyRequest(const char* path) {
     std::printf("%s: structured with %zu added blocks, %zu cloned instructions, %zu route variables\n", path, result.addedBlocks, result.clonedInstructions, result.routeVariables);
 }
 
+void recompileMsl(const std::string& name, std::span<const std::uint32_t> code) {
+    const std::array<std::uint32_t, 4> userData{0x10000000u, 0x00100000u, 0x40u, 0x00027facu};
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Compute, 0x20000u, code, 0, {}};
+    request.context.waveSize = 32;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{64u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.backend = ShaderBackendKind::Msl;
+    request.msl.bdaAbiVersion = 1;
+    request.msl.maxThreadgroupSize = {1024u, 1024u, 1024u};
+    request.msl.maxThreadsPerThreadgroup = 1024;
+    request.msl.maxThreadgroupMemoryBytes = 32768;
+    request.target = MslFrontendTarget(request.msl);
+    request.layout = {0, 0, 0, 128};
+    request.useCache = false;
+    const auto result = Recompile(request);
+    require(result.backend == ShaderBackendKind::Msl && result.msl.Source().find(MslEntryPoint) != std::string_view::npos, name + ": no MSL kernel for a wave32 program");
+}
+
 std::size_t recompile(const std::string& name, std::span<const std::uint32_t> code, std::uint32_t subgroupSize) {
+    if (subgroupSize == 32u) recompileMsl(name, code);
     const std::array<std::uint32_t, 4> userData{0x10000000u, 0x00100000u, 0x40u, 0x00027facu};
     const std::array<std::uint32_t, 2> capabilities{1u, 61u};
     const std::array<std::string_view, 1> extensions{"SPV_KHR_storage_buffer_storage_class"};
