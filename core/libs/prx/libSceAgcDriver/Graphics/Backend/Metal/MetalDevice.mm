@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/Device.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalCompiler.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/Presenter.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Sync.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/TextureJobs.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Textures.hpp"
@@ -14,6 +15,9 @@
 #include "MslBackend/MslEmitter.hpp"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <SDL_metal.h>
+#include <dispatch/dispatch.h>
+#include <pthread.h>
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -22,11 +26,15 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+extern "C" void Aps5RunOnMainThread_nid_no_patch(void (*function)(void*), void* context);
 
 namespace AgcDriver {
 
@@ -42,6 +50,7 @@ constexpr std::uint32_t WaitTimeoutMs = 120000;
 constexpr std::uint32_t PipelineTimeoutMs = 120000;
 constexpr Metal::QueueKind Queue = Metal::QueueKind::Graphics;
 constexpr std::uint32_t ArgumentSlots = static_cast<std::uint32_t>(BufferSlot::Count);
+constexpr std::size_t PresentSlots = 3;
 
 struct UploadChunk {
     Metal::NativeBuffer buffer;
@@ -252,6 +261,16 @@ struct VulkanDevice::State {
     std::map<SamplerKey, id<MTLSamplerState>> samplers;
     std::array<id<MTLTexture>, 4> nullTextures{};
 
+    void* window = nullptr;
+    SDL_MetalView view = nullptr;
+    std::unique_ptr<Metal::Presenter> presenter;
+    std::array<id<MTLTexture>, PresentSlots> presentTextures{};
+    std::array<std::uint64_t, PresentSlots> presentSerials{};
+    std::size_t presentSlot = 0;
+    std::optional<std::size_t> pendingPresent;
+    std::uint32_t presentWidth = 0;
+    std::uint32_t presentHeight = 0;
+
     std::mutex pipelineMutex;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, PipelineEntry, IdentityHash> pipelines;
     std::atomic<std::uint64_t> pipelinesCreated{0};
@@ -270,6 +289,19 @@ struct VulkanDevice::State {
         }
         surfaces.clear();
         textures.reset();
+        presenter.reset();
+        for (auto& texture : presentTextures) {
+            if (texture == nil) continue;
+            id<MTLTexture> retired = texture;
+            texture = nil;
+            device->RetireAllocation((__bridge void*)retired, {});
+        }
+        if (view != nullptr) {
+            const auto destroy = [](void* context) { SDL_Metal_DestroyView(static_cast<SDL_MetalView>(context)); };
+            if (pthread_main_np() != 0) destroy(view);
+            else dispatch_async_f(dispatch_get_main_queue(), view, destroy);
+            view = nullptr;
+        }
         for (auto& texture : nullTextures) {
             if (texture == nil) continue;
             id<MTLTexture> retired = texture;
@@ -477,6 +509,71 @@ struct VulkanDevice::State {
             throw std::runtime_error("AGC graphics: Metal compute pipeline failed to build: " + (ticket->Done() ? ticket->Error() : std::string("timed out")));
         }
         return (__bridge id<MTLComputePipelineState>)ticket->ProductAs<Metal::CompiledPipeline>()->native;
+    }
+
+    void attachWindow(void* sdlWindow) {
+        struct Request {
+            SDL_Window* window;
+            SDL_MetalView view;
+            void* layer;
+        } request{static_cast<SDL_Window*>(sdlWindow), nullptr, nullptr};
+        Aps5RunOnMainThread_nid_no_patch([](void* context) {
+            auto& item = *static_cast<Request*>(context);
+            item.view = SDL_Metal_CreateView(item.window);
+            if (item.view != nullptr) item.layer = SDL_Metal_GetLayer(item.view);
+        }, &request);
+        view = request.view;
+        if (request.layer == nullptr) throw std::runtime_error(std::string("AGC graphics: SDL_Metal_CreateView failed: ") + SDL_GetError());
+        std::string failure;
+        presenter = Metal::Presenter::Create(*device, request.layer, Metal::PresenterOptions::FromEnvironment(), &failure);
+        if (presenter == nullptr) throw std::runtime_error("AGC graphics: Metal presenter could not be created: " + failure);
+        window = sdlWindow;
+    }
+
+    void stagePresent(std::uint32_t width, std::uint32_t height, std::span<const std::byte> bgra) {
+        if (width == 0 || height == 0 || bgra.size() < static_cast<std::size_t>(width) * height * 4u) throw std::runtime_error("AGC graphics: Metal present source is empty or too small");
+        const auto slot = presentSlot;
+        presentSlot = (presentSlot + 1u) % PresentSlots;
+        if (presentSerials[slot] != 0 && !device->WaitSerial(Queue, presentSerials[slot], WaitTimeoutMs)) throw std::runtime_error("AGC graphics: Metal present slot did not retire in time");
+        auto& texture = presentTextures[slot];
+        if (texture == nil || texture.width != width || texture.height != height) {
+            if (texture != nil) {
+                id<MTLTexture> retired = texture;
+                texture = nil;
+                device->RetireAllocation((__bridge void*)retired, {});
+            }
+            MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
+            descriptor.storageMode = MTLStorageModeShared;
+            descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+            descriptor.usage = MTLTextureUsageShaderRead;
+            texture = [native newTextureWithDescriptor:descriptor];
+            if (texture == nil) throw std::runtime_error("AGC graphics: Metal present texture could not be created");
+            texture.label = @"AnyPS5 present source";
+            device->AddResidentAllocation((__bridge void*)texture);
+        }
+        [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:bgra.data() bytesPerRow:static_cast<NSUInteger>(width) * 4u];
+        presentWidth = width;
+        presentHeight = height;
+        pendingPresent = slot;
+    }
+
+    double presentPending() {
+        if (!pendingPresent) return 0.0;
+        const auto slot = *pendingPresent;
+        pendingPresent.reset();
+        Metal::PresentSource source;
+        source.texture = (__bridge void*)presentTextures[slot];
+        source.width = presentWidth;
+        source.height = presentHeight;
+        const auto result = presenter->Present(source);
+        if (result.serial != 0) presentSerials[slot] = result.serial;
+        return result.pacedMs + result.waitMs;
+    }
+
+    void settleForPresent() {
+        flush();
+        if (lastSerial != 0 && device->CompletedSerial(Queue) < lastSerial) drain(lastSerial);
+        else reap();
     }
 
     Metal::TextureManager& textureManager() {
@@ -737,6 +834,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         s.fault = s.device->NewSharedBuffer(ShaderRecompiler::BdaAbi::FaultBufferBytes, "AnyPS5 fault buffer");
         if (!s.fault) throw std::runtime_error("AGC graphics: Metal fault buffer could not be allocated");
         std::memset(s.fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
+        if (window != nullptr && window->context != nullptr) s.attachWindow(window->context);
     }
 }
 
@@ -858,13 +956,15 @@ auto VulkanDevice::DispatchMoveCounts() -> DispatchMoveCount { return {}; }
 
 auto VulkanDevice::ResolveMemory(std::uint64_t, std::size_t, bool) -> void {}
 
-auto VulkanDevice::Window() const -> void* { return nullptr; }
+auto VulkanDevice::Window() const -> void* { return state->window; }
 
-auto VulkanDevice::Resize(std::uint32_t, std::uint32_t) -> void {}
+auto VulkanDevice::Resize(std::uint32_t width, std::uint32_t height) -> void {
+    if (state->presenter != nullptr && width != 0 && height != 0) state->presenter->SetDrawableSize(width, height);
+}
 
 auto VulkanDevice::SelectDynamicRange(const DisplayBuffer*) -> void {}
 
-auto VulkanDevice::Presentable() const -> bool { return false; }
+auto VulkanDevice::Presentable() const -> bool { return state->presenter != nullptr; }
 
 auto VulkanDevice::DualSrcBlend() const -> bool { return false; }
 
@@ -886,15 +986,53 @@ auto VulkanDevice::RetirePresents(std::size_t) -> double { return 0; }
 
 auto VulkanDevice::PresentWaitsForSlots(const DisplayBuffer*) const -> bool { return false; }
 
-auto VulkanDevice::AcquireImage() -> bool { return false; }
+auto VulkanDevice::AcquireImage() -> bool { return state->presenter != nullptr; }
 
-auto VulkanDevice::PresentClear(std::uint32_t, std::uint32_t, bool) -> bool { return false; }
+auto VulkanDevice::PresentClear(std::uint32_t width, std::uint32_t height, bool opaque) -> bool {
+    auto& s = *state;
+    if (s.presenter == nullptr) return false;
+    std::vector<std::byte> pixels(static_cast<std::size_t>(width) * height * 4u);
+    if (opaque) {
+        for (std::size_t index = 3; index < pixels.size(); index += 4) pixels[index] = std::byte{0xff};
+    }
+    std::lock_guard lock(s.mutex);
+    @autoreleasepool {
+        s.settleForPresent();
+        s.stagePresent(width, height, pixels);
+    }
+    return true;
+}
 
-auto VulkanDevice::PresentPixels(std::uint32_t, std::uint32_t, std::span<const std::byte>) -> void {}
+auto VulkanDevice::PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels) -> void {
+    auto& s = *state;
+    if (s.presenter == nullptr) return;
+    std::lock_guard lock(s.mutex);
+    @autoreleasepool {
+        s.settleForPresent();
+        s.stagePresent(width, height, pixels);
+        s.presentPending();
+    }
+}
 
-auto VulkanDevice::PresentDisplayBuffer(const DisplayBuffer&) -> bool { return false; }
+auto VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) -> bool {
+    auto& s = *state;
+    if (s.presenter == nullptr) return false;
+    std::lock_guard lock(s.mutex);
+    @autoreleasepool {
+        s.settleForPresent();
+        const auto pixels = ReadDisplayBuffer(buffer);
+        s.stagePresent(buffer.width, buffer.height, pixels);
+    }
+    return true;
+}
 
-auto VulkanDevice::FinishPresent() -> double { return 0; }
+auto VulkanDevice::FinishPresent() -> double {
+    auto& s = *state;
+    if (s.presenter == nullptr) return 0.0;
+    @autoreleasepool {
+        return s.presentPending();
+    }
+}
 
 auto VulkanDevice::QueuePresent() -> void {}
 
