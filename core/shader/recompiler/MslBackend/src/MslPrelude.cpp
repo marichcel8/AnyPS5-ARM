@@ -458,9 +458,9 @@ constexpr std::string_view SoftFloatText =
     ;
 #undef APS5_MSL_SOURCE
 
-constexpr std::string_view Dot2Text = R"(static inline uint aps5_dot2_widen(uint packed, uint shift) {
+constexpr std::string_view Dot2Text = R"(static inline uint aps5_dot2_widen(uint pair, uint shift) {
 #pragma METAL fp math_mode(safe)
-    uint bits = (packed >> shift) & 0xffffu;
+    uint bits = (pair >> shift) & 0xffffu;
     uint magnitude = bits & 0x7fffu;
     uint normal = (magnitude << 13u) + (112u << 23u);
     uint subnormal = as_type<uint>(float(magnitude) * as_type<float>(0x33800000u));

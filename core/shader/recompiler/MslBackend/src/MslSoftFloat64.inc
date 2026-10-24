@@ -230,10 +230,10 @@ static inline ulong aps5_f64_round_even(ulong x) {
     if (field < 1022) return sign;
     ulong mantissa = (x & 0x000ffffffffffffful) | 0x0010000000000000ul;
     uint shift = uint(1075 - field);
-    ulong half = 1ul << (shift - 1u);
+    ulong halfway = 1ul << (shift - 1u);
     ulong rest = mantissa & ((1ul << shift) - 1ul);
     ulong whole = mantissa >> shift;
-    if (rest > half || (rest == half && (whole & 1ul) != 0ul)) whole += 1ul;
+    if (rest > halfway || (rest == halfway && (whole & 1ul) != 0ul)) whole += 1ul;
     return aps5_f64_from_u64(sign, whole);
 }
 static inline ulong aps5_f64_fract(ulong x) {
@@ -336,9 +336,9 @@ static inline ulong aps5_f64_trig_preop(ulong x, uint segment) {
     uint high = offset == 0u ? first : (first << offset) | (second >> (32u - offset));
     uint low = (offset == 0u ? second : (second << offset) | (third >> (32u - offset))) >> 11u;
     ulong mantissa = (ulong(high) << 21u) | ulong(low);
-    int bias = field >= 1968u ? 1023 + 600 - 53 + 128 : 1023 + 600 - 53;
+    int adjust = field >= 1968u ? 1023 + 600 - 53 + 128 : 1023 + 600 - 53;
     if (mantissa == 0ul) return 0ul;
-    return aps5_f64_round_wide(0ul, aps5_u128_of(0ul, mantissa), bias - int(shift) - 1623 + 1084 - 62);
+    return aps5_f64_round_wide(0ul, aps5_u128_of(0ul, mantissa), adjust - int(shift) - 1623 + 1084 - 62);
 }
 static inline ulong aps5_f64_from_f32(uint bits) {
     ulong sign = ulong(bits & 0x80000000u) << 32u;
@@ -400,9 +400,9 @@ static inline uint aps5_f64_to_u32(ulong x) {
     return uint(((x & 0x000ffffffffffffful) | 0x0010000000000000ul) >> uint(1075 - field));
 }
 struct aps5_half_term { uint sign; uint mantissa; int exponent; bool nan; bool infinite; bool zero; uint bits; };
-static inline aps5_half_term aps5_half_term_of(uint packed, uint shift) {
+static inline aps5_half_term aps5_half_term_of(uint pair, uint shift) {
     aps5_half_term h;
-    h.bits = (packed >> shift) & 0xffffu;
+    h.bits = (pair >> shift) & 0xffffu;
     uint magnitude = h.bits & 0x7fffu;
     h.sign = (h.bits & 0x8000u) << 16u;
     h.nan = magnitude > 0x7c00u;
