@@ -302,7 +302,7 @@ add_library(libSceAgcDriver SHARED EXCLUDE_FROM_ALL
 )
 add_dependencies(libSceAgcDriver agc_trace_revision)
 
-target_compile_definitions(libSceAgcDriver PRIVATE ANYPS5_GPU_BACKEND_${agcGpuBackendUpper}=1)
+target_compile_definitions(libSceAgcDriver PUBLIC ANYPS5_GPU_BACKEND_${agcGpuBackendUpper}=1)
 
 target_include_directories(libSceAgcDriver PRIVATE
         ${LIBS_INCLUDE_DIR}
@@ -333,6 +333,10 @@ target_link_libraries(libSceAgcDriver PRIVATE
 )
 if(APS5_ENABLE_TRACY)
     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
+endif()
+if(APPLE AND ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    target_link_options(libSceAgcDriver PRIVATE
+            "$<$<STREQUAL:$<TARGET_PROPERTY:SDL2-static,TYPE>,STATIC_LIBRARY>:LINKER:-force_load,$<TARGET_FILE:SDL2-static>>")
 endif()
 
 if(BUILD_TESTING)
