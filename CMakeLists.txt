@@ -4,6 +4,9 @@ if(CMAKE_HOST_APPLE AND NOT ANYPS5_RELINKER_ONLY)
     set(CMAKE_OSX_ARCHITECTURES x86_64 CACHE STRING "Architectures built on macOS")
 endif()
 project(Relinker CXX)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
 
 set(ANYPS5_TEST_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests")
 set(ANYPS5_WINDOWS_TEST_EXIT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/WindowsTestExit.cpp")
@@ -99,6 +102,18 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/include)
     add_test(NAME request_serializer COMMAND request_serializer_tests)
     set_tests_properties(request_serializer PROPERTIES TIMEOUT 20)
+    add_test_executable(metal_abi_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/tests/MetalAbiTests.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/src/RequestSerializer.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/RdnaDecoder/src/RdnaDescriptorFormat.cpp)
+    target_include_directories(metal_abi_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/RdnaDecoder/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/IntermediateRepresentation/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/libs)
+    add_test(NAME metal_abi COMMAND metal_abi_tests)
+    set_tests_properties(metal_abi PROPERTIES TIMEOUT 20)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     add_test_executable(shader_ir_use_rewrite_tests
         core/shader/recompiler/IntermediateRepresentation/tests/UseRewrite.cpp

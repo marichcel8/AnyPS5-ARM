@@ -693,6 +693,58 @@ SpirvTarget readSpirvTarget(Reader& reader, DeserializedRequest& result) {
     return target;
 }
 
+void writeMslTarget(Writer& writer, const MslTarget& target) {
+    writer.WriteU32(target.metalVersion);
+    writer.WriteU32(target.simdgroupSize);
+    writer.WriteU32(target.bdaAbiVersion);
+    for (const std::uint32_t value : target.maxThreadgroupSize) {
+        writer.WriteU32(value);
+    }
+    writer.WriteU32(target.maxThreadsPerThreadgroup);
+    writer.WriteU32(target.maxThreadgroupMemoryBytes);
+    writer.WriteBool(target.mesh.has_value());
+    if (target.mesh.has_value()) {
+        writeMeshTargetLimits(writer, *target.mesh);
+    }
+    writer.WriteBool(target.tessellation.has_value());
+    if (target.tessellation.has_value()) {
+        writeTessellationTargetLimits(writer, *target.tessellation);
+    }
+    writer.WriteBool(target.relaxedFloat);
+    writer.WriteBool(target.fragmentBarycentric);
+    writer.WriteBool(target.vertexSimdgroups);
+    writer.WriteBool(target.float16DenormPreserve);
+    writer.WriteBool(target.float32DenormPreserve);
+    writer.WriteBool(target.spannedWaves);
+    writer.WriteU32(target.subgroupStages);
+}
+
+MslTarget readMslTarget(Reader& reader) {
+    MslTarget target{};
+    target.metalVersion = reader.ReadU32();
+    target.simdgroupSize = reader.ReadU32();
+    target.bdaAbiVersion = reader.ReadU32();
+    for (std::uint32_t& value : target.maxThreadgroupSize) {
+        value = reader.ReadU32();
+    }
+    target.maxThreadsPerThreadgroup = reader.ReadU32();
+    target.maxThreadgroupMemoryBytes = reader.ReadU32();
+    if (reader.ReadBool()) {
+        target.mesh = readMeshTargetLimits(reader);
+    }
+    if (reader.ReadBool()) {
+        target.tessellation = readTessellationTargetLimits(reader);
+    }
+    target.relaxedFloat = reader.ReadBool();
+    target.fragmentBarycentric = reader.ReadBool();
+    target.vertexSimdgroups = reader.ReadBool();
+    target.float16DenormPreserve = reader.ReadBool();
+    target.float32DenormPreserve = reader.ReadBool();
+    target.spannedWaves = reader.ReadBool();
+    target.subgroupStages = reader.ReadU32();
+    return target;
+}
+
 void writeBindingLayout(Writer& writer, const BindingLayout& layout) {
     writer.WriteU32(layout.descriptorSet);
     writer.WriteU32(layout.firstBinding);
@@ -778,7 +830,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     std::string buffer;
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
-    writer.WriteU32(33u);
+    writer.WriteU32(request.backend == ShaderBackendKind::Msl ? 34u : 33u);
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -806,6 +858,10 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     writer.WriteBool(request.target.spannedWaves);
     writer.WriteU32(request.target.subgroupStages);
     writer.WriteBool(request.target.meshAsCompute);
+    if (request.backend == ShaderBackendKind::Msl) {
+        writer.WriteU8(static_cast<std::uint8_t>(request.backend));
+        writeMslTarget(writer, request.msl);
+    }
     return base64Encode(buffer);
 }
 
@@ -814,7 +870,7 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     Reader reader(decoded);
     if (reader.ReadU32() != 0x41505335u) throw std::runtime_error("invalid recompile request signature");
     const auto version = reader.ReadU32();
-    if (version < 1u || version > 33u) throw std::runtime_error("unsupported recompile request serialization version");
+    if (version < 1u || version > 34u) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
     result.request.context = readGuestContext(reader, result, version);
@@ -854,6 +910,11 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     if (version >= 33u) {
         result.request.target.subgroupStages = reader.ReadU32();
         result.request.target.meshAsCompute = reader.ReadBool();
+    }
+    if (version >= 34u) {
+        if (reader.ReadU8() != static_cast<std::uint8_t>(ShaderBackendKind::Msl)) throw std::runtime_error("RequestSerializer: invalid shader backend");
+        result.request.backend = ShaderBackendKind::Msl;
+        result.request.msl = readMslTarget(reader);
     }
     if (version >= 21u && reader.Remaining() != 0u) throw std::runtime_error("RequestSerializer: unexpected trailing data");
     return result;

@@ -88,7 +88,12 @@ private:
         appendFallbacks(key, request);
         appendMesh(key, request);
         appendTessellation(key, request);
-        append(key, request.target);
+        if (request.backend == ShaderBackendKind::Msl) {
+            append(key, request.backend);
+            append(key, request.msl);
+        } else {
+            append(key, request.target);
+        }
         append(key, DebugProbeActive());
         append(key, RayTracingStrict());
         append(key, RayTracingMiss());
@@ -238,6 +243,24 @@ private:
         append(key, value.maxControlTotalOutputComponents);
         append(key, value.maxEvaluationInputComponents);
         append(key, value.maxEvaluationOutputComponents);
+    }
+
+    static void append(std::vector<std::uint64_t>& key, const MslTarget& value) {
+        append(key, value.metalVersion);
+        append(key, value.simdgroupSize);
+        append(key, value.bdaAbiVersion);
+        append(key, value.maxThreadgroupSize);
+        append(key, value.maxThreadsPerThreadgroup);
+        append(key, value.maxThreadgroupMemoryBytes);
+        append(key, value.mesh);
+        append(key, value.tessellation);
+        append(key, value.relaxedFloat);
+        append(key, value.fragmentBarycentric);
+        append(key, value.vertexSimdgroups);
+        append(key, value.float16DenormPreserve);
+        append(key, value.float32DenormPreserve);
+        append(key, value.spannedWaves);
+        append(key, value.subgroupStages);
     }
 
     static void append(std::vector<std::uint64_t>& key, const SpirvTarget& value) {
