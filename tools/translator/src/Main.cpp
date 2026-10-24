@@ -53,7 +53,7 @@ struct Options {
     std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
     std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 8192);
     std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 8000);
-    std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 32000);
+    std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 10000);
     std::size_t large = Setting("APS5_TRANSLATOR_LARGE", 2000);
     bool verbose = std::getenv("APS5_TRANSLATOR_STATS") != nullptr;
 };

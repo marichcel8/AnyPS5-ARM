@@ -80,13 +80,13 @@ Three things keep very large guest functions from stalling LLVM:
 
 - **Flag liveness.** A backward data flow over each function finds the arithmetic flags no later instruction reads; their stores (and the parity and adjust computations behind them) are not emitted. Flags are dead across calls, returns and jumps to other functions, as the System V ABI preserves none. `APS5_TRANSLATOR_ALL_FLAGS=1` keeps every flag store.
 - **A small graph.** Only branch targets and instructions control reaches from elsewhere start a basic block. A jump through a bounded jump table switches over that table's targets only; every other indirect jump goes to one shared dispatch per function.
-- **Optimization tiers.** Functions above 2000 guest instructions are not inlined. Above 8000 they skip the O2 pipeline for a few linear passes (EarlyCSE, InstCombine, SimplifyCFG, DSE, ADCE). Above 32000 they are also compiled with fast instruction selection and register allocation, because live range splitting in the greedy allocator grows too fast on them.
+- **Optimization tiers.** Functions above 2000 guest instructions are not inlined. Above 8000 they skip the O2 pipeline for a few linear passes (EarlyCSE, InstCombine, SimplifyCFG, DSE, ADCE). Above 10000 they are also compiled with fast instruction selection and register allocation, because live range splitting in the greedy allocator grows too fast on them.
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `APS5_TRANSLATOR_JOBS` | CPU cores, at most 4 | threads |
 | `APS5_TRANSLATOR_PARTITION` | 8192 | guest instructions per partition |
-| `APS5_TRANSLATOR_LARGE` / `_HUGE` / `_GIANT` | 2000 / 8000 / 32000 | tier limits in guest instructions |
+| `APS5_TRANSLATOR_LARGE` / `_HUGE` / `_GIANT` | 2000 / 8000 / 10000 | tier limits in guest instructions |
 | `APS5_TRANSLATOR_CACHE` | `~/Library/Caches/AnyPS5/translator` | cache directory, `off` disables it |
 | `APS5_TRANSLATOR_LD` | `ld` | linker that joins the partitions |
 | `APS5_TRANSLATOR_STATS` | unset | print the time of each partition |
