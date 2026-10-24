@@ -39,7 +39,9 @@ enum Feature : std::uint32_t {
     IeeeFloat = 1u << 23u,
     StrictFloat = 1u << 24u,
     Float64 = 1u << 25u,
-    Dot2 = 1u << 26u
+    Dot2 = 1u << 26u,
+    Atomic64 = 1u << 27u,
+    UpdateTable = 1u << 28u
 };
 
 enum : std::uint8_t {

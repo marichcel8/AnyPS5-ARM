@@ -533,6 +533,131 @@ void SharedAtomic(State& state, const IrValue& inst) {
     Define(state, inst, "(" + condition + ") ? " + apply + " : 0u");
 }
 
+constexpr std::uint32_t NoAtomic64 = ~0u;
+
+std::uint32_t Atomic64Op(IrOpcode opcode) {
+    switch (opcode) {
+    case IrOpcode::BufferAtomicIAdd64:
+    case IrOpcode::AddressAtomicIAdd64:
+    case IrOpcode::SharedAtomicIAdd64: return 2u;
+    case IrOpcode::BufferAtomicISub64:
+    case IrOpcode::AddressAtomicISub64:
+    case IrOpcode::SharedAtomicISub64: return 3u;
+    case IrOpcode::BufferAtomicUMin64:
+    case IrOpcode::AddressAtomicUMin64: return 5u;
+    case IrOpcode::BufferAtomicUMax64:
+    case IrOpcode::AddressAtomicUMax64: return 7u;
+    case IrOpcode::BufferAtomicAnd64:
+    case IrOpcode::AddressAtomicAnd64:
+    case IrOpcode::SharedAtomicAnd64: return 8u;
+    case IrOpcode::BufferAtomicOr64:
+    case IrOpcode::AddressAtomicOr64:
+    case IrOpcode::SharedAtomicOr64: return 9u;
+    case IrOpcode::BufferAtomicXor64:
+    case IrOpcode::AddressAtomicXor64:
+    case IrOpcode::SharedAtomicXor64: return 10u;
+    default: return NoAtomic64;
+    }
+}
+
+std::uint32_t RequireAtomic64(State& state, const IrValue& inst) {
+    const auto op = Atomic64Op(inst.Opcode());
+    if (op == NoAtomic64) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(inst.Opcode())) + " is not emitted (Metal has no 64-bit exchange, compare-and-swap, signed or floating-point atomic, and no 64-bit atomic in threadgroup memory)");
+    state.features |= Atomic64;
+    return op;
+}
+
+void BufferAtomic64(State& state, const IrValue& inst) {
+    const auto& mem = Memory(state, inst);
+    if (mem.kind != ResourceKind::Buffer) Fail(inst, "must access a buffer resource");
+    const auto op = RequireAtomic64(state, inst);
+    const auto data = Typed(state, inst, inst.ArgumentCount() - 2u);
+    const auto result = Result(state, inst);
+    OpenActive(state, Active(state, inst));
+    const auto resource = VSharp(state, inst, mem);
+    const auto byte = Temp(state);
+    const auto pointer = Temp(state);
+    Line(state, "uint " + byte + " = 0u;");
+    Open(state, "if (aps5_vsharp_byte(" + resource + ", " + Typed(state, inst, 2u) + " + " + U32(mem.offset) + ", " + Typed(state, inst, 3u) + ", 8u, " + byte + ")) {");
+    if (mem.gpuDescriptor) {
+        state.features |= BdaWrites;
+        Line(state, "device atomic_uint* " + pointer + " = aps5_vsharp_atomic8(aps5_c, " + resource + ", " + byte + ", " + Pc(inst) + ");");
+    } else {
+        Line(state, "device atomic_uint* " + pointer + " = aps5_buffer_atomic8(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ", " + Pc(inst) + ");");
+    }
+    Line(state, "if (" + pointer + " != nullptr) " + result + " = aps5_atomic64(" + pointer + ", " + U32(op) + ", " + data + ", " + (inst.HasUses() ? "true" : "false") + ");");
+    Close(state);
+    Close(state);
+    StopCheck(state);
+    Define(state, inst, result);
+}
+
+void AddressAtomic64(State& state, const IrValue& inst) {
+    const auto& mem = Memory(state, inst);
+    if (mem.kind != ResourceKind::Flat && mem.kind != ResourceKind::Global) Fail(inst, "must access a physical address resource");
+    const auto op = RequireAtomic64(state, inst);
+    const auto data = Typed(state, inst, 3u);
+    const auto wanted = std::string(inst.HasUses() ? "true" : "false");
+    const auto result = Result(state, inst);
+    state.features |= BdaWrites;
+    OpenActive(state, Active(state, inst));
+    const auto guest = AddressOf(state, inst, mem);
+    Open(state, "if (" + guest.ok + ") {");
+    const auto global = [&] {
+        const auto pointer = Temp(state);
+        Line(state, "device atomic_uint* " + pointer + " = aps5_bda_atomic8(aps5_c, " + guest.address + ", " + U32(BdaAbi::Write) + ", " + Pc(inst) + ");");
+        Line(state, "if (" + pointer + " != nullptr) " + result + " = aps5_atomic64(" + pointer + ", " + U32(op) + ", " + data + ", " + wanted + ");");
+    };
+    if (RoutesApertures(state, mem) && op != 5u && op != 7u) {
+        const auto low = "uint(" + guest.address + ")";
+        const auto unaligned = "if ((" + low + " & 3u) != 0u) aps5_fault(aps5_c, " + U32(static_cast<std::uint32_t>(BdaAbi::FaultReason::Unaligned)) + ", " + guest.address + ", 8u, " + Pc(inst) + ");";
+        const auto high = "uint(" + guest.address + " >> 32u)";
+        Open(state, "if (" + high + " == " + U32(SharedApertureHigh) + ") {");
+        LdsArray(state);
+        Line(state, unaligned);
+        Line(state, "else if (((" + low + " >> 2u) + 1u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic64_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + low + " >> 2u]), " + U32(op) + ", " + data + ", " + wanted + ");");
+        Close(state, "} else if (" + high + " == " + U32(PrivateApertureHigh) + ") {");
+        ++state.depth;
+        ScratchArray(state);
+        Line(state, unaligned);
+        Open(state, "else if (((" + low + " >> 2u) + 1u) < " + U32(state.scratchDwords) + ") {");
+        Line(state, result + " = (ulong(aps5_scratch[(" + low + " >> 2u) + 1u]) << 32u) | ulong(aps5_scratch[" + low + " >> 2u]);");
+        const auto next = Temp(state);
+        Line(state, "const ulong " + next + " = aps5_update64(" + U32(op) + ", " + result + ", " + data + ", 0ul);");
+        Line(state, "aps5_scratch[" + low + " >> 2u] = uint(" + next + ");");
+        Line(state, "aps5_scratch[(" + low + " >> 2u) + 1u] = uint(" + next + " >> 32u);");
+        Close(state);
+        Close(state, "} else {");
+        ++state.depth;
+        global();
+        Close(state);
+    } else {
+        global();
+    }
+    Close(state);
+    Close(state);
+    StopCheck(state);
+    Define(state, inst, result);
+}
+
+void SharedAtomic64(State& state, const IrValue& inst) {
+    const auto& mem = SharedMemory(state, inst);
+    const auto op = RequireAtomic64(state, inst);
+    const auto data = Typed(state, inst, 1u);
+    const auto active = Active(state, inst);
+    const auto index = Temp(state);
+    LdsArray(state);
+    Line(state, "const uint " + index + " = " + SharedByte(state, inst, mem) + " >> 2u;");
+    const auto apply = "aps5_atomic64_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), " + U32(op) + ", " + data + ", " + (inst.HasUses() ? "true" : "false") + ")";
+    const auto condition = (active.empty() ? std::string() : active + " && ") + "(" + index + " + 1u) < " + U32(state.ldsDwords);
+    if (!inst.HasUses()) {
+        Line(state, "if (" + condition + ") " + apply + ";");
+        DefineZero(state, inst);
+        return;
+    }
+    Define(state, inst, "(" + condition + ") ? " + apply + " : 0ul");
+}
+
 void ReadConst(State& state, const IrValue& inst) {
     state.features |= FlattenedSrt;
     const auto& resources = state.program.Resources();
@@ -677,6 +802,54 @@ bool EmitMemory(State& state, const IrValue& inst) {
     case IrOpcode::SharedAtomicWrap32:
     case IrOpcode::SharedAtomicCmpst32:
     case IrOpcode::SharedAtomicCmpstF32: SharedAtomic(state, inst); return true;
+    case IrOpcode::BufferAtomicSwap64:
+    case IrOpcode::BufferAtomicCmpSwap64:
+    case IrOpcode::BufferAtomicIAdd64:
+    case IrOpcode::BufferAtomicISub64:
+    case IrOpcode::BufferAtomicSMin64:
+    case IrOpcode::BufferAtomicUMin64:
+    case IrOpcode::BufferAtomicSMax64:
+    case IrOpcode::BufferAtomicUMax64:
+    case IrOpcode::BufferAtomicAnd64:
+    case IrOpcode::BufferAtomicOr64:
+    case IrOpcode::BufferAtomicXor64:
+    case IrOpcode::BufferAtomicFCmpSwap64:
+    case IrOpcode::BufferAtomicFMin64:
+    case IrOpcode::BufferAtomicFMax64:
+    case IrOpcode::BufferAtomicInc64:
+    case IrOpcode::BufferAtomicDec64: BufferAtomic64(state, inst); return true;
+    case IrOpcode::AddressAtomicSwap64:
+    case IrOpcode::AddressAtomicCmpSwap64:
+    case IrOpcode::AddressAtomicIAdd64:
+    case IrOpcode::AddressAtomicISub64:
+    case IrOpcode::AddressAtomicSMin64:
+    case IrOpcode::AddressAtomicUMin64:
+    case IrOpcode::AddressAtomicSMax64:
+    case IrOpcode::AddressAtomicUMax64:
+    case IrOpcode::AddressAtomicAnd64:
+    case IrOpcode::AddressAtomicOr64:
+    case IrOpcode::AddressAtomicXor64:
+    case IrOpcode::AddressAtomicFCmpSwap64:
+    case IrOpcode::AddressAtomicFMin64:
+    case IrOpcode::AddressAtomicFMax64:
+    case IrOpcode::AddressAtomicInc64:
+    case IrOpcode::AddressAtomicDec64: AddressAtomic64(state, inst); return true;
+    case IrOpcode::SharedAtomicSwap64:
+    case IrOpcode::SharedAtomicIAdd64:
+    case IrOpcode::SharedAtomicISub64:
+    case IrOpcode::SharedAtomicRsub64:
+    case IrOpcode::SharedAtomicInc64:
+    case IrOpcode::SharedAtomicDec64:
+    case IrOpcode::SharedAtomicSMin64:
+    case IrOpcode::SharedAtomicUMin64:
+    case IrOpcode::SharedAtomicSMax64:
+    case IrOpcode::SharedAtomicUMax64:
+    case IrOpcode::SharedAtomicAnd64:
+    case IrOpcode::SharedAtomicOr64:
+    case IrOpcode::SharedAtomicXor64:
+    case IrOpcode::SharedAtomicFMin64:
+    case IrOpcode::SharedAtomicFMax64:
+    case IrOpcode::SharedAtomicCmpst64: SharedAtomic64(state, inst); return true;
     case IrOpcode::LoadVectorWindow: LoadVectorWindow(state, inst); return true;
     case IrOpcode::StoreVectorWindow: StoreVectorWindow(state, inst); return true;
     default: break;
