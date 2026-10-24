@@ -69,6 +69,7 @@ public:
 
     void FlushResidency();
     std::uint64_t Submit(QueueKind queue, void* const* commandBuffers, std::size_t count);
+    std::uint64_t SubmitPresent(QueueKind queue, void* drawable, void* const* commandBuffers, std::size_t count);
     std::uint64_t SubmittedSerial(QueueKind queue) const;
     std::uint64_t CompletedSerial(QueueKind queue) const;
     bool WaitSerial(QueueKind queue, std::uint64_t serial, std::uint32_t timeoutMs);
