@@ -406,6 +406,104 @@ constexpr std::string_view AtomicSpaceText = R"(static inline uint aps5_atomicNA
 }
 )";
 
+constexpr std::string_view Atomic64Text = R"(static inline ulong aps5_update64(uint op, ulong old, ulong a, ulong b) {
+    switch (op) {
+    case 0u: return a;
+    case 1u: return old == b ? a : old;
+    case 2u: return old + a;
+    case 3u: return old - a;
+    case 4u: return ulong(min(long(old), long(a)));
+    case 5u: return min(old, a);
+    case 6u: return ulong(max(long(old), long(a)));
+    case 7u: return max(old, a);
+    case 8u: return old & a;
+    case 9u: return old | a;
+    case 10u: return old ^ a;
+    case 11u: return old >= a ? 0ul : old + 1ul;
+    case 12u: return (old == 0ul || old > a) ? a : old - 1ul;
+    case 14u: return a - old;
+    }
+    return old;
+}
+)";
+
+constexpr std::string_view Atomic64SpaceText = R"(static inline ulong aps5_load64NAME(SPACE atomic_uint* p) {
+    uint high = atomic_load_explicit(p + 1, memory_order_relaxed);
+    uint low = 0u;
+    for (;;) {
+        low = atomic_load_explicit(p, memory_order_relaxed);
+        uint again = atomic_load_explicit(p + 1, memory_order_relaxed);
+        if (again == high) break;
+        high = again;
+    }
+    return (ulong(high) << 32u) | ulong(low);
+}
+static inline ulong aps5_atomic64NAME(SPACE atomic_uint* p, uint op, ulong a, bool wanted) {
+    const uint low = uint(a);
+    const uint high = uint(a >> 32u);
+    uint oldLow = 0u;
+    uint oldHigh = 0u;
+    switch (op) {
+    case 2u:
+        oldLow = atomic_fetch_add_explicit(p, low, memory_order_relaxed);
+        oldHigh = atomic_fetch_add_explicit(p + 1, high + (oldLow + low < oldLow ? 1u : 0u), memory_order_relaxed);
+        break;
+    case 3u:
+        oldLow = atomic_fetch_sub_explicit(p, low, memory_order_relaxed);
+        oldHigh = atomic_fetch_sub_explicit(p + 1, high + (oldLow < low ? 1u : 0u), memory_order_relaxed);
+        break;
+    case 8u:
+        oldLow = atomic_fetch_and_explicit(p, low, memory_order_relaxed);
+        oldHigh = atomic_fetch_and_explicit(p + 1, high, memory_order_relaxed);
+        break;
+    case 9u:
+        oldLow = atomic_fetch_or_explicit(p, low, memory_order_relaxed);
+        oldHigh = atomic_fetch_or_explicit(p + 1, high, memory_order_relaxed);
+        break;
+    case 10u:
+        oldLow = atomic_fetch_xor_explicit(p, low, memory_order_relaxed);
+        oldHigh = atomic_fetch_xor_explicit(p + 1, high, memory_order_relaxed);
+        break;
+MINMAX    }
+    return (ulong(oldHigh) << 32u) | ulong(oldLow);
+}
+)";
+
+constexpr std::string_view Atomic64MinMaxText = R"(    case 5u:
+    case 7u: {
+        ulong old = wanted ? aps5_load64(p) : 0ul;
+        if (op == 5u) atomic_min_explicit(reinterpret_cast<device atomic_ulong*>(p), a, memory_order_relaxed);
+        else atomic_max_explicit(reinterpret_cast<device atomic_ulong*>(p), a, memory_order_relaxed);
+        return old;
+    }
+)";
+
+constexpr std::string_view Atomic64PointerText = R"(static inline device atomic_uint* aps5_bda_atomic8(thread aps5_ctx& c, ulong address, uint need, uint pc) {
+    if ((address & 7ul) != 0ul) { aps5_fault(c, $UNALIGNED, address, 8u, pc); return nullptr; }
+    uint reason = 0u;
+    device uchar* pointer = aps5_bda_lookup(c, address, 8u, need, reason);
+    if (pointer == nullptr) { aps5_fault(c, reason, address, 8u, pc); return nullptr; }
+    aps5_note_write(c, address);
+    return reinterpret_cast<device atomic_uint*>(pointer);
+}
+)";
+
+constexpr std::string_view Atomic64DirectText = R"(static inline device atomic_uint* aps5_buffer_atomic8(thread aps5_ctx& c, uint element, aps5_vsharp r, uint byte, uint pc) {
+    ulong guest = r.base + ulong(byte);
+    if ((guest & 7ul) != 0ul) { aps5_fault(c, $UNALIGNED, guest, 8u, pc); return nullptr; }
+    aps5_guest_buffer buffer = c.buffers[element];
+    if (ulong(byte) + 8ul > ulong(buffer.size)) return nullptr;
+    return reinterpret_cast<device atomic_uint*>(buffer.data + byte);
+}
+)";
+
+constexpr std::string_view Atomic64GpuText = R"(static inline device atomic_uint* aps5_vsharp_atomic8(thread aps5_ctx& c, aps5_vsharp r, uint byte, uint pc) {
+    ulong address = 0ul;
+    if (!aps5_bda_add(c, r.base, ulong(byte), false, pc, address)) return nullptr;
+    return aps5_bda_atomic8(c, address, $READ_WRITE, pc);
+}
+)";
+
 constexpr std::string_view WaveText = R"(static inline uint aps5_ballot32(bool predicate) { return uint(static_cast<simd_vote::vote_t>(simd_ballot(predicate))); }
 )";
 
@@ -516,10 +614,19 @@ std::string Prelude(const State& state) {
         scratch = Replace(scratch, "MERGE(index + 1u, uint(mask >> 32u), uint(data >> 32u));", "words[index + 1u] = (words[index + 1u] & ~uint(mask >> 32u)) | uint(data >> 32u);");
         text += scratch;
     }
-    if (has(Lds | GuestBuffers | Bda)) {
+    if (has(Lds | GuestBuffers | Bda | UpdateTable)) {
         text += AtomicsText;
         text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "device"), "NAME", "");
         if (has(Lds)) text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "threadgroup"), "NAME", "_lds");
+    }
+    if (has(Atomic64)) {
+        text += Atomic64Text;
+        if (has(Bda)) text += Replace(std::string(Atomic64PointerText), "$UNALIGNED", Reason(BdaAbi::FaultReason::Unaligned));
+        if (has(GuestBuffers)) text += Replace(std::string(Atomic64DirectText), "$UNALIGNED", Reason(BdaAbi::FaultReason::Unaligned));
+        if (has(Bda) && has(Descriptors)) text += Replace(std::string(Atomic64GpuText), "$READ_WRITE", U32(BdaAbi::Read | BdaAbi::Write));
+        auto device = Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "device"), "NAME", "");
+        text += Replace(device, "MINMAX", std::string(Atomic64MinMaxText));
+        if (has(Lds)) text += Replace(Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "threadgroup"), "NAME", "_lds"), "MINMAX", "");
     }
     for (std::size_t index = 0; index < state.imageTypes.size(); ++index) text += "struct aps5_img" + std::to_string(index) + " { " + state.imageTypes[index] + " t; };\n";
     if (has(Samplers)) text += "struct aps5_sampler { sampler s; };\n";

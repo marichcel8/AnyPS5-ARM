@@ -35,7 +35,9 @@ enum Feature : std::uint32_t {
     WaveExchange = 1u << 19u,
     Permute = 1u << 20u,
     Images = 1u << 21u,
-    Samplers = 1u << 22u
+    Samplers = 1u << 22u,
+    Atomic64 = 1u << 23u,
+    UpdateTable = 1u << 24u
 };
 
 struct State {

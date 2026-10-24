@@ -51,6 +51,10 @@ id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, const std::string& so
     return pipeline;
 }
 
+bool IsAtomic(Kind kind) {
+    return kind == Kind::AtomicAdd || kind == Kind::AtomicSet;
+}
+
 std::uint32_t BindingIndex(IrTextureNumericClass numeric, ImageResourceClass resourceClass, bool atomic) {
     ImageResource image{};
     image.resourceClass = resourceClass;
@@ -61,10 +65,10 @@ std::uint32_t BindingIndex(IrTextureNumericClass numeric, ImageResourceClass res
 }
 
 id<MTLTexture> MakeTexture(id<MTLDevice> device, Kind kind) {
-    const bool storage = kind == Kind::Store || kind == Kind::AtomicAdd;
-    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kind == Kind::AtomicAdd ? MTLPixelFormatR32Uint : MTLPixelFormatRGBA8Unorm width:MslImagePrograms::Width height:1 mipmapped:NO];
+    const bool storage = kind == Kind::Store || IsAtomic(kind);
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:kind == IsAtomic(kind) ? MTLPixelFormatR32Uint : MTLPixelFormatRGBA8Unorm width:MslImagePrograms::Width height:1 mipmapped:NO];
     descriptor.storageMode = MTLStorageModeShared;
-    descriptor.usage = kind == Kind::AtomicAdd ? (MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageShaderAtomic) : storage ? (MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite) : MTLTextureUsageShaderRead;
+    descriptor.usage = IsAtomic(kind) ? (MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsageShaderAtomic) : storage ? (MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite) : MTLTextureUsageShaderRead;
     id<MTLTexture> texture = [device newTextureWithDescriptor:descriptor];
     Require(texture != nil, "could not create the test texture");
     if (!storage) {
@@ -90,7 +94,7 @@ void Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslImagePrograms
     Require(result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
     const auto source = std::string(result.msl.Source());
     id<MTLComputePipelineState> pipeline = Pipeline(device, source, name);
-    if (program.kind == Kind::CompileOnly) return;
+    if (program.kind == Kind::CompileOnly || program.kind == Kind::AtomicWide) return;
 
     id<MTLTexture> texture = MakeTexture(device, program.kind);
     id<MTLBuffer> output = Zeroed(device, OutputBytes);
@@ -101,8 +105,8 @@ void Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslImagePrograms
     std::memcpy(buffers.contents, &entry, sizeof(entry));
 
     id<MTLBuffer> images = Zeroed(device, MetalAbi::GuestImageTableBytes);
-    const bool storage = program.kind == Kind::Store || program.kind == Kind::AtomicAdd;
-    const auto imageIndex = program.kind == Kind::AtomicAdd ? BindingIndex(IrTextureNumericClass::Uint, ImageResourceClass::Storage, true) : storage ? BindingIndex(IrTextureNumericClass::Float, ImageResourceClass::Storage, false) : BindingIndex(IrTextureNumericClass::Float, ImageResourceClass::Sampled, false);
+    const bool storage = program.kind == Kind::Store || IsAtomic(program.kind);
+    const auto imageIndex = IsAtomic(program.kind) ? BindingIndex(IrTextureNumericClass::Uint, ImageResourceClass::Storage, true) : storage ? BindingIndex(IrTextureNumericClass::Float, ImageResourceClass::Storage, false) : BindingIndex(IrTextureNumericClass::Float, ImageResourceClass::Sampled, false);
     const MTLResourceID textureId = texture.gpuResourceID;
     std::memcpy(static_cast<std::uint8_t*>(images.contents) + imageIndex * sizeof(std::uint64_t), &textureId, sizeof(textureId));
 
@@ -147,15 +151,17 @@ void Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslImagePrograms
         for (std::uint32_t lane = 0; lane < MslImagePrograms::Threads; ++lane) Require(values[lane] == MslImagePrograms::Width, name + ": thread " + std::to_string(lane) + " saw width " + std::to_string(values[lane]));
         break;
     case Kind::Store:
-    case Kind::AtomicAdd: {
+    case Kind::AtomicAdd:
+    case Kind::AtomicSet: {
         std::vector<std::uint32_t> texels(MslImagePrograms::Width, 0u);
         [texture getBytes:texels.data() bytesPerRow:texels.size() * sizeof(std::uint32_t) fromRegion:MTLRegionMake2D(0, 0, MslImagePrograms::Width, 1) mipmapLevel:0];
         for (std::uint32_t x = 0; x < MslImagePrograms::Width; ++x) {
-            const std::uint32_t expected = program.kind == Kind::Store ? MslImagePrograms::StoredTexel : (x < 4u ? MslImagePrograms::Threads / 4u : 0u);
+            const std::uint32_t expected = program.kind == Kind::Store ? MslImagePrograms::StoredTexel : (x < 4u ? (program.kind == Kind::AtomicSet ? 1u : MslImagePrograms::Threads / 4u) : 0u);
             Require(texels[x] == expected, name + ": texel " + std::to_string(x) + " holds " + std::to_string(texels[x]) + ", expected " + std::to_string(expected));
         }
         break;
     }
+    case Kind::AtomicWide:
     case Kind::CompileOnly: break;
     }
 }

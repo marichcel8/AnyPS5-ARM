@@ -16,11 +16,12 @@ inline constexpr std::uint64_t TextureBase = 0x20000000ull;
 inline constexpr std::uint32_t Format8888UNorm = 56;
 inline constexpr std::uint32_t Format32UInt = 20;
 inline constexpr std::uint32_t Format32Float = 22;
+inline constexpr std::uint32_t Format32_32UInt = 62;
 inline constexpr std::uint32_t Type2D = 9;
 inline constexpr std::uint32_t WaitCnt = 0xbf8c3f70u;
 inline constexpr std::uint32_t EndProgram = MslComputePrograms::EndProgram;
 
-enum class Kind { Load, Sample, Store, AtomicAdd, ResInfo, CompileOnly };
+enum class Kind { Load, Sample, Store, AtomicAdd, AtomicSet, AtomicWide, ResInfo, CompileOnly };
 
 struct Program {
     std::string_view name;
@@ -88,6 +89,21 @@ inline std::vector<Program> Programs() {
         {"image atomic add",
          {0x36000083u, MovConstant(1u, Zero), MovConstant(2u, One), Mimg(0x11u, 0x1u), MimgOperands(0u, 2u, 1u, 0u), EndProgram},
          Kind::AtomicAdd, Format32UInt, {"atomic_fetch_add", "access::read_write"}},
+        {"image atomic smax",
+         {0x36000083u, MovConstant(1u, Zero), MovConstant(2u, One), Mimg(0x16u, 0x1u), MimgOperands(0u, 2u, 1u, 0u), EndProgram},
+         Kind::AtomicSet, Format32UInt, {"atomic_fetch_max", "texture2d<int, access::read_write>"}},
+        {"image atomic swap",
+         {0x36000083u, MovConstant(1u, Zero), MovConstant(2u, One), Mimg(0x0fu, 0x1u), MimgOperands(0u, 2u, 1u, 0u), EndProgram},
+         Kind::AtomicSet, Format32UInt, {"atomic_exchange"}},
+        {"image atomic cmpswap",
+         {0x36000083u, MovConstant(1u, Zero), MovConstant(2u, One), MovConstant(3u, Zero), Mimg(0x10u, 0x3u), MimgOperands(0u, 2u, 1u, 0u), EndProgram},
+         Kind::AtomicSet, Format32UInt, {"atomic_compare_exchange_weak"}},
+        {"image atomic umax64",
+         {0x36000083u, MovConstant(1u, Zero), MovConstant(2u, One), MovConstant(3u, Zero), Mimg(0x17u, 0x3u), MimgOperands(0u, 2u, 1u, 0u), EndProgram},
+         Kind::AtomicWide, Format32_32UInt, {"atomic_max", "texture2d<ulong, access::read_write>"}},
+        {"image atomic swap64",
+         {0x36000083u, MovConstant(1u, Zero), MovConstant(2u, One), MovConstant(3u, Zero), Mimg(0x0fu, 0x3u), MimgOperands(0u, 2u, 1u, 0u), EndProgram},
+         Kind::AtomicWide, Format32_32UInt, {"aps5_update64", "atomic_compare_exchange_weak"}},
         {"image resinfo",
          {MovConstant(6u, Tid), MovConstant(7u, Zero), Mimg(0x0eu, 0xfu), MimgOperands(7u, 2u, 1u, 0u), WaitCnt, MslComputePrograms::BufferStore, 0x80000206u, EndProgram},
          Kind::ResInfo, Format8888UNorm, {".get_width(", "get_num_mip_levels"}},
