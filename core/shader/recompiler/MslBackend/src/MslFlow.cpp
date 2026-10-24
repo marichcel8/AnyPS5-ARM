@@ -94,6 +94,10 @@ private:
             }
         }
         if (copies.empty()) return;
+        ForEachHalf(state, [&](std::uint32_t) { Copy(copies, target); });
+    }
+
+    void Copy(const std::vector<std::pair<const IrValue*, const IrValue*>>& copies, const IrBlock* target) {
         bool overlapping = false;
         for (const auto& copy : copies) {
             const IrValue* source = copy.second->Resolve();
@@ -113,13 +117,26 @@ private:
 
     std::string Condition(const BlockInfo& info) {
         if (info.condition == nullptr) Fail("a conditional branch has no condition");
-        const auto value = Value(state, info.condition);
-        switch (info.terminator.condition) {
+        const auto condition = info.terminator.condition;
+        const auto value = [&](std::uint32_t half) {
+            std::string text;
+            ForEachHalf(state, [&](std::uint32_t current) {
+                if (current == half) text = Value(state, info.condition);
+            });
+            return text;
+        };
+        const bool zero = condition == BranchCondition::ExecZero || condition == BranchCondition::VccZero || condition == BranchCondition::SccZero;
+        if (state.lanes == 2u) {
+            if (condition == BranchCondition::ScalarInstruction || condition == BranchCondition::GotoVariable || condition == BranchCondition::IndirectTarget) return value(0u);
+            if (zero) return "!" + WaveAny(state, "!" + value(0u), "!" + value(1u));
+            return WaveAny(state, value(0u), value(1u));
+        }
+        switch (condition) {
         case BranchCondition::ExecNonZero:
-        case BranchCondition::VccNonZero: return WaveAny(state, value);
+        case BranchCondition::VccNonZero: return WaveAny(state, value(0u), {});
         case BranchCondition::ExecZero:
-        case BranchCondition::VccZero: return "!" + WaveAny(state, "!" + value);
-        default: return value;
+        case BranchCondition::VccZero: return "!" + WaveAny(state, "!" + value(0u), {});
+        default: return value(0u);
         }
     }
 
