@@ -4,8 +4,13 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalCompiler.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Sync.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/TextureJobs.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/Textures.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "BdaAbi.hpp"
 #include "MetalAbi.hpp"
+#include "RuntimeAbi.hpp"
 #include "MslBackend/MslEmitter.hpp"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -61,6 +66,29 @@ struct WriteBack {
     std::size_t bytes = 0;
 };
 
+enum class Numeric : std::uint8_t { Float, Uint, Sint };
+
+struct ImageKind {
+    Numeric numeric = Numeric::Float;
+    bool storage = false;
+};
+
+using SurfaceKey = std::array<std::uint64_t, 5>;
+using ViewKey = std::array<std::uint32_t, 7>;
+using SamplerKey = std::array<std::uint32_t, 5>;
+
+struct CachedSurface {
+    Metal::TextureHandle texture;
+    std::map<ViewKey, Metal::TextureHandle> views;
+};
+
+struct ImageUse {
+    CachedSurface* surface = nullptr;
+    Graphics::GuestTextureResource resource{};
+    std::uint64_t address = 0;
+    bool written = false;
+};
+
 struct PipelineEntry {
     std::shared_ptr<const std::string> source;
     std::shared_ptr<Metal::CompileTicket> ticket;
@@ -90,6 +118,86 @@ std::set<std::uint32_t> DeclaredConstants(std::string_view source) {
         if (digits) ids.insert(value);
     }
     return ids;
+}
+
+ImageKind ImageKindOf(std::uint32_t binding) {
+    using namespace ShaderRecompiler::RuntimeAbi;
+    const auto kind = binding % static_cast<std::uint32_t>(Binding::Count);
+    if (kind < FirstImageBinding || kind >= static_cast<std::uint32_t>(Binding::Samplers)) throw std::runtime_error("AGC graphics: Metal image binding " + std::to_string(binding) + " is not an image binding");
+    if (kind >= FirstStorageImageBinding) {
+        const auto group = (kind - FirstStorageImageBinding) / 7u;
+        return {group == 0u ? Numeric::Float : Numeric::Uint, true};
+    }
+    const auto group = (kind - FirstImageBinding) / 7u;
+    return {group == 1u ? Numeric::Uint : group == 2u ? Numeric::Sint : Numeric::Float, false};
+}
+
+Metal::PixelFormat NumericView(Metal::PixelFormat format, Numeric numeric) {
+    using enum Metal::PixelFormat;
+    static constexpr std::array<std::array<Metal::PixelFormat, 6>, 11> families{{
+        {R8Unorm, R8UnormSrgb, R8Snorm, R8Uint, R8Sint, Invalid},
+        {RG8Unorm, RG8UnormSrgb, RG8Snorm, RG8Uint, RG8Sint, Invalid},
+        {RGBA8Unorm, RGBA8UnormSrgb, RGBA8Snorm, RGBA8Uint, RGBA8Sint, Invalid},
+        {R16Unorm, Invalid, R16Snorm, R16Uint, R16Sint, R16Float},
+        {RG16Unorm, Invalid, RG16Snorm, RG16Uint, RG16Sint, RG16Float},
+        {RGBA16Unorm, Invalid, RGBA16Snorm, RGBA16Uint, RGBA16Sint, RGBA16Float},
+        {Invalid, Invalid, Invalid, R32Uint, R32Sint, R32Float},
+        {Invalid, Invalid, Invalid, RG32Uint, RG32Sint, RG32Float},
+        {Invalid, Invalid, Invalid, RGBA32Uint, RGBA32Sint, RGBA32Float},
+        {RGB10A2Unorm, Invalid, Invalid, RGB10A2Uint, Invalid, Invalid},
+        {Invalid, Invalid, Invalid, Invalid, Invalid, Invalid},
+    }};
+    for (const auto& family : families) {
+        const auto found = std::find(family.begin(), family.end(), format);
+        if (found == family.end() || format == Invalid) continue;
+        const auto column = static_cast<std::size_t>(found - family.begin());
+        const bool integer = column == 3u || column == 4u;
+        Metal::PixelFormat wanted = Invalid;
+        if (numeric == Numeric::Uint) wanted = family[3];
+        else if (numeric == Numeric::Sint) wanted = family[4];
+        else if (integer) wanted = family[5] != Invalid ? family[5] : family[0];
+        else return format;
+        return wanted != Invalid ? wanted : format;
+    }
+    return format;
+}
+
+Metal::TextureKind ViewKindOf(ShaderRecompiler::DescriptorImageShape shape) {
+    switch (shape) {
+    case ShaderRecompiler::DescriptorImageShape::Image1D:
+    case ShaderRecompiler::DescriptorImageShape::Image2D: return Metal::TextureKind::Tex2D;
+    case ShaderRecompiler::DescriptorImageShape::Image1DArray:
+    case ShaderRecompiler::DescriptorImageShape::Image2DArray:
+    case ShaderRecompiler::DescriptorImageShape::ImageCube: return Metal::TextureKind::Tex2DArray;
+    case ShaderRecompiler::DescriptorImageShape::Image3D: return Metal::TextureKind::Tex3D;
+    case ShaderRecompiler::DescriptorImageShape::Image2DMultisample: return Metal::TextureKind::Tex2DMsaa;
+    }
+    throw std::runtime_error("AGC graphics: unknown descriptor image shape");
+}
+
+MTLSamplerMinMagFilter NativeFilter(VkFilter filter) {
+    return filter == VK_FILTER_LINEAR ? MTLSamplerMinMagFilterLinear : MTLSamplerMinMagFilterNearest;
+}
+
+MTLSamplerAddressMode NativeAddress(VkSamplerAddressMode mode, bool unnormalized) {
+    if (unnormalized) return mode == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER ? MTLSamplerAddressModeClampToZero : MTLSamplerAddressModeClampToEdge;
+    switch (mode) {
+    case VK_SAMPLER_ADDRESS_MODE_REPEAT: return MTLSamplerAddressModeRepeat;
+    case VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT: return MTLSamplerAddressModeMirrorRepeat;
+    case VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER: return MTLSamplerAddressModeClampToBorderColor;
+    case VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE: return MTLSamplerAddressModeMirrorClampToEdge;
+    default: return MTLSamplerAddressModeClampToEdge;
+    }
+}
+
+MTLSamplerBorderColor NativeBorder(VkBorderColor color) {
+    switch (color) {
+    case VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK:
+    case VK_BORDER_COLOR_INT_OPAQUE_BLACK: return MTLSamplerBorderColorOpaqueBlack;
+    case VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE:
+    case VK_BORDER_COLOR_INT_OPAQUE_WHITE: return MTLSamplerBorderColorOpaqueWhite;
+    default: return MTLSamplerBorderColorTransparentBlack;
+    }
 }
 
 ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device) {
@@ -137,6 +245,11 @@ struct VulkanDevice::State {
 
     Metal::NativeBuffer fault;
 
+    std::unique_ptr<Metal::TextureManager> textures;
+    std::map<SurfaceKey, CachedSurface> surfaces;
+    std::map<SamplerKey, id<MTLSamplerState>> samplers;
+    std::array<id<MTLTexture>, 4> nullTextures{};
+
     std::mutex pipelineMutex;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, PipelineEntry, IdentityHash> pipelines;
     std::atomic<std::uint64_t> pipelinesCreated{0};
@@ -148,6 +261,18 @@ struct VulkanDevice::State {
             flush();
             drain(lastSerial);
         } catch (...) {
+        }
+        for (auto& [key, surface] : surfaces) {
+            for (auto& [view, handle] : surface.views) textures->Release(handle);
+            textures->Release(surface.texture);
+        }
+        surfaces.clear();
+        textures.reset();
+        for (auto& texture : nullTextures) {
+            if (texture == nil) continue;
+            id<MTLTexture> retired = texture;
+            texture = nil;
+            device->RetireAllocation((__bridge void*)retired, {});
         }
         for (auto& item : chunks) device->ReleaseBuffer(item->buffer);
         if (fault) device->ReleaseBuffer(fault);
@@ -281,6 +406,7 @@ struct VulkanDevice::State {
             completion.second = std::move(staged);
             writeBacks.clear();
             staged.clear();
+            if (textures != nullptr) textures->Seal(Queue, serial);
             lastSerial = serial;
             recordedSinceSubmit = 0;
         }
@@ -351,6 +477,126 @@ struct VulkanDevice::State {
         return (__bridge id<MTLComputePipelineState>)ticket->ProductAs<Metal::CompiledPipeline>()->native;
     }
 
+    Metal::TextureManager& textureManager() {
+        if (textures != nullptr) return *textures;
+        std::string failure;
+        textures = Metal::TextureManager::Create(*device, *compiler, &failure);
+        if (textures == nullptr) throw std::runtime_error("AGC graphics: Metal texture manager could not be created: " + failure);
+        return *textures;
+    }
+
+    id<MTLTexture> nullTexture(Metal::TextureKind kind) {
+        const std::size_t index = kind == Metal::TextureKind::Tex2DArray ? 1u : kind == Metal::TextureKind::Tex3D ? 2u : kind == Metal::TextureKind::Tex2DMsaa ? 3u : 0u;
+        if (nullTextures[index] != nil) return nullTextures[index];
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor new];
+        descriptor.textureType = index == 1u ? MTLTextureType2DArray : index == 2u ? MTLTextureType3D : index == 3u ? MTLTextureType2DMultisample : MTLTextureType2D;
+        descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        descriptor.width = 1;
+        descriptor.height = 1;
+        descriptor.sampleCount = index == 3u ? 4 : 1;
+        descriptor.storageMode = index == 3u ? MTLStorageModePrivate : MTLStorageModeShared;
+        descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+        descriptor.usage = index == 3u ? MTLTextureUsageShaderRead : MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite | MTLTextureUsagePixelFormatView;
+        id<MTLTexture> texture = [native newTextureWithDescriptor:descriptor];
+        if (texture == nil) throw std::runtime_error("AGC graphics: Metal null texture could not be created");
+        texture.label = @"AnyPS5 null texture";
+        if (index != 3u) {
+            const std::uint32_t zero = 0;
+            [texture replaceRegion:MTLRegionMake2D(0, 0, 1, 1) mipmapLevel:0 slice:0 withBytes:&zero bytesPerRow:4 bytesPerImage:4];
+        }
+        device->AddResidentAllocation((__bridge void*)texture);
+        nullTextures[index] = texture;
+        return texture;
+    }
+
+    std::uint64_t image(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
+        if (!binding.imageShape) throw std::runtime_error("AGC graphics: Metal image binding has no image shape");
+        const auto viewKind = ViewKindOf(*binding.imageShape);
+        const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
+        if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
+        const auto resource = Graphics::DecodeTextureResource(words);
+        const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
+        const auto layers = resource.depthOrLastArray + 1u;
+        auto info = Metal::DescribeTexture(resource);
+        if (info.kind != Metal::TextureKind::Tex3D && info.kind != Metal::TextureKind::Tex2DMsaa) {
+            info.kind = Metal::TextureKind::Tex2DArray;
+            info.arrayLength = layers;
+        }
+        if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
+        info.shaderWrite = true;
+        info.label = "AnyPS5 guest texture";
+        const SurfaceKey key{resource.baseAddress,
+                             static_cast<std::uint64_t>(resource.format) | static_cast<std::uint64_t>(info.kind) << 32u | static_cast<std::uint64_t>(resource.tileMode) << 40u,
+                             static_cast<std::uint64_t>(info.width) | static_cast<std::uint64_t>(info.height) << 32u,
+                             static_cast<std::uint64_t>(layers) | static_cast<std::uint64_t>(info.mipLevels) << 32u,
+                             static_cast<std::uint64_t>(resource.pipeBankXor) | static_cast<std::uint64_t>(info.samples) << 32u};
+        auto& manager = textureManager();
+        auto found = surfaces.find(key);
+        if (found == surfaces.end()) {
+            std::string failure;
+            auto created = manager.Create(info, &failure);
+            if (!created) throw std::runtime_error("AGC graphics: Metal texture could not be created: " + failure);
+            found = surfaces.emplace(key, CachedSurface{created, {}}).first;
+        }
+        auto& surface = found->second;
+        const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
+        const auto address = resolve(resource.baseAddress, bytes, written, snapshots);
+        uses.push_back({&surface, resource, address, written});
+        Metal::ViewInfo view;
+        view.kind = viewKind;
+        view.changeKind = true;
+        view.pixelFormat = NumericView(surface.texture.pixelFormat, ImageKindOf(binding.binding).numeric);
+        view.baseLevel = std::min(resource.baseLevel, info.mipLevels - 1u);
+        view.levelCount = std::min(std::max(resource.lastLevel, view.baseLevel), info.mipLevels - 1u) - view.baseLevel + 1u;
+        if (viewKind == Metal::TextureKind::Tex3D || viewKind == Metal::TextureKind::Tex2DMsaa) {
+            view.baseSlice = 0;
+            view.sliceCount = 1;
+        } else {
+            view.baseSlice = std::min(resource.baseArray, layers - 1u);
+            view.sliceCount = viewKind == Metal::TextureKind::Tex2D ? 1u : layers - view.baseSlice;
+        }
+        if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
+        const ViewKey viewKey{static_cast<std::uint32_t>(view.kind), static_cast<std::uint32_t>(view.pixelFormat), view.baseLevel, view.levelCount, view.baseSlice, view.sliceCount,
+                              static_cast<std::uint32_t>(view.swizzle[0]) | static_cast<std::uint32_t>(view.swizzle[1]) << 8u | static_cast<std::uint32_t>(view.swizzle[2]) << 16u | static_cast<std::uint32_t>(view.swizzle[3]) << 24u};
+        auto existing = surface.views.find(viewKey);
+        if (existing == surface.views.end()) {
+            auto created = manager.View(surface.texture, view);
+            if (!created) throw std::runtime_error("AGC graphics: Metal texture view could not be created");
+            existing = surface.views.emplace(viewKey, created).first;
+        }
+        return existing->second.resourceId;
+    }
+
+    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element) {
+        const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u);
+        const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
+        const bool integerBorder = element < binding.samplerIntegerBorder.size() && binding.samplerIntegerBorder[element];
+        const SamplerKey key{words[0], words[1], words[2], words[3], (unnormalized ? 1u : 0u) | (integerBorder ? 2u : 0u)};
+        if (const auto found = samplers.find(key); found != samplers.end()) return found->second.gpuResourceID._impl;
+        const auto decoded = Graphics::DecodeSamplerResource(words, unnormalized, false, integerBorder);
+        MTLSamplerDescriptor* descriptor = [MTLSamplerDescriptor new];
+        descriptor.minFilter = NativeFilter(decoded.minFilter);
+        descriptor.magFilter = decoded.unnormalizedCoordinates ? descriptor.minFilter : NativeFilter(decoded.magFilter);
+        descriptor.mipFilter = decoded.unnormalizedCoordinates ? MTLSamplerMipFilterNotMipmapped : decoded.mipmapMode == VK_SAMPLER_MIPMAP_MODE_LINEAR ? MTLSamplerMipFilterLinear : MTLSamplerMipFilterNearest;
+        descriptor.sAddressMode = NativeAddress(decoded.addressModeU, decoded.unnormalizedCoordinates);
+        descriptor.tAddressMode = NativeAddress(decoded.addressModeV, decoded.unnormalizedCoordinates);
+        descriptor.rAddressMode = NativeAddress(decoded.addressModeW, decoded.unnormalizedCoordinates);
+        descriptor.borderColor = NativeBorder(decoded.borderColor);
+        descriptor.normalizedCoordinates = !decoded.unnormalizedCoordinates;
+        descriptor.maxAnisotropy = decoded.anisotropyEnable && !decoded.unnormalizedCoordinates ? static_cast<NSUInteger>(std::clamp(decoded.maxAnisotropy, 1.0f, 16.0f)) : 1u;
+        if (!decoded.unnormalizedCoordinates) {
+            descriptor.lodMinClamp = std::max(decoded.minLod, 0.0f);
+            descriptor.lodMaxClamp = std::max(decoded.maxLod, descriptor.lodMinClamp);
+        }
+        if (decoded.compareEnable) descriptor.compareFunction = static_cast<MTLCompareFunction>(decoded.compareOp);
+        descriptor.supportArgumentBuffers = YES;
+        descriptor.label = @"AnyPS5 guest sampler";
+        id<MTLSamplerState> state = [native newSamplerStateWithDescriptor:descriptor];
+        if (state == nil) throw std::runtime_error("AGC graphics: Metal sampler state could not be created");
+        samplers.emplace(key, state);
+        return state.gpuResourceID._impl;
+    }
+
     void dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
         if (shader.backend != ShaderRecompiler::ShaderBackendKind::Msl) throw std::runtime_error("AGC graphics: the Metal backend dispatches only MSL results");
         if (shader.msl.empty()) throw std::runtime_error("AGC graphics: the MSL result has no source");
@@ -367,6 +613,8 @@ struct VulkanDevice::State {
             slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
             slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
             if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
+            std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
+            std::vector<ImageUse> uses;
             for (const auto& binding : shader.bindings) {
                 switch (binding.role) {
                 case ShaderRecompiler::DescriptorRole::ShaderData:
@@ -389,6 +637,20 @@ struct VulkanDevice::State {
                     slots[SlotIndex(BufferSlot::GuestBuffers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
                     break;
                 }
+                case ShaderRecompiler::DescriptorRole::GuestImages: {
+                    if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8u) throw std::runtime_error("AGC graphics: guest image descriptor must contain eight DWORDs per element");
+                    for (std::uint32_t element = 0; element < binding.count; ++element) {
+                        imageEntries.emplace_back(ShaderRecompiler::MetalAbi::GuestImageIndex(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), element), image(binding, element, snapshots, uses));
+                    }
+                    break;
+                }
+                case ShaderRecompiler::DescriptorRole::GuestSamplers: {
+                    if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest sampler descriptor must contain four DWORDs per element");
+                    std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
+                    for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element);
+                    slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                    break;
+                }
                 case ShaderRecompiler::DescriptorRole::BdaPagetable:
                     if (slots[SlotIndex(BufferSlot::BdaPagetable)] == 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
                     break;
@@ -398,14 +660,39 @@ struct VulkanDevice::State {
                     throw std::runtime_error("AGC graphics: Metal dispatch does not bind descriptor role " + std::to_string(static_cast<int>(binding.role)) + " yet");
                 }
             }
+            if (!imageEntries.empty()) {
+                const auto [lowest, highest] = std::minmax_element(imageEntries.begin(), imageEntries.end());
+                const auto first = lowest->first;
+                std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(highest->first - first + 1u, {0});
+                for (const auto& [index, resourceId] : imageEntries) entries[index - first].resourceId = resourceId;
+                slots[SlotIndex(BufferSlot::GuestImages)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0])) - static_cast<std::uint64_t>(first) * sizeof(entries[0]);
+            }
+            if (encodedDispatches != 0) [encoder barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+            if (!uses.empty()) {
+                std::vector<const CachedSurface*> uploaded;
+                for (const auto& use : uses) {
+                    if (std::find(uploaded.begin(), uploaded.end(), use.surface) != uploaded.end()) continue;
+                    uploaded.push_back(use.surface);
+                    textures->EncodeUpload((__bridge void*)encoder, use.surface->texture, use.resource, use.address, textures->DefaultUploadPath());
+                }
+                [encoder barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            }
             for (std::uint32_t slot = 0; slot < ArgumentSlots; ++slot) {
                 if (slots[slot] != 0) [table setAddress:slots[slot] atIndex:slot];
             }
-            if (encodedDispatches != 0) [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
             [encoder setComputePipelineState:state];
             [encoder setArgumentTable:table];
             if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error("AGC graphics: Metal dispatch exceeds the threadgroup count limit");
             [encoder dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+            if (std::any_of(uses.begin(), uses.end(), [](const ImageUse& use) { return use.written; })) {
+                [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+                std::vector<const CachedSurface*> stored;
+                for (const auto& use : uses) {
+                    if (!use.written || std::find(stored.begin(), stored.end(), use.surface) != stored.end()) continue;
+                    stored.push_back(use.surface);
+                    textures->EncodeWriteback((__bridge void*)encoder, use.surface->texture, use.resource, use.address);
+                }
+            }
             ++encodedDispatches;
             ++recordedSinceSubmit;
             dispatches.fetch_add(1, std::memory_order_relaxed);
