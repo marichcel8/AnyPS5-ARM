@@ -3,6 +3,8 @@
 #import <Metal/Metal.h>
 #include "TextureKernelsSource.inc"
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -18,6 +20,9 @@ static_assert(sizeof(AgcDetileParams) == 160);
 namespace {
 
 constexpr std::uint64_t ChunkBytes = 256 * 1024;
+constexpr std::size_t MaxWarmReplay = 48;
+constexpr std::uint32_t StallTimeoutMs = 60000;
+constexpr const char* WarmPrefix = "detile";
 constexpr std::uint64_t ParamsAlign = 16;
 
 constexpr const char* KernelNames[] = {
@@ -54,44 +59,65 @@ MTLSize parseGroup(const char* text, MTLSize fallback) {
 
 struct TextureDetiler::State {
     Device& device;
+    MetalCompiler& compiler;
+    LibrarySource source;
     id<MTLDevice> native = nil;
-    id<MTLLibrary> library = nil;
     id<MTL4ArgumentTable> table = nil;
     std::mutex mutex;
-    std::unordered_map<std::uint64_t, id<MTLComputePipelineState>> pipelines;
+    std::unordered_map<std::uint64_t, std::shared_ptr<CompileTicket>> pipelines;
     std::vector<std::unique_ptr<Chunk>> chunks;
     Chunk* open = nullptr;
     std::vector<Chunk*> sealing;
     MTLSize group = MTLSizeMake(32, 8, 1);
     DetileCounters counters;
+    std::atomic<std::uint64_t> stalls{0};
+    std::atomic<std::uint64_t> stallNanos{0};
 
-    explicit State(Device& device) : device(device) {}
+    State(Device& device, MetalCompiler& compiler) : device(device), compiler(compiler) {}
 
     ~State() {
         for (auto& chunk : chunks) device.ReleaseBuffer(chunk->buffer);
     }
 
-    id<MTLComputePipelineState> pipeline(DetileKernel kernel, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes) {
-        const std::uint64_t key = static_cast<std::uint64_t>(kernel) | (static_cast<std::uint64_t>(elementBytes) << 8) | (static_cast<std::uint64_t>(transform) << 16) | (static_cast<std::uint64_t>(texelBytes) << 24);
-        const auto found = pipelines.find(key);
-        if (found != pipelines.end()) return found->second;
-        MTLFunctionConstantValues* constants = [MTLFunctionConstantValues new];
-        const std::uint32_t values[3] = {elementBytes, static_cast<std::uint32_t>(transform), texelBytes};
-        for (NSUInteger index = 0; index < 3; ++index) [constants setConstantValue:&values[index] type:MTLDataTypeUInt atIndex:index];
-        NSError* error = nil;
-        id<MTLFunction> function = [library newFunctionWithName:[NSString stringWithUTF8String:KernelNames[static_cast<std::size_t>(kernel)]] constantValues:constants error:&error];
-        if (function == nil) {
-            std::fprintf(stderr, "AGC Metal: texture kernel %s: %s\n", KernelNames[static_cast<std::size_t>(kernel)], error.localizedDescription.UTF8String);
-            return nil;
+    static std::uint64_t variantKey(DetileKernel kernel, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes) {
+        return static_cast<std::uint64_t>(kernel) | (static_cast<std::uint64_t>(elementBytes) << 8) | (static_cast<std::uint64_t>(transform) << 16) | (static_cast<std::uint64_t>(texelBytes) << 24);
+    }
+
+    std::shared_ptr<CompileTicket> request(DetileKernel kernel, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes, CompilePriority priority, bool record) {
+        const auto key = variantKey(kernel, elementBytes, transform, texelBytes);
+        std::lock_guard lock(mutex);
+        auto found = pipelines.find(key);
+        if (found != pipelines.end() && (found->second->Ready() || found->second->Priority() >= priority)) return found->second;
+        ComputePipelineRequest build;
+        build.library = source;
+        build.function = KernelNames[static_cast<std::size_t>(kernel)];
+        build.constants = {{0, elementBytes, false}, {1, static_cast<std::uint32_t>(transform), false}, {2, texelBytes, false}};
+        build.label = std::string("AnyPS5 ") + build.function;
+        build.priority = priority;
+        auto ticket = compiler.Compute(build);
+        if (found == pipelines.end()) {
+            pipelines.emplace(key, ticket);
+            ++counters.pipelines;
+            if (record) compiler.RecordWarm(WarmPrefix, std::to_string(key));
+        } else {
+            found->second = ticket;
         }
-        id<MTLComputePipelineState> state = [native newComputePipelineStateWithFunction:function error:&error];
-        if (state == nil) {
-            std::fprintf(stderr, "AGC Metal: texture pipeline %s: %s\n", KernelNames[static_cast<std::size_t>(kernel)], error.localizedDescription.UTF8String);
-            return nil;
+        return ticket;
+    }
+
+    void replayJournal() {
+        std::size_t budget = MaxWarmReplay;
+        for (const auto& entry : compiler.WarmEntries(WarmPrefix)) {
+            if (budget == 0) break;
+            char* end = nullptr;
+            const auto key = std::strtoull(entry.c_str(), &end, 10);
+            if (end == entry.c_str() || *end != '\0') continue;
+            const auto kernel = static_cast<std::uint32_t>(key & 0xffu);
+            if (kernel >= static_cast<std::uint32_t>(DetileKernel::Count)) continue;
+            const auto transform = static_cast<std::uint32_t>((key >> 16) & 0xffu);
+            request(static_cast<DetileKernel>(kernel), static_cast<std::uint32_t>((key >> 8) & 0xffu), static_cast<TextureTransform>(transform), static_cast<std::uint32_t>((key >> 24) & 0xffu), CompilePriority::Prefetch, false);
+            --budget;
         }
-        pipelines.emplace(key, state);
-        ++counters.pipelines;
-        return state;
     }
 
     Chunk* acquire() {
@@ -124,17 +150,15 @@ struct TextureDetiler::State {
     }
 };
 
-std::unique_ptr<TextureDetiler> TextureDetiler::Create(Device& device, std::string* failure) {
+std::unique_ptr<TextureDetiler> TextureDetiler::Create(Device& device, MetalCompiler& compiler, std::string* failure) {
     @autoreleasepool {
-        auto state = std::make_unique<State>(device);
+        auto state = std::make_unique<State>(device, compiler);
         state->native = (__bridge id<MTLDevice>)device.NativeDevice();
+        state->source.text = kTextureKernelsSource;
+        state->source.name = "AnyPS5 texture kernels";
+        state->source.fastMath = true;
+        state->source.key = CompileKeyBuilder(0x54455830ull).AddString(state->source.text).Finish();
         NSError* error = nil;
-        MTLCompileOptions* options = [MTLCompileOptions new];
-        state->library = [state->native newLibraryWithSource:[NSString stringWithUTF8String:kTextureKernelsSource] options:options error:&error];
-        if (state->library == nil) {
-            if (failure != nullptr) *failure = std::string("texture kernels: ") + error.localizedDescription.UTF8String;
-            return nullptr;
-        }
         MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
         descriptor.maxBufferBindCount = 1;
         descriptor.maxTextureBindCount = 1;
@@ -144,6 +168,7 @@ std::unique_ptr<TextureDetiler> TextureDetiler::Create(Device& device, std::stri
             return nullptr;
         }
         state->group = parseGroup(std::getenv("APS5_METAL_DETILE_GROUP"), state->group);
+        state->replayJournal();
         return std::unique_ptr<TextureDetiler>(new TextureDetiler(std::move(state)));
     }
 }
@@ -155,9 +180,16 @@ TextureDetiler::~TextureDetiler() = default;
 void TextureDetiler::Encode(void* computeEncoder, DetileKernel kernel, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes, const AgcDetileParams& params, void* texture, std::uint32_t columns, std::uint32_t rows) {
     auto& s = *state;
     if (columns == 0 || rows == 0) return;
+    auto ticket = s.request(kernel, elementBytes, transform, texelBytes, CompilePriority::Urgent, true);
+    if (!ticket->Ready()) {
+        const auto started = std::chrono::steady_clock::now();
+        ticket->Wait(StallTimeoutMs);
+        s.stalls.fetch_add(1, std::memory_order_relaxed);
+        s.stallNanos.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
+    }
+    if (!ticket->Ready()) throw std::runtime_error("AGC graphics: Metal texture detile pipeline failed to build: " + (ticket->Done() ? ticket->Error() : std::string("timed out")));
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)ticket->ProductAs<CompiledPipeline>()->native;
     std::lock_guard lock(s.mutex);
-    id<MTLComputePipelineState> pipeline = s.pipeline(kernel, elementBytes, transform, texelBytes);
-    if (pipeline == nil) throw std::runtime_error("AGC graphics: Metal texture detile pipeline failed to build");
     const auto address = s.allocate(params);
     if (address == 0) throw std::runtime_error("AGC graphics: Metal texture constants could not be allocated");
     id<MTL4ComputeCommandEncoder> encoder = (__bridge id<MTL4ComputeCommandEncoder>)computeEncoder;
@@ -185,9 +217,16 @@ void TextureDetiler::Seal(QueueKind queue, std::uint64_t serial) {
     s.sealing.clear();
 }
 
+void TextureDetiler::Warm(DetileKernel kernel, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes) {
+    state->request(kernel, elementBytes, transform, texelBytes, CompilePriority::Needed, true);
+}
+
 DetileCounters TextureDetiler::Counters() const {
     std::lock_guard lock(state->mutex);
-    return state->counters;
+    auto counters = state->counters;
+    counters.stalls = state->stalls.load(std::memory_order_relaxed);
+    counters.stallNanos = state->stallNanos.load(std::memory_order_relaxed);
+    return counters;
 }
 
 }

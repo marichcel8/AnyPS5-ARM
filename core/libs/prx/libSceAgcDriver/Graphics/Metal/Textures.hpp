@@ -65,7 +65,7 @@ struct TextureStats {
 
 class TextureManager {
 public:
-    static std::unique_ptr<TextureManager> Create(Device& device, std::string* failure);
+    static std::unique_ptr<TextureManager> Create(Device& device, MetalCompiler& compiler, std::string* failure);
     ~TextureManager();
     TextureManager(const TextureManager&) = delete;
     TextureManager& operator=(const TextureManager&) = delete;

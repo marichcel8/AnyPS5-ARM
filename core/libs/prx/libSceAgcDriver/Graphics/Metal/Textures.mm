@@ -218,10 +218,10 @@ TextureCreateInfo DescribeTexture(const GuestTextureResource& descriptor) {
     return info;
 }
 
-std::unique_ptr<TextureManager> TextureManager::Create(Device& device, std::string* failure) {
+std::unique_ptr<TextureManager> TextureManager::Create(Device& device, MetalCompiler& compiler, std::string* failure) {
     auto state = std::make_unique<State>(device);
     state->native = (__bridge id<MTLDevice>)device.NativeDevice();
-    state->detiler = TextureDetiler::Create(device, failure);
+    state->detiler = TextureDetiler::Create(device, compiler, failure);
     if (state->detiler == nullptr) return nullptr;
     state->bcSupported = state->native.supportsBCTextureCompression;
     state->budget = envMebibytes("APS5_METAL_TEXTURE_MIB", device.Limits().recommendedWorkingSetBytes / 3);
@@ -295,6 +295,12 @@ TextureHandle TextureManager::Create(const TextureCreateInfo& requested, std::st
         object->bytes = bytes;
         object->slices = sliceCount(info);
         s.totals->textures.fetch_add(1, std::memory_order_relaxed);
+        if (format->blockCompressed || s.defaultPath == UploadPath::Staged) {
+            s.detiler->Warm(DetileKernel::TiledToLinear, format->guestElementBytes, format->transform, format->texelBytes);
+        } else {
+            const auto kernel = info.kind == TextureKind::Tex3D ? DetileKernel::TiledToVolume : (info.kind == TextureKind::Tex1D || info.kind == TextureKind::Tex1DArray ? DetileKernel::TiledToArray1D : DetileKernel::TiledToArray2D);
+            s.detiler->Warm(kernel, format->guestElementBytes, format->transform, format->texelBytes);
+        }
         TextureHandle handle;
         handle.object = object;
         handle.texture = (__bridge void*)texture;
