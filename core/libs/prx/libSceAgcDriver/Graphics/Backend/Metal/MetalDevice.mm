@@ -200,7 +200,7 @@ MTLSamplerBorderColor NativeBorder(VkBorderColor color) {
     }
 }
 
-ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device) {
+ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device, bool presenting) {
     ShaderRecompiler::MslTarget target;
     target.metalVersion = 320;
     target.simdgroupSize = 32;
@@ -209,7 +209,9 @@ ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device) {
     target.maxThreadgroupSize = {static_cast<std::uint32_t>(threads.width), static_cast<std::uint32_t>(threads.height), static_cast<std::uint32_t>(threads.depth)};
     target.maxThreadsPerThreadgroup = static_cast<std::uint32_t>(std::max({threads.width, threads.height, threads.depth}));
     target.maxThreadgroupMemoryBytes = static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength);
-    target.relaxedFloat = true;
+    static const bool exactFloat = std::getenv("APS5_EXACT_FLOAT") != nullptr;
+    static const bool relaxedFloat = std::getenv("APS5_RELAXED_FLOAT") != nullptr;
+    target.relaxedFloat = !exactFloat && (relaxedFloat || presenting);
     return target;
 }
 
@@ -704,7 +706,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window) : VulkanDevice(wind
 
 VulkanDevice::VulkanDevice(CompileOnly) : VulkanDevice(nullptr, true) {}
 
-VulkanDevice::VulkanDevice(const PresentationWindow*, bool compileOnly) : state(std::make_unique<State>()), serial(0) {
+VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) : state(std::make_unique<State>()), serial(0) {
     static std::atomic<std::uint64_t> serials{0};
     serial = serials.fetch_add(1, std::memory_order_relaxed) + 1;
     @autoreleasepool {
@@ -714,7 +716,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow*, bool compileOnly) : state(
         s.device = Metal::Device::Create(&failure);
         if (s.device == nullptr) throw std::runtime_error("AGC graphics: no usable Metal 4 device: " + failure);
         s.native = (__bridge id<MTLDevice>)s.device->NativeDevice();
-        s.msl = BuildMslTarget(s.native);
+        s.msl = BuildMslTarget(s.native, window != nullptr);
         s.target = ShaderRecompiler::MslFrontendTarget(s.msl);
         s.groupLimit = {0xffffffffu, 0xffffu, 0xffffu};
         ShaderRecompiler::SetDefaultShaderBackend(ShaderRecompiler::ShaderBackendKind::Msl, s.msl);
