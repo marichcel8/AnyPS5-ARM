@@ -8,6 +8,7 @@
 #include <atomic>
 #include <cstdlib>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <vector>
 
@@ -38,7 +39,8 @@ NSString* labelString(const char* label) {
 }
 
 struct PendingRelease {
-    id<MTLBuffer> buffer;
+    id<MTLAllocation> allocation;
+    std::function<void()> destroy;
     std::array<std::uint64_t, QueueCount> serials;
     std::uint64_t driverBytes;
 };
@@ -90,7 +92,7 @@ struct Device::State final : WindowBackend {
         return false;
     }
 
-    void addResident(id<MTLBuffer> buffer) {
+    void addResident(id<MTLAllocation> buffer) {
         std::lock_guard lock(residencyMutex);
         [residency addAllocation:buffer];
         residencyDirty.store(true, std::memory_order_release);
@@ -102,9 +104,9 @@ struct Device::State final : WindowBackend {
         return serials;
     }
 
-    void deferRelease(id<MTLBuffer> buffer, std::uint64_t bytes) {
+    void deferRelease(id<MTLAllocation> allocation, std::uint64_t bytes, std::function<void()> destroy = {}) {
         std::lock_guard lock(releaseMutex);
-        releases.push_back({buffer, submittedNow(), bytes});
+        releases.push_back({allocation, std::move(destroy), submittedNow(), bytes});
     }
 
     NativeBuffer newBuffer(std::uint64_t bytes, MTLResourceOptions options, const char* label) {
@@ -175,8 +177,14 @@ Device::~Device() {
     WaitIdle(5000);
     Collect();
     state->guest.reset();
-    std::lock_guard lock(state->releaseMutex);
-    state->releases.clear();
+    std::deque<PendingRelease> leftovers;
+    {
+        std::lock_guard lock(state->releaseMutex);
+        leftovers.swap(state->releases);
+    }
+    for (auto& release : leftovers) {
+        if (release.destroy) release.destroy();
+    }
 }
 
 const DeviceLimits& Device::Limits() const {
@@ -211,6 +219,20 @@ void Device::ReleaseBuffer(const NativeBuffer& buffer) {
     if (buffer.handle == nullptr) return;
     id<MTLBuffer> native = (__bridge_transfer id<MTLBuffer>)buffer.handle;
     state->deferRelease(native, buffer.bytes);
+}
+
+void Device::AddResidentAllocation(void* allocation) {
+    if (allocation == nullptr) return;
+    state->addResident((__bridge id<MTLAllocation>)allocation);
+}
+
+void Device::RetireAllocation(void* allocation, std::function<void()> destroy) {
+    id<MTLAllocation> native = (__bridge id<MTLAllocation>)allocation;
+    state->deferRelease(native, 0, std::move(destroy));
+}
+
+void Device::Defer(std::function<void()> destroy) {
+    state->deferRelease(nil, 0, std::move(destroy));
 }
 
 void Device::FlushResidency() {
@@ -284,13 +306,18 @@ void Device::Collect() {
     if (ready.empty()) return;
     {
         std::lock_guard lock(s.residencyMutex);
-        for (const auto& release : ready) [s.residency removeAllocation:release.buffer];
+        for (const auto& release : ready) {
+            if (release.allocation != nil) [s.residency removeAllocation:release.allocation];
+        }
         s.residencyDirty.store(true, std::memory_order_release);
     }
     std::uint64_t bytes = 0;
     for (const auto& release : ready) bytes += release.driverBytes;
     if (bytes != 0) s.driverBytes.fetch_sub(bytes, std::memory_order_relaxed);
     FlushResidency();
+    for (auto& release : ready) {
+        if (release.destroy) release.destroy();
+    }
 }
 
 MemoryReport Device::Memory() const {
