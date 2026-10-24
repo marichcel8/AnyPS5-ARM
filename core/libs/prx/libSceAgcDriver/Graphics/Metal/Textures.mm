@@ -246,9 +246,12 @@ UploadPath TextureManager::DefaultUploadPath() const {
     return state->defaultPath;
 }
 
-TextureHandle TextureManager::Create(const TextureCreateInfo& info, std::string* failure) {
+TextureHandle TextureManager::Create(const TextureCreateInfo& requested, std::string* failure) {
     @autoreleasepool {
         auto& s = *state;
+        TextureCreateInfo info = requested;
+        if (info.mipLevels > 1 && info.kind == TextureKind::Tex1D) info.kind = TextureKind::Tex2D;
+        if (info.mipLevels > 1 && info.kind == TextureKind::Tex1DArray) info.kind = TextureKind::Tex2DArray;
         const auto fail = [&](const std::string& reason) {
             if (failure != nullptr) *failure = reason;
             return TextureHandle{};
