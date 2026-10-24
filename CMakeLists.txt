@@ -114,6 +114,13 @@ if(BUILD_TESTING)
         ${CMAKE_CURRENT_SOURCE_DIR}/core/libs)
     add_test(NAME metal_abi COMMAND metal_abi_tests)
     set_tests_properties(metal_abi PROPERTIES TIMEOUT 20)
+    add_test_executable(msl_soft_float_tests
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/tests/MslSoftFloatTests.cpp)
+    target_include_directories(msl_soft_float_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler)
+    target_compile_features(msl_soft_float_tests PRIVATE cxx_std_20)
+    add_test(NAME msl_soft_float COMMAND msl_soft_float_tests)
+    set_tests_properties(msl_soft_float PROPERTIES TIMEOUT 60)
     find_package(Python3 QUIET COMPONENTS Interpreter)
     add_test_executable(shader_ir_use_rewrite_tests
         core/shader/recompiler/IntermediateRepresentation/tests/UseRewrite.cpp
