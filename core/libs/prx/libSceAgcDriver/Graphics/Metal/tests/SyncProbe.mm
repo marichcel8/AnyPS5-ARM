@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/Sync.hpp"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include <libkern/OSCacheControl.h>
 #include <sys/mman.h>
 #include <atomic>
 #include <chrono>
@@ -130,7 +131,7 @@ void Outcomes(Probe& probe) {
     Check(!probe.sync.HasQueuedLabels(QueueKind::Graphics), "no outcome left a queued label behind");
 }
 
-std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, double* worst) {
+std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, bool flushInit, double* worst) {
     const std::uint32_t count = 4 * 1024 * 1024;
     auto* data = reinterpret_cast<std::uint32_t*>(probe.region + 4096);
     auto* label = reinterpret_cast<std::uint32_t*>(probe.region + 4096 + count * 4 + 64);
@@ -140,6 +141,7 @@ std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, double* worst) {
     for (std::uint32_t round = 1; round <= 12; ++round) {
         for (std::uint32_t index = 0; index < count; ++index) data[index] = index ^ round;
         *label = 0;
+        if (flushInit) sys_dcache_flush(data, count * 4ull);
         auto recording = probe.sync.Begin(QueueKind::Compute, "ordering");
         probe.EncodeHeavy(recording, dataDevice, count, producerBarrier);
         const std::uint32_t mark = 0xc0de0000u + round;
@@ -170,7 +172,7 @@ std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, double* worst) {
         scan(afterIdle, ignore, ignore);
         if (pending + wrong != 0) {
             ++violations;
-            std::printf("sync.ordering violation producer_barrier=%d round=%u unprocessed=%u wrong=%u first_index=%u rescan=%u after_2ms=%u after_idle=%u gpu_done=%d\n", producerBarrier ? 1 : 0, round, pending, wrong, first, later, afterSleep, afterIdle, serialNow >= submittedNow ? 1 : 0);
+            std::printf("sync.ordering violation producer_barrier=%d flush=%d round=%u unprocessed=%u wrong=%u first_index=%u rescan=%u after_2ms=%u after_idle=%u gpu_done=%d\n", producerBarrier ? 1 : 0, flushInit ? 1 : 0, round, pending, wrong, first, later, afterSleep, afterIdle, serialNow >= submittedNow ? 1 : 0);
         }
         probe.device.WaitIdle(10000);
     }
@@ -179,10 +181,11 @@ std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, double* worst) {
 
 void Ordering(Probe& probe) {
     double worst = 0;
-    const auto queueOnly = OrderingRun(probe, false, &worst);
-    const auto withProducer = OrderingRun(probe, true, &worst);
-    std::printf("sync.ordering queue_barrier_violations=%u producer_barrier_violations=%u worst_us=%.1f\n", queueOnly, withProducer, worst);
-    Check(queueOnly == 0, "the label never lands before earlier work");
+    const auto queueOnly = OrderingRun(probe, false, false, &worst);
+    const auto withProducer = OrderingRun(probe, true, false, &worst);
+    const auto flushed = OrderingRun(probe, false, true, &worst);
+    std::printf("sync.ordering queue_barrier_violations=%u producer_barrier_violations=%u flushed_violations=%u worst_us=%.1f\n", queueOnly, withProducer, flushed, worst);
+    Check(flushed == 0, "the label never lands before earlier work");
 }
 
 void SameAddress(Probe& probe) {
