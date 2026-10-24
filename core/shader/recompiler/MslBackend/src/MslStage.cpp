@@ -41,8 +41,7 @@ std::string F32(float value) {
 }
 
 std::string Constant(State& state, std::uint32_t id, std::uint32_t fallback) {
-    state.constants.emplace(id, fallback);
-    return "aps5_c" + std::to_string(id);
+    return StageConstant(state, id, fallback);
 }
 
 std::uint32_t Immediate(const IrValue& inst, std::size_t index) {
@@ -85,6 +84,7 @@ std::string VertexComponent(const std::string& member, std::uint32_t components,
 std::string VertexAttribute(State& state, std::uint32_t location, std::uint32_t component) {
     const auto* input = VertexParameter(state, location);
     if (input == nullptr) return "0u";
+    if (StageOf(state) == IrShaderStage::Local) return LocalAttribute(state, location, component);
     const auto& vertex = VertexInfo(state);
     const auto components = std::clamp(input->componentCount, 1u, 4u);
     const auto name = "a" + std::to_string(location);
@@ -252,6 +252,7 @@ void AuxPosition(State& state, const std::string& data, const ExportInfo& exp) {
         if ((exp.en & (1u << component)) == 0u) continue;
         const auto output = DecodePositionExportComponent(vertex.paClVsOutCntl, exp.index, component);
         const auto raw = data + "." + Swizzle(component);
+        if (MeshAuxExport(state, output, raw)) continue;
         if (output.layer) Line(state, "aps5_out.layer = " + raw + " & 0x7ffu;");
         if (output.viewport) Line(state, "aps5_out.viewport = extract_bits(" + raw + ", 16u, 4u);");
         if (output.layer || output.viewport) continue;
@@ -291,10 +292,13 @@ void Export(State& state, const IrValue& inst) {
     const auto exec = Arg(state, inst, 1);
     const bool pixel = StageOf(state) == IrShaderStage::Pixel;
     if (pixel && exp.vm && state.validMask) Line(state, "aps5_valid = " + exec + ";");
-    if (exp.kind == ExportTargetKind::Null || exp.en == 0u || exp.kind == ExportTargetKind::Primitive) return;
+    if (exp.kind == ExportTargetKind::Null || exp.en == 0u) return;
+    if (exp.kind == ExportTargetKind::Primitive && StageOf(state) != IrShaderStage::Mesh) return;
     const auto data = Arg(state, inst, 0);
     Open(state, "if (" + exec + ") {");
-    if (exp.kind == ExportTargetKind::Position && exp.index != 0u) {
+    if (exp.kind == ExportTargetKind::Primitive) {
+        MeshPrimitive(state, data + ".x");
+    } else if (exp.kind == ExportTargetKind::Position && exp.index != 0u) {
         AuxPosition(state, data, exp);
     } else if (exp.kind == ExportTargetKind::MrtZ) {
         if ((exp.en & 1u) != 0u && HasOutput(state, StageOutputKind::Depth, 0u)) Line(state, "aps5_out.depth = as_type<float>(" + data + ".x);");
@@ -323,6 +327,8 @@ std::string Location(const StageOutput& output) {
     return std::to_string(output.location);
 }
 
+}
+
 void DeclareVertexOutputs(State& state) {
     std::uint32_t clips = 0u;
     bool position = false;
@@ -346,6 +352,8 @@ void DeclareVertexOutputs(State& state) {
     if (clips > MaxClipDistances) Fail("guest clip distances plus the all-zero clip position distance exceed eight clip distances");
     if (clips != 0u) Output(state, "clip", "float clip [[clip_distance]] [" + std::to_string(clips) + "]");
 }
+
+namespace {
 
 void DeclarePixelOutputs(State& state) {
     const auto& pixel = PixelInfo(state);
@@ -399,6 +407,7 @@ void PrepareStage(State& state) {
 
 std::string StageBuiltin(State& state, StageInputKind kind, std::uint32_t component) {
     const auto stage = StageOf(state);
+    if (IsGeometry(stage)) return GeometryBuiltin(state, kind, component);
     const auto argument = [&](const char* name, const char* declaration) {
         Argument(state, name, declaration);
         return std::string(name);
@@ -430,9 +439,10 @@ std::string StageBuiltin(State& state, StageInputKind kind, std::uint32_t compon
 
 bool EmitStage(State& state, const IrValue& inst) {
     const auto stage = StageOf(state);
+    if (IsGeometry(stage) && EmitGeometry(state, inst)) return true;
     switch (inst.Opcode()) {
     case IrOpcode::GetAttribute:
-        if (stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel) Fail(inst, "reads an attribute outside a vertex or pixel program");
+        if (stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel && stage != IrShaderStage::Local) Fail(inst, "reads an attribute outside a vertex, local or pixel program");
         Define(state, inst, Attribute(state, inst));
         return true;
     case IrOpcode::GetInterpolationParameter:
@@ -445,7 +455,7 @@ bool EmitStage(State& state, const IrValue& inst) {
     case IrOpcode::InterpolateHostP2:
         return true;
     case IrOpcode::SetAttribute:
-        if (stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel) Fail(inst, "exports outside a vertex or pixel program");
+        if (stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel && stage != IrShaderStage::TessellationEvaluation && stage != IrShaderStage::Mesh) Fail(inst, "exports outside a vertex, domain, mesh or pixel program");
         Export(state, inst);
         return true;
     case IrOpcode::GetInterpolationParameterF16:

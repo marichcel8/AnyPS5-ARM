@@ -337,6 +337,7 @@ void EmitInstruction(State& state, const IrValue& inst) {
     case IrOpcode::UndefU64:
         return;
     case IrOpcode::Barrier:
+        if (IsGeometry(state.program.Resources().stage) && EmitGeometry(state, inst)) return;
         Line(state, "threadgroup_barrier(mem_flags::mem_threadgroup);");
         return;
     case IrOpcode::UnlinkedCall:
@@ -357,26 +358,32 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     using namespace Msl;
     const auto stage = program.Resources().stage;
     const bool compute = stage == IrShaderStage::Compute;
-    if (!compute && stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel) throw MslUnsupported("MSL backend: only compute, vertex and pixel programs are emitted (tessellation, geometry and mesh stages are section S7)");
+    const bool geometry = IsGeometry(stage);
+    if (!compute && !geometry && stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel) throw MslUnsupported("MSL backend: only compute, vertex, pixel, tessellation and mesh programs are emitted");
     if (target.simdgroupSize != 32u || (program.WaveSize() != 32u && program.WaveSize() != 64u)) throw MslUnsupported("MSL backend: only wave32 and wave64 programs on 32-wide SIMD-groups are emitted");
     if (program.Info().sharedMemoryBytes != 0u) throw MslUnsupported("MSL backend: LDS in device memory is not emitted (section S9)");
     State state{program, inputInfo, bindings.layout, target};
-    const ShaderWorkgroupInputInfo* workgroup = inputInfo.compute;
-    state.lanes = program.WaveSize() == 64u ? 2u : 1u;
+    const bool mesh = stage == IrShaderStage::Mesh;
+    if (mesh && inputInfo.vertex == nullptr) throw MslUnsupported("MSL backend: the mesh program has no mesh input info");
+    const ShaderWorkgroupInputInfo* workgroup = mesh ? static_cast<const ShaderWorkgroupInputInfo*>(&inputInfo.vertex->mesh) : inputInfo.compute;
+    state.lanes = program.WaveSize() == 64u && !geometry ? 2u : 1u;
     if (state.lanes == 2u && workgroup == nullptr) throw MslUnsupported("MSL backend: a wave64 program needs its workgroup size");
     state.ldsDwords = workgroup != nullptr ? workgroup->ldsSizeDwords : 0u;
     state.scratchDwords = program.Info().scratchDwords;
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
     state.stopAllowed = compute && state.waveLds == 0u && !HasBarrier(program) && state.lanes == 1u;
-    if (!compute) {
+    if (geometry) {
+        PrepareGeometry(state);
+    } else if (!compute) {
         if (state.lanes == 2u) throw MslUnsupported("MSL backend: wave64 vertex and pixel programs need two guest lanes per thread (graphics threads are not laid out that way)");
         PrepareStage(state);
     }
     Hoister{state}.Run();
     AnalyzePrecision(state);
     EmitFlow(state);
-    if (!compute && (state.features & (Lds | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
+    if (geometry) CheckGeometry(state);
+    if (!compute && !geometry && (state.features & (Lds | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
     if (stage == IrShaderStage::Vertex && (state.features & (Lane | Wave)) != 0u) throw MslUnsupported("MSL backend: SIMD-group operations in vertex functions are not emitted");
 
     std::string declarations;
@@ -401,6 +408,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     });
 
     std::string text = Prelude(state);
+    if (geometry) return GeometryProgram(state, text, declarations, Parameters(state));
     if (!compute) {
         text += StageHeader(state, Parameters(state));
         text += declarations;

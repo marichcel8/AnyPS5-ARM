@@ -549,7 +549,7 @@ CompiledVariant emitMslVariant(const RecompileRequest& request, IrProgram& progr
         if (output.kind == StageOutputKind::Parameter) result.parameterExports.push_back(output.location);
     }
     if (request.shader.stage == ShaderStage::Fragment) result.fragmentParameters = DescribeFragmentParameters(program, inputInfo);
-    if (request.shader.stage == ShaderStage::Vertex) {
+    if (request.shader.stage == ShaderStage::Vertex || request.shader.stage == ShaderStage::Local) {
         if (inputInfo.vertex == nullptr) throw std::runtime_error("vertex input metadata is missing");
         for (const auto& input : program.Info().inputs) {
             if (input.kind != StageInputKind::Parameter) continue;

@@ -58,6 +58,40 @@ inline constexpr std::uint32_t GuestImageTableBytes = GuestImageTableEntries * s
 inline constexpr std::uint32_t GuestSamplerTableBytes = RuntimeAbi::SamplerHeapCapacity * sizeof(ResourceIdEntry);
 inline constexpr std::uint32_t PositionFlipYConstant = 60000u;
 inline constexpr std::uint32_t DepthNegativeOneToOneConstant = 60001u;
+inline constexpr std::uint32_t LocalFetchFormatConstant = 60100u;
+inline constexpr std::uint32_t GeometrySlot = 14u;
+inline constexpr std::uint32_t VertexFetchSlot = 15u;
+inline constexpr std::uint32_t FirstVertexBufferSlot = 16u;
+inline constexpr std::uint32_t PerInstanceFetch = 0x80000000u;
+
+struct GeometryParameters {
+    std::uint64_t localRing;
+    std::uint64_t controlRing;
+    std::uint64_t patchRing;
+    std::uint64_t factors;
+    std::uint64_t indices;
+    std::uint64_t meshArguments;
+    std::uint32_t localWords;
+    std::uint32_t controlWords;
+    std::uint32_t patchWords;
+    std::uint32_t patchCount;
+    std::uint32_t instanceCount;
+    std::uint32_t baseInstance;
+    std::uint32_t firstIndex;
+    std::int32_t baseVertex;
+    std::uint32_t indexBytes;
+    std::uint32_t reserved[3];
+};
+
+struct VertexFetchEntry {
+    std::uint64_t gpuAddress;
+    std::uint32_t stride;
+    std::uint32_t records;
+};
+
+constexpr std::uint32_t TessellationFactorHalves(std::uint32_t domain) {
+    return domain == 2u ? 6u : 4u;
+}
 
 struct ArgumentSlot {
     BufferSlot slot;
@@ -116,6 +150,9 @@ static_assert(GuestImageIndex(RuntimeAbi::FirstImageBinding + RuntimeAbi::ImageB
 static_assert(std::is_standard_layout_v<GuestBufferEntry> && std::is_trivially_copyable_v<GuestBufferEntry> && sizeof(GuestBufferEntry) == 16u);
 static_assert(std::is_standard_layout_v<ResourceIdEntry> && std::is_trivially_copyable_v<ResourceIdEntry> && sizeof(ResourceIdEntry) == 8u);
 static_assert(offsetof(GuestBufferEntry, sizeBytes) == 8u);
+static_assert(SlotIndex(BufferSlot::Count) <= GeometrySlot && VertexFetchSlot < FirstVertexBufferSlot);
+static_assert(std::is_standard_layout_v<GeometryParameters> && sizeof(GeometryParameters) == 96u && offsetof(GeometryParameters, localWords) == 48u);
+static_assert(std::is_standard_layout_v<VertexFetchEntry> && sizeof(VertexFetchEntry) == 16u);
 
 }
 
