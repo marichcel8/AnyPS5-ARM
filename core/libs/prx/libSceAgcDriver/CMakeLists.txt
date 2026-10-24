@@ -750,7 +750,6 @@ if(BUILD_TESTING)
 endif()
 
 if(APPLE)
-    enable_language(OBJCXX)
     add_test_executable(agc_msl_compute_metal_tests EXCLUDE_FROM_ALL tests/MslComputeMetal.mm)
     target_link_libraries(agc_msl_compute_metal_tests PRIVATE shader_recompiler_agc_driver libc "-framework Metal" "-framework Foundation")
     target_compile_options(agc_msl_compute_metal_tests PRIVATE -fobjc-arc)
