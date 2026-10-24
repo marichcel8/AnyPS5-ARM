@@ -20,6 +20,10 @@ public struct TogetherProblem: Error, Decodable, CustomStringConvertible, Sendab
     public let status: Int
     public let code: String
     public let title: String
+    /// The private part of a profile a 403 is about ("library", "trophies", "friends").
+    public var section: String? = nil
+    /// When a handle may change again, with "handle_cooldown".
+    public var handleChangeAt: Date? = nil
     public var description: String { title }
 }
 
@@ -67,6 +71,13 @@ public final class TokenStore: @unchecked Sendable {
 
     func load() -> Saved? {
         lock.withLock { (try? Data(contentsOf: file)).flatMap { try? JSONDecoder.together.decode(Saved.self, from: $0) } }
+    }
+
+    /// Changes the kept user (a new handle or name), keeping the tokens.
+    func update(_ change: (inout TogetherUser) -> Void) {
+        guard var saved = load() else { return }
+        change(&saved.user)
+        save(saved)
     }
 
     func save(_ saved: Saved?) {
@@ -251,9 +262,19 @@ private actor Refresher {
 }
 
 extension JSONDecoder {
+    /// ISO 8601 dates with or without milliseconds: the server sends them with.
     static let together: JSONDecoder = {
         let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let container = try decoder.singleValueContainer()
+            let text = try container.decode(String.self)
+            let fractional = ISO8601DateFormatter()
+            fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            guard let date = fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text) else {
+                throw DecodingError.dataCorruptedError(in: container, debugDescription: "Not an ISO 8601 date: \(text)")
+            }
+            return date
+        }
         return decoder
     }()
 }

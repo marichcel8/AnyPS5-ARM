@@ -21,11 +21,24 @@ struct PanelRow: Identifiable {
     var detail: String?
     var symbol: String?
     let kind: Kind
+    /// Someone on AnyTogether: their avatar stands in for the symbol.
+    var person: PanelPerson?
 
     var focusable: Bool {
         if case .info = kind { return false }
         return true
     }
+}
+
+/// A person a row is about: avatar (or initial), and a dot for playing or online.
+struct PanelPerson {
+    enum Status { case playing, online, offline }
+
+    let name: String
+    let avatar: String?
+    var status: Status?
+    /// Speaking in the party's voice: a ring in the accent.
+    var speaking = false
 }
 
 struct PanelCategory: Identifiable {
@@ -48,6 +61,7 @@ extension AppModel {
         case .themes: return [PanelCategory(id: "themes", title: T.text(.themes), symbol: "paintpalette", rows: themeRows())]
         case .studio: return [PanelCategory(id: "studio", title: T.text(.themeStudio), symbol: "wand.and.stars", rows: studioRows())]
         case .friends: return [PanelCategory(id: "friends", title: T.text(.friendsTitle), symbol: "person.2", rows: friendRows())]
+        case .party: return [PanelCategory(id: "party", title: T.text(.partyTitle), symbol: "person.3", rows: partyRows())]
         case .confirmUninstall:
             guard let game = selectedGame else { return [] }
             return [PanelCategory(id: "confirm", title: T.text(.uninstall), symbol: "trash", rows: [
@@ -144,7 +158,7 @@ extension AppModel {
             PanelRow(id: "hide", title: T.text(.hideWhilePlaying), symbol: "eye.slash", kind: .toggle(preferences.hideWhilePlaying) { [weak self] value in self?.preferences.hideWhilePlaying = value }),
             PanelRow(id: "discord", title: T.text(.discordPresence), detail: T.text(.discordPresenceDetail), symbol: "person.2.wave.2", kind: .toggle(preferences.discordPresence ?? true) { [weak self] value in
                 self?.preferences.discordPresence = value
-                if !value { self?.discordOff() }
+                if value { self?.discordOn() } else { self?.discordOff() }
             }),
             PanelRow(id: "clips", title: T.text(.clips), detail: T.format(.clipsDetail, clipSeconds), symbol: "record.circle", kind: .toggle(preferences.clips == true) { [weak self] value in
                 self?.clipsChanged(value)
@@ -645,7 +659,20 @@ struct RowView: View {
     var body: some View {
         let foreground: Color = focused ? .black : .white
         HStack(spacing: 14 * scale) {
-            if let symbol = row.symbol {
+            if let person = row.person {
+                ProfileAvatar(url: person.avatar, name: person.name, size: 30 * scale, glow: false)
+                    .overlay(Circle().strokeBorder(model.accent, lineWidth: 2.5 * scale).padding(-3 * scale).opacity(person.speaking ? 1 : 0))
+                    .animation(.easeOut(duration: 0.15), value: person.speaking)
+                    .overlay(alignment: .bottomTrailing) {
+                        if let status = person.status, status != .offline {
+                            Circle().fill(status == .playing ? model.accent : Color(red: 0.3, green: 0.85, blue: 0.45))
+                                .frame(width: 10 * scale, height: 10 * scale)
+                                .overlay(Circle().strokeBorder(focused ? Color.white : Color(white: 0.1), lineWidth: 2 * scale))
+                                .offset(x: 2 * scale, y: 2 * scale)
+                        }
+                    }
+                    .frame(width: 30 * scale)
+            } else if let symbol = row.symbol {
                 Image(systemName: symbol).font(.system(size: 17 * scale, weight: .medium)).frame(width: 24 * scale)
                     .foregroundStyle(destructive && !focused ? Color(red: 1, green: 0.55, blue: 0.5) : foreground.opacity(0.85))
             }
