@@ -48,13 +48,13 @@ struct Push {
     float offset[4];
 };
 
-constexpr std::uint32_t Size = 64;
+constexpr std::uint32_t TargetSize = 64;
 constexpr std::uint32_t PositionsSlot = 0;
 constexpr std::uint32_t PushSlot = 1;
 
 std::uint32_t Pixel(id<MTLTexture> texture, std::uint32_t x, std::uint32_t y) {
     std::uint32_t value = 0;
-    [texture getBytes:&value bytesPerRow:Size * 4u fromRegion:MTLRegionMake2D(x, y, 1, 1) mipmapLevel:0];
+    [texture getBytes:&value bytesPerRow:TargetSize * 4u fromRegion:MTLRegionMake2D(x, y, 1, 1) mipmapLevel:0];
     return value;
 }
 
@@ -83,15 +83,15 @@ RenderPassDesc ColorPass(id<MTLTexture> target, bool clear, id<MTLTexture> depth
         pass.depth.depthIntent.clear = true;
         pass.depth.depthIntent.transient = true;
     }
-    pass.width = Size;
-    pass.height = Size;
+    pass.width = TargetSize;
+    pass.height = TargetSize;
     return pass;
 }
 
 DynamicState FullViewport(CullMode cull = CullMode::None, Winding winding = Winding::Clockwise) {
     DynamicState dynamic;
-    dynamic.viewport = {0.0f, 0.0f, static_cast<float>(Size), static_cast<float>(Size), 0.0f, 1.0f};
-    dynamic.scissor = {0, 0, Size, Size};
+    dynamic.viewport = {0.0f, 0.0f, static_cast<float>(TargetSize), static_cast<float>(TargetSize), 0.0f, 1.0f};
+    dynamic.scissor = {0, 0, TargetSize, TargetSize};
     dynamic.cull = cull;
     dynamic.winding = winding;
     return dynamic;
@@ -130,12 +130,12 @@ int main() {
         id<MTLDevice> native = (__bridge id<MTLDevice>)device->NativeDevice();
         std::printf("device name=\"%s\" deferredStores=%d\n", device->Limits().name.c_str(), recorder->Stats().deferredStoreSupport ? 1 : 0);
 
-        MTLTextureDescriptor* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:Size height:Size mipmapped:NO];
+        MTLTextureDescriptor* targetDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:TargetSize height:TargetSize mipmapped:NO];
         targetDescriptor.storageMode = MTLStorageModeShared;
         targetDescriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
         id<MTLTexture> target = [native newTextureWithDescriptor:targetDescriptor];
         device->AddResidentAllocation((__bridge void*)target);
-        MTLTextureDescriptor* depthDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:Size height:Size mipmapped:NO];
+        MTLTextureDescriptor* depthDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:TargetSize height:TargetSize mipmapped:NO];
         depthDescriptor.storageMode = MTLStorageModeMemoryless;
         depthDescriptor.usage = MTLTextureUsageRenderTarget;
         id<MTLTexture> depth = [native newTextureWithDescriptor:depthDescriptor];
@@ -312,7 +312,7 @@ int main() {
             recorder->BeginPass(ColorPass(target, true));
             DynamicState a = FullViewport();
             DynamicState b = FullViewport(CullMode::Back, Winding::Clockwise);
-            b.scissor = {0, 0, Size / 2, Size};
+            b.scissor = {0, 0, TargetSize / 2, TargetSize};
             DepthStencilState state;
             for (int draw = 0; draw < Draws; ++draw) {
                 recorder->SetPipeline((draw & 1) != 0 ? blendPipeline.get() : pipeline.get());
