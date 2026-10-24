@@ -63,6 +63,9 @@ class Strings {
   String get activityReady => _text('activity.ready');
   String percent(int value) => _text('percent').replaceAll('{n}', '$value');
   String get motionDetail => _text('motionDetail');
+  String get remotePlay => _text('remotePlay');
+  String get remotePlayDetail => _text('remotePlayDetail');
+  String get remotePlayNoPermission => _text('remotePlayNoPermission');
   String get editLayout => _text('editLayout');
   String get done => _text('done');
   String get editHint => _text('editHint');
@@ -82,7 +85,7 @@ class Strings {
     'start': 'Start',
     'found': '%@ found',
     'searching': 'Looking for AnyPS5 on the Mac',
-    'searchingDetail': 'Keep AnyPS5 open on the Mac, with the phone and the Mac on the same Wi-Fi.',
+    'searchingDetail': 'Keep AnyPS5 open on the Mac, with the phone and the Mac on the same Wi-Fi, or plug the phone into the Mac with a cable.',
     'busy': 'Another phone is connected',
     'refused': 'The Mac refused the connection',
     'allowOnMac': 'Allow it on the Mac',
@@ -130,6 +133,10 @@ class Strings {
     'percent': '{n}%',
     'motionDetail':
         "Tilting and turning the phone, as the DualSense's motion sensors",
+    'remotePlay': 'Remote Play',
+    'remotePlayDetail': 'The game on the phone, behind the pad. Off, the phone is only the controller',
+    'remotePlayNoPermission':
+        'Allow AnyPS5 to record the screen on the Mac to see the game here',
     'editLayout': 'Edit Layout',
     'done': 'Done',
     'editHint': 'Drag a control to move it, tap it to change it',
@@ -150,8 +157,7 @@ class Strings {
     'start': 'Başla',
     'found': '%@ bulundu',
     'searching': "Mac'teki AnyPS5 aranıyor",
-    'searchingDetail':
-        "Mac'te AnyPS5 açık olsun, telefon ile Mac aynı Wi-Fi'da olsun.",
+    'searchingDetail': "Mac'te AnyPS5 açık olsun, telefon ile Mac aynı Wi-Fi'da olsun ya da telefonu Mac'e kabloyla tak.",
     'busy': 'Başka bir telefon bağlı',
     'refused': 'Mac bağlantıyı reddetti',
     'allowOnMac': "Mac'te izin ver",
@@ -198,6 +204,11 @@ class Strings {
     'percent': '%{n}',
     'motionDetail':
         "Telefonu eğip döndürmek, DualSense'in hareket sensörleri gibi",
+    'remotePlay': 'Remote Play',
+    'remotePlayDetail':
+        'Oyun telefonda, kolun arkasında. Kapalıyken telefon sadece kol',
+    'remotePlayNoPermission':
+        "Oyunu burada görmek için Mac'te AnyPS5'e ekran kaydı izni ver",
     'editLayout': 'Düzeni Düzenle',
     'done': 'Bitti',
     'editHint': 'Taşımak için sürükle, değiştirmek için dokun',

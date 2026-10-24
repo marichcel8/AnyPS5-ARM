@@ -12,6 +12,8 @@ This branch holds the phone app alone. The whole project, with the engine and th
 
 - **Connects by itself.** The phone finds AnyPS5.app on the same Wi-Fi. The first time, the Mac asks once whether to allow it and both show the same four-digit code; after that it connects with no question. When nothing is found, the Mac's address can be typed in.
 - **Launcher mode.** The Mac's games, with their icons, over the selected one's background. Picking a game on the phone picks it on the Mac, and the other way round. **Play** does on the Mac what Play does there (unlock, update or start); **Back to Game** and **Close Game** work while one plays, and starting another game stops the one playing first. The arrows, ✕, ○ and ≡ at the bottom right move around the launcher's own screen: menus, settings, panels.
+- **On a cable, no Wi-Fi needed.** Plug an iPhone into the Mac and it connects through the cable by itself (the launcher reaches it through usbmuxd, as Finder does). An Android phone does the same with USB debugging on and adb installed on the Mac. A USB mark shows beside the Mac's name; unplugged, the phone goes back to Wi-Fi.
+- **Remote Play.** Turned on in About, the game plays on the phone's screen behind the pad, picture and sound: H.264 from the Mac's media engine, decoded by the phone's own (MediaCodec with low latency on Android, VideoToolbox on iPhone). Off by default: the phone stays the controller alone.
 - **Several phones.** Up to four phones connect at once, one per player; a phone becomes a player the first time a button is pressed on it in the game. A new phone can pair while others are connected.
 - **The pad.** Both sticks, ✕ ○ □ △, L1 R1, L2 R2, the D-pad, Options and the touchpad, any number of them held at once. Sliding a finger on the touchpad moves the touch, a tap is a click and a finger held still clicks until it lifts; two fingers are two touches. A double tap on a stick holds L3 or R3. The latency from the touch to the game is shown on the phone and in the launcher. The pad takes over by itself when a game starts and gives the phone back to the launcher when it ends.
 - **PS** takes the phone to the launcher and brings the launcher in front of the game on the Mac; the game gets nothing from the phone meanwhile.
@@ -21,6 +23,7 @@ This branch holds the phone app alone. The whole project, with the engine and th
 - **Your own layout, per game.** The lock at the pad's bottom left opens the editor: drag a control to move it, tap it to size it, fade it, hide it, or make it a toggle (one tap presses it, the next lets go) or a turbo button. Reset and Reset All go back to the default. The layout is kept on the Mac with the game's settings and comes back whenever that game plays.
 - **What the Mac is doing.** While a game is unlocked, updated or started, a card at the top of the phone shows the step, a bar that fills and the time it has taken, and says when the game is ready.
 - **Trophies.** A trophy earned in the game drops in at the top of the phone for a few seconds, with its icon and grade, and the phone buzzes.
+- **The launcher's theme.** The phone's home screen takes the colors of the theme the launcher wears, also one made in its Theme Studio.
 - **Language.** The phone uses the launcher's language: English by default, or Turkish.
 - The version is shown faintly in the bottom right corner.
 

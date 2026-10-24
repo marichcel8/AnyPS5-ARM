@@ -4,14 +4,39 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../feedback/haptics.dart';
 import '../feedback/motion.dart';
 import '../protocol/messages.dart';
 import '../protocol/packets.dart';
+import '../stream/stream_packets.dart';
+import '../stream/stream_player.dart';
 
 enum ConnectionStatus { searching, connecting, pairing, connected, rejected }
+
+/// The launcher's theme as the phone wears it.
+class Look {
+  const Look({required this.deep, required this.middle, required this.accent});
+
+  final Color deep;
+  final Color middle;
+  final Color accent;
+
+  static Color? _color(String? hex) {
+    if (hex == null) return null;
+    final digits = hex.startsWith('#') ? hex.substring(1) : hex;
+    final value = digits.length == 6 ? int.tryParse(digits, radix: 16) : null;
+    return value == null ? null : Color(0xFF000000 | value);
+  }
+
+  static Look? parse(String? deep, String? middle, String? accent) {
+    final colors = [_color(deep), _color(middle), _color(accent)];
+    if (colors.contains(null)) return null;
+    return Look(deep: colors[0]!, middle: colors[1]!, accent: colors[2]!);
+  }
+}
 
 /// A game's pictures as the launcher sent them, for the [tag] they were sent for.
 class GameArt {
@@ -24,7 +49,8 @@ class GameArt {
 }
 
 /// The phone's link to the launcher: the WebSocket control channel (hello, pairing, welcome),
-/// the UDP pad sender and the latency measured from the game's answers.
+/// the UDP pad sender and the latency measured from the game's answers. On a cable there is no
+/// UDP path: the pad and the answers go on the control channel as binary messages.
 class Session extends ChangeNotifier {
   Session({required this.preferences, required this.deviceName});
 
@@ -53,6 +79,15 @@ class Session extends ChangeNotifier {
   Library? library;
   final art = <String, GameArt>{};
 
+  /// The launcher's theme, kept from the last time when not connected.
+  late final look = ValueNotifier<Look?>(
+    Look.parse(
+      preferences.getString('lookDeep'),
+      preferences.getString('lookMiddle'),
+      preferences.getString('lookAccent'),
+    ),
+  );
+
   /// The trophy earned last, shown for a moment over whatever the phone shows.
   final trophy = ValueNotifier<TrophyEarned?>(null);
 
@@ -62,6 +97,17 @@ class Session extends ChangeNotifier {
   /// Off while the phone shows the launcher: the game gets no pad from it then.
   bool _padActive = true;
 
+  /// Remote Play's decoder and speaker; the stream is asked for with [startStream].
+  StreamPlayer? player;
+
+  /// How Remote Play is going, as the launcher last said; null before it said anything.
+  final streaming = ValueNotifier<String?>(null);
+
+  /// The picture size asked for, while Remote Play is wanted.
+  (int, int)? _streamSize;
+  FrameAssembler? _assembler;
+  int _keyAsked = -1 << 62;
+
   /// The game's rumble, light bar and trigger effects felt on the phone.
   HapticsDriver? haptics;
 
@@ -70,6 +116,10 @@ class Session extends ChangeNotifier {
 
   InternetAddress? _host;
   int? _port;
+  bool _cable = false;
+
+  /// Connected, or connecting, over a cable.
+  bool get cable => _cable;
   WebSocket? _socket;
   RawDatagramSocket? _udp;
   int? _udpPort;
@@ -99,10 +149,15 @@ class Session extends ChangeNotifier {
   }
 
   /// Connects to the launcher at [host]:[port], replacing any earlier target, and keeps
-  /// reconnecting until [close].
-  Future<void> connect(InternetAddress host, int port) async {
+  /// reconnecting until [close]; [cable] when that is the cable's local port.
+  Future<void> connect(
+    InternetAddress host,
+    int port, {
+    bool cable = false,
+  }) async {
     _host = host;
     _port = port;
+    _cable = cable;
     _closed = false;
     await _restart();
   }
@@ -157,7 +212,12 @@ class Session extends ChangeNotifier {
   }
 
   void _received(dynamic data, int generation) {
-    if (data is! String || generation != _generation) return;
+    if (generation != _generation) return;
+    if (data is List<int>) {
+      _datagram(data is Uint8List ? data : Uint8List.fromList(data));
+      return;
+    }
+    if (data is! String) return;
     switch (Message.fromJson(data)) {
       case Pairing(:final code):
         this.code = code;
@@ -170,6 +230,12 @@ class Session extends ChangeNotifier {
         code = null;
         _startPad(generation);
         _setStatus(ConnectionStatus.connected);
+        final size = _streamSize;
+        if (size != null) {
+          _socket?.add(
+            StreamRequest(on: true, width: size.$1, height: size.$2).toJson(),
+          );
+        }
       case final Library library:
         this.library = library;
         for (final game in library.games) {
@@ -177,6 +243,15 @@ class Session extends ChangeNotifier {
           art[game.id] = GameArt(game.art);
           _socket?.add(WantArt(game.id).toJson());
         }
+        notifyListeners();
+      case LookUpdate(:final deep, :final middle, :final accent):
+        final worn = Look.parse(deep, middle, accent);
+        if (worn == null) break;
+        look.value = worn;
+        preferences
+          ..setString('lookDeep', deep)
+          ..setString('lookMiddle', middle)
+          ..setString('lookAccent', accent);
         notifyListeners();
       case final TrophyEarned earned:
         trophy.value = earned;
@@ -200,6 +275,8 @@ class Session extends ChangeNotifier {
           ..background = background == null ? null : base64Decode(background)
           ..arrived = true;
         notifyListeners();
+      case Streaming(:final state):
+        streaming.value = state;
       case Rejected(:final reason):
         rejectedReason = reason;
         if (reason == 'busy') {
@@ -213,7 +290,7 @@ class Session extends ChangeNotifier {
   }
 
   Future<void> _startPad(int generation) async {
-    if (_udp == null) {
+    if (_udp == null && !_cable) {
       final udp = await RawDatagramSocket.bind(
         _host!.type == InternetAddressType.IPv6
             ? InternetAddress.anyIPv6
@@ -224,8 +301,7 @@ class Session extends ChangeNotifier {
       udp.listen((event) {
         if (event != RawSocketEvent.read) return;
         final datagram = udp.receive();
-        final answer = datagram == null ? null : decodeOutput(datagram.data);
-        if (answer != null) _answered(answer);
+        if (datagram != null) _datagram(datagram.data);
       });
     }
     if (generation != _generation) return;
@@ -236,6 +312,73 @@ class Session extends ChangeNotifier {
       if (latencyMs != null) _socket?.add(Latency(latencyMs!).toJson());
     });
     _send();
+  }
+
+  /// A pad answer, or Remote Play's picture or sound.
+  void _datagram(Uint8List data) {
+    final answer = decodeOutput(data);
+    if (answer != null) return _answered(answer);
+    if (_streamSize == null) return;
+    final piece = decodeVideo(data);
+    if (piece != null) return _assembler?.add(piece);
+    final sound = decodeAudio(data);
+    if (sound != null) player?.sound(sound);
+  }
+
+  /// Asks the launcher for the game's picture and sound at about [width] by [height].
+  void startStream(int width, int height) {
+    _streamSize = (width, height);
+    _assembler = FrameAssembler(
+      onFrame: (frame) => player?.frame(frame),
+      onLoss: () {
+        // One request at a time: the key frame takes a moment to come.
+        final now = _clock.elapsedMilliseconds;
+        if (now - _keyAsked < 250) return;
+        _keyAsked = now;
+        send(const KeyFrame());
+      },
+    );
+    send(StreamRequest(on: true, width: width, height: height));
+    // The launcher sends the picture to where the pad comes from: a still pad says where.
+    _ping();
+  }
+
+  /// Back to the pad alone.
+  void stopStream() {
+    if (_streamSize == null) return;
+    _streamSize = null;
+    _assembler = null;
+    streaming.value = null;
+    player?.stop();
+    send(const StreamRequest(on: false));
+  }
+
+  bool get streamWanted => _streamSize != null;
+
+  void _ping() {
+    final udp = _udp;
+    final session = _session;
+    if (_cable ||
+        udp == null ||
+        session == null ||
+        _udpPort == null ||
+        _padActive) {
+      return;
+    }
+    try {
+      udp.send(
+        encodeInput(
+          sequence: _sequence,
+          sentMicros: _clock.elapsedMicroseconds,
+          session: session,
+          state: PadState(),
+        ),
+        _host!,
+        _udpPort!,
+      );
+    } on SocketException {
+      // The pad's next packet says it instead.
+    }
   }
 
   /// The new pad state, sent at once; the moment it arrives is when the touch was received.
@@ -267,23 +410,20 @@ class Session extends ChangeNotifier {
   void _send() {
     if (!_padActive) return;
     final udp = _udp;
+    final socket = _socket;
     final session = _session;
-    if (udp == null || session == null || _udpPort == null || _sender == null) {
-      return;
-    }
+    if (session == null || _sender == null) return;
+    if (_cable ? socket == null : udp == null || _udpPort == null) return;
     _sequence = (_sequence + 1) & 0xFFFFFFFF;
+    final packet = encodeInput(
+      sequence: _sequence,
+      sentMicros: _clock.elapsedMicroseconds,
+      session: session,
+      state: _state,
+      motion: motion?.latest,
+    );
     try {
-      udp.send(
-        encodeInput(
-          sequence: _sequence,
-          sentMicros: _clock.elapsedMicroseconds,
-          session: session,
-          state: _state,
-          motion: motion?.latest,
-        ),
-        _host!,
-        _udpPort!,
-      );
+      _cable ? socket!.add(packet) : udp!.send(packet, _host!, _udpPort!);
     } on SocketException {
       // No route while the Wi-Fi is gone: the next tick tries again.
     }

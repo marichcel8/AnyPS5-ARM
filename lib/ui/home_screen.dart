@@ -16,6 +16,8 @@ class HomeScreen extends StatefulWidget {
     required this.session,
     required this.onResume,
     this.status,
+    this.remotePlay = false,
+    this.onRemotePlay,
   });
 
   final Session session;
@@ -25,6 +27,10 @@ class HomeScreen extends StatefulWidget {
 
   /// Drawn at the top left: the connection dot and the Mac's name.
   final Widget? status;
+
+  /// The game shown on the phone behind the pad, rather than the pad alone.
+  final bool remotePlay;
+  final ValueChanged<bool>? onRemotePlay;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
@@ -63,6 +69,12 @@ class _HomeScreenState extends State<HomeScreen> {
     final background = selected == null
         ? null
         : widget.session.art[selected.id]?.background;
+    // The launcher's theme behind a game with no picture.
+    final look = widget.session.look.value;
+    final deep = look?.deep ?? ink;
+    final glow = look == null
+        ? const Color(0xFF1A1D27)
+        : Color.lerp(look.deep, look.middle, 0.7)!;
 
     return Scaffold(
       backgroundColor: ink,
@@ -75,11 +87,11 @@ class _HomeScreenState extends State<HomeScreen> {
             layoutBuilder: (current, previous) =>
                 Stack(fit: StackFit.expand, children: [...previous, ?current]),
             child: background == null
-                ? const DecoratedBox(
-                    key: ValueKey('none'),
+                ? DecoratedBox(
+                    key: ValueKey('none ${glow.toARGB32()}'),
                     decoration: BoxDecoration(
                       gradient: RadialGradient(
-                        colors: [Color(0xFF1A1D27), ink],
+                        colors: [glow, deep],
                         radius: 1.1,
                       ),
                     ),
@@ -134,6 +146,8 @@ class _HomeScreenState extends State<HomeScreen> {
                             widget.session.motion?.enabled = value;
                             widget.session.preferences.setBool('motion', value);
                           },
+                          remotePlay: widget.remotePlay,
+                          onRemotePlay: widget.onRemotePlay,
                         ),
                         icon: const Icon(
                           Icons.info_outline_rounded,

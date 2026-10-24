@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
+import 'connection/cable.dart';
 import 'connection/discovery.dart';
 import 'connection/device_name.dart';
 import 'feedback/haptics.dart';
@@ -14,6 +15,7 @@ import 'layout/layout_tweaks.dart';
 import 'connection/session.dart';
 import 'protocol/messages.dart';
 import 'strings.dart';
+import 'stream/platform_player.dart';
 import 'ui/activity_card.dart';
 import 'ui/home_screen.dart';
 import 'ui/pad_screen.dart';
@@ -91,8 +93,13 @@ class RemoteApp extends StatefulWidget {
 class _RemoteAppState extends State<RemoteApp> {
   static const readyPause = Duration(milliseconds: 900);
 
+  /// Remote Play's decoder and speaker; the stream is asked for only with [_remotePlay] on.
+  final _player = PlatformStreamPlayer();
+  late bool _remotePlay = widget.preferences.getBool('remotePlay') ?? false;
+
   late final Session _session =
       Session(preferences: widget.preferences, deviceName: widget.deviceName)
+        ..player = _player
         ..haptics = (HapticsDriver(PlatformHaptics())
           ..enabled = widget.preferences.getBool('vibration') ?? true)
         ..motion = (MotionSource()
@@ -103,6 +110,22 @@ class _RemoteAppState extends State<RemoteApp> {
   Timer? _layoutSave;
   bool _manual = false;
   bool _wasConnected = false;
+
+  /// The Mac on a cable takes over from Wi-Fi; when it is unplugged the phone goes back to the
+  /// launcher it last found or was given.
+  late final CableLink _cableLink = CableLink(
+    onPlugged: (port) {
+      _plugged = true;
+      _session.connect(InternetAddress.loopbackIPv4, port, cable: true);
+    },
+    onUnplugged: () {
+      _plugged = false;
+      final last = _lastLauncher;
+      if (last != null) _session.connect(last.$1, last.$2);
+    },
+  );
+  (InternetAddress, int)? _lastLauncher;
+  bool _plugged = false;
 
   /// Past the "Ready" moment: the launcher or the pad shows.
   bool _ready = false;
@@ -118,6 +141,8 @@ class _RemoteAppState extends State<RemoteApp> {
     super.initState();
     _session.addListener(_changed);
     if (_welcomed) _search();
+    // Without the cable port the phone still works over Wi-Fi.
+    _cableLink.start().catchError((_) {});
   }
 
   /// Looks for the launcher; the address field shows if nothing turns up within a few seconds.
@@ -140,7 +165,8 @@ class _RemoteAppState extends State<RemoteApp> {
   /// A launcher found or typed in becomes the target unless one is already connected, so a
   /// launcher that comes back on another port or address is followed.
   void _connect(InternetAddress address, int port) {
-    if (_session.status == ConnectionStatus.connected) return;
+    _lastLauncher = (address, port);
+    if (_session.status == ConnectionStatus.connected || _plugged) return;
     _manualTimer?.cancel();
     _session.connect(address, port);
   }
@@ -176,6 +202,25 @@ class _RemoteAppState extends State<RemoteApp> {
     _padShown = pad;
     pad ? _session.resumePad() : _session.pausePad();
     pad ? _session.motion?.start() : _session.motion?.stop();
+    _stream();
+  }
+
+  /// The game's picture while the pad shows and Remote Play is on; the pad alone otherwise.
+  void _stream() {
+    if (_padShown && _remotePlay) {
+      if (_session.streamWanted) return;
+      final view = WidgetsBinding.instance.platformDispatcher.views.first;
+      final size = view.physicalSize;
+      _session.startStream(size.longestSide.round(), size.shortestSide.round());
+    } else {
+      _session.stopStream();
+    }
+  }
+
+  void _setRemotePlay(bool on) {
+    widget.preferences.setBool('remotePlay', on);
+    setState(() => _remotePlay = on);
+    _stream();
   }
 
   void _home() {
@@ -202,6 +247,7 @@ class _RemoteAppState extends State<RemoteApp> {
     _manualTimer?.cancel();
     _readyTimer?.cancel();
     _layoutSave?.cancel();
+    _cableLink.stop();
     _session.close();
     super.dispose();
   }
@@ -221,8 +267,25 @@ class _RemoteAppState extends State<RemoteApp> {
               glow: lightColor(_session.output),
               tweaks: _runningTweaks(),
               onTweaks: _saveTweaks,
+              video: _remotePlay
+                  ? StreamView(
+                      player: _player,
+                      notice: _session.streaming.value == 'noPermission'
+                          ? Strings.of(
+                              _session.library?.language ??
+                                  widget.preferences.getString('language'),
+                            ).remotePlayNoPermission
+                          : null,
+                    )
+                  : null,
             )
-          : HomeScreen(session: _session, onResume: _resume, status: _status());
+          : HomeScreen(
+              session: _session,
+              onResume: _resume,
+              status: _status(),
+              remotePlay: _remotePlay,
+              onRemotePlay: _setRemotePlay,
+            );
     } else {
       home = SetupScreen(
         session: _session,
@@ -317,6 +380,10 @@ class _RemoteAppState extends State<RemoteApp> {
     children: [
       const StatusDot(color: Color(0xFF4CD964)),
       const SizedBox(width: 8),
+      if (_session.cable) ...[
+        const Icon(Icons.usb_rounded, size: 13, color: Colors.white70),
+        const SizedBox(width: 4),
+      ],
       Text(
         [
           _session.macName ?? 'Mac',

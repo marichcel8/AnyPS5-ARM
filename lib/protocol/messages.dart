@@ -34,12 +34,18 @@ sealed class Message {
           running: json['running'] as String?,
           language: json['language'] as String,
         ),
+        'look' => LookUpdate(
+          deep: json['deep'] as String,
+          middle: json['middle'] as String,
+          accent: json['accent'] as String,
+        ),
         'trophy' => TrophyEarned(
           name: json['name'] as String,
           detail: json['detail'] as String? ?? '',
           grade: json['grade'] as String,
           icon: json['icon'] as String?,
         ),
+        'streaming' => Streaming(json['state'] as String),
         'activity' => ActivityUpdate(
           json['activity'] == null
               ? null
@@ -270,6 +276,41 @@ class CloseGame extends Message {
 }
 
 /// The PS button: the launcher comes in front of the game.
+/// Remote Play: the game's picture and sound at about this size, or no more.
+class StreamRequest extends Message {
+  const StreamRequest({required this.on, this.width = 0, this.height = 0});
+
+  final bool on;
+  final int width;
+  final int height;
+
+  @override
+  String toJson() => jsonEncode({
+    'type': 'stream',
+    'on': on,
+    'width': width,
+    'height': height,
+  });
+}
+
+/// Part of the picture was lost: the decoder waits for a key frame.
+class KeyFrame extends Message {
+  const KeyFrame();
+
+  @override
+  String toJson() => jsonEncode({'type': 'keyFrame'});
+}
+
+/// How Remote Play is going: on, off, noPermission or noGame.
+class Streaming extends Message {
+  const Streaming(this.state);
+
+  final String state;
+
+  @override
+  String toJson() => jsonEncode({'type': 'streaming', 'state': state});
+}
+
 class Home extends Message {
   const Home();
 
@@ -290,6 +331,27 @@ class SaveLayout extends Message {
 }
 
 /// A trophy just earned in the game playing.
+/// The launcher's theme for the phone to wear, as #RRGGBB.
+class LookUpdate extends Message {
+  const LookUpdate({
+    required this.deep,
+    required this.middle,
+    required this.accent,
+  });
+
+  final String deep;
+  final String middle;
+  final String accent;
+
+  @override
+  String toJson() => jsonEncode({
+    'type': 'look',
+    'deep': deep,
+    'middle': middle,
+    'accent': accent,
+  });
+}
+
 class TrophyEarned extends Message {
   const TrophyEarned({
     required this.name,

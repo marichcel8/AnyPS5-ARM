@@ -6,6 +6,12 @@ import 'dart:typed_data';
 import 'package:anyps5_remote/connection/session.dart';
 import 'package:anyps5_remote/protocol/messages.dart';
 import 'package:anyps5_remote/protocol/packets.dart';
+import 'package:anyps5_remote/stream/stream_packets.dart';
+import 'package:anyps5_remote/stream/stream_player.dart';
+
+import 'stream_test.dart' show pieces;
+
+import 'package:flutter/painting.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -22,6 +28,12 @@ class FakeLauncher {
   late RawDatagramSocket udp;
   final hellos = <Map<String, dynamic>>[];
   final packets = <(DateTime, Uint8List)>[];
+
+  /// Where the phone's pad came from, to send Remote Play's packets back to.
+  (InternetAddress, int)? padFrom;
+
+  /// Pad packets that came on the control channel, as a phone on a cable sends them.
+  final channelPackets = <Uint8List>[];
   final sockets = <WebSocket>[];
 
   /// Everything but hellos the phone sent, in order.
@@ -40,6 +52,7 @@ class FakeLauncher {
       final datagram = udp.receive();
       if (datagram == null) return;
       packets.add((DateTime.now(), datagram.data));
+      padFrom = (datagram.address, datagram.port);
       if (echo) {
         Timer(
           const Duration(milliseconds: 4),
@@ -50,8 +63,14 @@ class FakeLauncher {
     });
     http.transform(WebSocketTransformer()).listen((socket) {
       sockets.add(socket);
-      socket.listen((text) async {
-        final message = jsonDecode(text as String) as Map<String, dynamic>;
+      socket.listen((data) async {
+        if (data is List<int>) {
+          final packet = Uint8List.fromList(data);
+          channelPackets.add(packet);
+          if (echo) socket.add(answer(packet));
+          return;
+        }
+        final message = jsonDecode(data as String) as Map<String, dynamic>;
         if (message['type'] == 'wantArt') {
           socket.add(
             jsonEncode({
@@ -124,6 +143,21 @@ class FakeLauncher {
     await http.close(force: true);
     udp.close();
   }
+}
+
+/// Remote Play's player, keeping what it was given.
+class FakePlayer implements StreamPlayer {
+  final frames = <VideoFrame>[];
+  final sounds = <AudioPacket>[];
+
+  @override
+  void frame(VideoFrame frame) => frames.add(frame);
+
+  @override
+  void sound(AudioPacket packet) => sounds.add(packet);
+
+  @override
+  void stop() {}
 }
 
 Future<void> waitFor(
@@ -225,6 +259,31 @@ void main() {
     await session.close();
     await launcher.stop();
   });
+
+  test(
+    'on a cable the pad and its answers go on the control channel',
+    () async {
+      final launcher = FakeLauncher(echo: true);
+      await launcher.start();
+      final session = Session(preferences: preferences, deviceName: 'iPhone');
+      await session.connect(
+        InternetAddress.loopbackIPv4,
+        launcher.port,
+        cable: true,
+      );
+      await waitFor(() => session.status == ConnectionStatus.connected);
+      await waitFor(() => launcher.channelPackets.length >= 5);
+      await waitFor(() => session.latencyMs != null);
+      expect(launcher.packets, isEmpty);
+      expect(
+        ByteData.sublistView(launcher.channelPackets.first)
+            .getUint64(24, Endian.little),
+        42,
+      );
+      await session.close();
+      await launcher.stop();
+    },
+  );
 
   test('measures latency from echoes', () async {
     final launcher = FakeLauncher(echo: true);
@@ -460,6 +519,98 @@ void main() {
       'id': '/Games/DOOM',
       'layout': null,
     });
+    await session.close();
+    await launcher.stop();
+  });
+
+  test('the launcher\'s theme is worn and kept for next time', () async {
+    final launcher = FakeLauncher();
+    await launcher.start();
+    final session = Session(preferences: preferences, deviceName: 'Pixel 8');
+    await session.connect(InternetAddress.loopbackIPv4, launcher.port);
+    await waitFor(() => session.status == ConnectionStatus.connected);
+    launcher.tell({
+      'type': 'look',
+      'deep': '#0A0014',
+      'middle': '#4A0E6B',
+      'accent': '#FF4FD8',
+    });
+    await waitFor(() => session.look.value != null);
+    expect(session.look.value!.accent, const Color(0xFFFF4FD8));
+    expect(session.look.value!.middle, const Color(0xFF4A0E6B));
+    await session.close();
+    await launcher.stop();
+    final later = Session(preferences: preferences, deviceName: 'Pixel 8');
+    expect(later.look.value?.deep, const Color(0xFF0A0014));
+  });
+
+  test('Remote Play: the picture asked for comes to the player', () async {
+    final launcher = FakeLauncher();
+    await launcher.start();
+    final session = Session(preferences: preferences, deviceName: 'Pixel 8');
+    final player = FakePlayer();
+    session.player = player;
+    await session.connect(InternetAddress.loopbackIPv4, launcher.port);
+    await waitFor(() => session.status == ConnectionStatus.connected);
+    session.startStream(1280, 720);
+    await waitFor(
+      () => launcher.received.any((message) => message['type'] == 'stream'),
+    );
+    expect(
+      launcher.received.lastWhere((message) => message['type'] == 'stream'),
+      {'type': 'stream', 'on': true, 'width': 1280, 'height': 720},
+    );
+    await waitFor(() => launcher.padFrom != null);
+    final (address, port) = launcher.padFrom!;
+    for (final part in pieces(List.filled(2000, 7), number: 1, key: true)) {
+      launcher.udp.send(part, address, port);
+    }
+    await waitFor(() => player.frames.isNotEmpty);
+    expect(player.frames.single.data, hasLength(2000));
+    // A frame starting from nothing but a non-key frame asks for a key frame.
+    for (final part in pieces([1, 2, 3], number: 3)) {
+      launcher.udp.send(part, address, port);
+    }
+    await waitFor(
+      () => launcher.received.any((message) => message['type'] == 'keyFrame'),
+    );
+    session.stopStream();
+    await waitFor(
+      () =>
+          launcher.received.last['type'] == 'stream' &&
+          launcher.received.last['on'] == false,
+    );
+    await session.close();
+    await launcher.stop();
+  });
+
+  test('Remote Play on a cable comes on the control channel', () async {
+    final launcher = FakeLauncher();
+    await launcher.start();
+    final session = Session(preferences: preferences, deviceName: 'iPhone');
+    final player = FakePlayer();
+    session.player = player;
+    await session.connect(
+      InternetAddress.loopbackIPv4,
+      launcher.port,
+      cable: true,
+    );
+    await waitFor(() => session.status == ConnectionStatus.connected);
+    session.startStream(1280, 720);
+    await waitFor(
+      () => launcher.received.any((message) => message['type'] == 'stream'),
+    );
+    for (final part in pieces(List.filled(1500, 9), number: 1, key: true)) {
+      launcher.sockets.last.add(part);
+    }
+    final sound = Uint8List(16 + 960);
+    ByteData.sublistView(sound)
+      ..setUint32(0, audioMagic, Endian.little)
+      ..setUint16(4, 1, Endian.little)
+      ..setUint16(6, 16, Endian.little);
+    launcher.sockets.last.add(sound);
+    await waitFor(() => player.frames.isNotEmpty && player.sounds.isNotEmpty);
+    expect(player.sounds.single.samples, hasLength(960));
     await session.close();
     await launcher.stop();
   });
