@@ -159,6 +159,7 @@ function(add_shader_recompiler target runtimeTarget)
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslImage.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslFlow.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslWave.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslPrecision.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslStage.cpp
 
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/DummyShaders.cpp
@@ -186,6 +187,7 @@ function(add_shader_recompiler target runtimeTarget)
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.cpp"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.hpp"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.h"
+            "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.inc"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/*.cmake"
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/CMakeLists.txt"
     )

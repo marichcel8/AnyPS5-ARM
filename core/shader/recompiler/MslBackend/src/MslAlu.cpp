@@ -84,6 +84,118 @@ std::string UserData(State& state, const IrValue& inst) {
     return ShaderDataWord(state, static_cast<std::uint32_t>(found - registers.begin()));
 }
 
+std::string Bits(State& state, const IrValue& inst, std::size_t index) {
+    const IrValue* value = inst.Argument(index)->Resolve();
+    if (value->HasImmediate() && value->ArgumentCount() == 0u && value->Type() == IrType::F32) return U32(value->ImmediateU32());
+    return "as_type<uint>(" + Typed(state, inst, index) + ")";
+}
+
+bool EmitPrecise(State& state, const IrValue& inst) {
+    const auto level = Precision(state, inst);
+    if (level == PrecisionFast) return false;
+    const auto helper = [&](std::string_view name, std::size_t count) {
+        state.features |= level == PrecisionStrict ? StrictFloat : IeeeFloat;
+        std::string text = std::string(level == PrecisionStrict ? "aps5_s_" : "aps5_i_") + std::string(name) + "(";
+        for (std::size_t index = 0; index < count; ++index) text += (index == 0u ? "" : ", ") + Bits(state, inst, index);
+        return text + ")";
+    };
+    const auto value = [&](std::string_view name, std::size_t count) { Out(state, inst, "as_type<float>(" + helper(name, count) + ")"); };
+    const auto test = [&](std::string_view name) { Out(state, inst, helper(name, 2)); };
+    switch (inst.Opcode()) {
+    case IrOpcode::FPAdd32: value("add", 2); return true;
+    case IrOpcode::FPSub32: value("sub", 2); return true;
+    case IrOpcode::FPMul32: value("mul", 2); return true;
+    case IrOpcode::FPMad32: value("mad", 3); return true;
+    case IrOpcode::FPFma32: value("fma", 3); return true;
+    case IrOpcode::FPMin32: value("min", 2); return true;
+    case IrOpcode::FPMax32: value("max", 2); return true;
+    case IrOpcode::FPMinTri32: value("min3", 3); return true;
+    case IrOpcode::FPMaxTri32: value("max3", 3); return true;
+    case IrOpcode::FPMedTri32: value("med3", 3); return true;
+    case IrOpcode::FPRecip32:
+    case IrOpcode::FPRecipIFlag32: value("recip", 1); return true;
+    case IrOpcode::FPRecipSqrt32: value("rsqrt", 1); return true;
+    case IrOpcode::FPSqrt: value("sqrt", 1); return true;
+    case IrOpcode::FPSin: value("sin", 1); return true;
+    case IrOpcode::FPCos: value("cos", 1); return true;
+    case IrOpcode::FPExp2: value("exp2", 1); return true;
+    case IrOpcode::FPLog2: value("log2", 1); return true;
+    case IrOpcode::FPRoundEven32: value("rint", 1); return true;
+    case IrOpcode::FPFloor32: value("floor", 1); return true;
+    case IrOpcode::FPCeil32: value("ceil", 1); return true;
+    case IrOpcode::FPTrunc32: value("trunc", 1); return true;
+    case IrOpcode::FPFract32: value("fract", 1); return true;
+    case IrOpcode::FPOrdEqual32: test("eq"); return true;
+    case IrOpcode::FPOrdNotEqual32: test("one"); return true;
+    case IrOpcode::FPOrdLessThan32: test("lt"); return true;
+    case IrOpcode::FPOrdGreaterThan32: test("gt"); return true;
+    case IrOpcode::FPOrdLessThanEqual32: test("le"); return true;
+    case IrOpcode::FPOrdGreaterThanEqual32: test("ge"); return true;
+    case IrOpcode::FPUnordEqual32: test("ueq"); return true;
+    case IrOpcode::FPUnordNotEqual32: test("une"); return true;
+    case IrOpcode::FPUnordLessThan32: test("ult"); return true;
+    case IrOpcode::FPUnordGreaterThan32: test("ugt"); return true;
+    case IrOpcode::FPUnordLessThanEqual32: test("ule"); return true;
+    case IrOpcode::FPUnordGreaterThanEqual32: test("uge"); return true;
+    case IrOpcode::Select:
+    case IrOpcode::SelectF32:
+        if (inst.Type() != IrType::F32) return false;
+        Out(state, inst, "as_type<float>(" + Typed(state, inst, 0) + " ? " + Bits(state, inst, 1) + " : " + Bits(state, inst, 2) + ")");
+        return true;
+    default: return false;
+    }
+}
+
+bool EmitFloat64(State& state, const IrValue& inst) {
+    const auto call = [&](std::string_view function, std::size_t count) {
+        state.features |= Float64;
+        std::string text = std::string(function) + "(";
+        for (std::size_t index = 0; index < count; ++index) text += (index == 0u ? "" : ", ") + Typed(state, inst, index);
+        Out(state, inst, text + ")");
+    };
+    switch (inst.Opcode()) {
+    case IrOpcode::FPAdd64: call("aps5_f64_add", 2); return true;
+    case IrOpcode::FPMul64: call("aps5_f64_mul", 2); return true;
+    case IrOpcode::FPFma64: call("aps5_f64_fma", 3); return true;
+    case IrOpcode::FPFmaScale64:
+        state.features |= Float64;
+        Out(state, inst, "aps5_f64_fma_scale(" + Typed(state, inst, 0) + ", " + Typed(state, inst, 1) + ", " + Typed(state, inst, 2) + ", int(" + Typed(state, inst, 3) + "))");
+        return true;
+    case IrOpcode::FPMin64: call("aps5_f64_min", 2); return true;
+    case IrOpcode::FPMax64: call("aps5_f64_max", 2); return true;
+    case IrOpcode::FPSaturate64: call("aps5_f64_saturate", 1); return true;
+    case IrOpcode::FPLdexp64: call("aps5_f64_ldexp", 2); return true;
+    case IrOpcode::FPRoundEven64: call("aps5_f64_round_even", 1); return true;
+    case IrOpcode::FPFloor64: call("aps5_f64_floor", 1); return true;
+    case IrOpcode::FPCeil64: call("aps5_f64_ceil", 1); return true;
+    case IrOpcode::FPTrunc64: call("aps5_f64_trunc", 1); return true;
+    case IrOpcode::FPFract64: call("aps5_f64_fract", 1); return true;
+    case IrOpcode::FPFrexpMant64: call("aps5_f64_frexp_mant", 1); return true;
+    case IrOpcode::FPFrexpExp64: call("aps5_f64_frexp_exp", 1); return true;
+    case IrOpcode::FPRcp64: call("aps5_f64_rcp", 1); return true;
+    case IrOpcode::FPRsq64: call("aps5_f64_rsq", 1); return true;
+    case IrOpcode::FPSqrt64: call("aps5_f64_sqrt", 1); return true;
+    case IrOpcode::FPTrigPreop64: call("aps5_f64_trig_preop", 2); return true;
+    case IrOpcode::ConvertF32F64:
+        state.features |= Float64;
+        Out(state, inst, "as_type<float>(aps5_f64_to_f32(" + Typed(state, inst, 0) + "))");
+        return true;
+    case IrOpcode::ConvertF64F32:
+        state.features |= Float64;
+        Out(state, inst, "aps5_f64_from_f32(" + Bits(state, inst, 0) + ")");
+        return true;
+    case IrOpcode::ConvertF64S32: call("aps5_f64_from_i32", 1); return true;
+    case IrOpcode::ConvertF64U32: call("aps5_f64_from_u32", 1); return true;
+    case IrOpcode::ConvertS32F64: call("aps5_f64_to_i32", 1); return true;
+    case IrOpcode::ConvertU32F64: call("aps5_f64_to_u32", 1); return true;
+    case IrOpcode::FPDot2F32F16:
+        state.features |= Float64 | Dot2;
+        call("aps5_dot2_f32_f16", 3);
+        return true;
+    default: return false;
+    }
+}
+
 }
 
 std::string Typed(State& state, const IrValue& inst, std::size_t index) {
@@ -113,6 +225,7 @@ bool EmitAlu(State& state, const IrValue& inst) {
     const auto unordered = [&](std::string_view op) {
         Out(state, inst, "(" + Nan(a(0)) + " || " + Nan(a(1)) + " || " + a(0) + " " + std::string(op) + " " + a(1) + ")");
     };
+    if (EmitPrecise(state, inst) || EmitFloat64(state, inst)) return true;
     switch (inst.Opcode()) {
     case IrOpcode::IAdd32:
     case IrOpcode::IAdd64: binary("+"); return true;
@@ -197,24 +310,24 @@ bool EmitAlu(State& state, const IrValue& inst) {
     case IrOpcode::ConvertU8U32:
     case IrOpcode::ConvertU32U8: Out(state, inst, a(0) + " & 0xffu"); return true;
     case IrOpcode::ConvertF32F16: state.features |= Half; call("aps5_f16_to_f32", 1); return true;
-    case IrOpcode::ConvertF16F32: state.features |= Half; call("aps5_f32_to_f16", 1); return true;
+    case IrOpcode::ConvertF16F32: state.features |= Half; Out(state, inst, "aps5_f32_to_f16(" + Bits(state, inst, 0) + ")"); return true;
     case IrOpcode::ConvertS32F32: Out(state, inst, "uint(int(" + a(0) + "))"); return true;
     case IrOpcode::ConvertU32F32: Out(state, inst, "uint(" + a(0) + ")"); return true;
     case IrOpcode::ConvertF32S32: Out(state, inst, "float(int(" + a(0) + "))"); return true;
     case IrOpcode::ConvertF32U32: Out(state, inst, "float(" + a(0) + ")"); return true;
     case IrOpcode::PackHalf2x16:
         state.features |= Half;
-        Out(state, inst, "aps5_f32_to_f16(" + a(0) + ".x) | (aps5_f32_to_f16(" + a(0) + ".y) << 16u)");
+        Out(state, inst, "aps5_f32_to_f16(as_type<uint>(" + a(0) + ".x)) | (aps5_f32_to_f16(as_type<uint>(" + a(0) + ".y)) << 16u)");
         return true;
     case IrOpcode::PackFloat2x16Rtz:
         state.features |= Half;
-        Out(state, inst, "aps5_f32_to_f16_rtz(" + a(0) + ") | (aps5_f32_to_f16_rtz(" + a(1) + ") << 16u)");
+        Out(state, inst, "aps5_f32_to_f16_rtz(" + Bits(state, inst, 0) + ") | (aps5_f32_to_f16_rtz(" + Bits(state, inst, 1) + ") << 16u)");
         return true;
     case IrOpcode::FPAdd16x2: state.features |= Half; Out(state, inst, "aps5_half2(" + a(0) + ", " + a(1) + ", false)"); return true;
     case IrOpcode::FPMul16x2: state.features |= Half; Out(state, inst, "aps5_half2(" + a(0) + ", " + a(1) + ", true)"); return true;
     case IrOpcode::FPAbs32: Out(state, inst, "as_type<float>(as_type<uint>(" + a(0) + ") & 0x7fffffffu)"); return true;
     case IrOpcode::FPNeg32: Out(state, inst, "as_type<float>(as_type<uint>(" + a(0) + ") ^ 0x80000000u)"); return true;
-    case IrOpcode::FPSaturate32: call("aps5_saturate", 1); return true;
+    case IrOpcode::FPSaturate32: Out(state, inst, "aps5_saturate(" + Bits(state, inst, 0) + ")"); return true;
     case IrOpcode::FPOrdEqual32: binary("=="); return true;
     case IrOpcode::FPOrdLessThan32: binary("<"); return true;
     case IrOpcode::FPOrdGreaterThan32: binary(">"); return true;
@@ -227,8 +340,8 @@ bool EmitAlu(State& state, const IrValue& inst) {
     case IrOpcode::FPUnordGreaterThan32: unordered(">"); return true;
     case IrOpcode::FPUnordLessThanEqual32: unordered("<="); return true;
     case IrOpcode::FPUnordGreaterThanEqual32: unordered(">="); return true;
-    case IrOpcode::FPIsNan32: Out(state, inst, Nan(a(0))); return true;
-    case IrOpcode::FPCmpClass32: state.features |= FloatClass; call("aps5_class", 2); return true;
+    case IrOpcode::FPIsNan32: Out(state, inst, "aps5_nan(" + Bits(state, inst, 0) + ")"); return true;
+    case IrOpcode::FPCmpClass32: state.features |= FloatClass; Out(state, inst, "aps5_class(" + Bits(state, inst, 0) + ", " + a(1) + ")"); return true;
     case IrOpcode::FPAdd32: binary("+"); return true;
     case IrOpcode::FPSub32: binary("-"); return true;
     case IrOpcode::FPMul32: binary("*"); return true;
@@ -255,15 +368,13 @@ bool EmitAlu(State& state, const IrValue& inst) {
     case IrOpcode::GetUserData: Out(state, inst, UserData(state, inst)); return true;
     case IrOpcode::GetShaderBase: Out(state, inst, "0ul"); return true;
     case IrOpcode::GetBuiltin: Out(state, inst, Builtin(state, inst)); return true;
-    case IrOpcode::FPDot2F32F16:
-        throw MslUnsupported("MSL backend: FPDot2F32F16 is not emitted (section S5)");
     case IrOpcode::ShaderClock:
     case IrOpcode::RealtimeClock:
         throw MslUnsupported("MSL backend: shader clocks are not emitted");
     default:
         break;
     }
-    if (IsFloat64Opcode(inst.Opcode())) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(inst.Opcode())) + " is not emitted (fp64 soft-float is section S5)");
+    if (inst.Opcode() == IrOpcode::FPInterpolateF32 || inst.Opcode() == IrOpcode::FPInterpolateF16) throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(inst.Opcode())) + " is not emitted (graphics stages are section S6)");
     return false;
 }
 

@@ -357,6 +357,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
         PrepareStage(state);
     }
     Hoister{state}.Run();
+    AnalyzePrecision(state);
     EmitFlow(state);
     if (!compute && (state.features & (Lds | WaveExchange | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
     if (stage == IrShaderStage::Vertex && (state.features & (Lane | Wave)) != 0u) throw MslUnsupported("MSL backend: SIMD-group operations in vertex functions are not emitted");
