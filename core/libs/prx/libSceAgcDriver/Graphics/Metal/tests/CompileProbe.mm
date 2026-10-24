@@ -61,6 +61,7 @@ ComputePipelineRequest Request(const Source& source, CompilePriority priority) {
     request.library.owner = source.text;
     request.library.text = *source.text;
     request.library.name = "probe";
+    request.library.languageVersion = static_cast<std::uint32_t>(MTLLanguageVersion3_1);
     request.function = "probe_main";
     request.label = "probe";
     request.priority = priority;
