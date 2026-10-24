@@ -244,6 +244,31 @@ std::uint64_t Device::Submit(QueueKind queue, void* const* commandBuffers, std::
     return serial;
 }
 
+std::uint64_t Device::SubmitPresent(QueueKind queue, void* drawable, void* const* commandBuffers, std::size_t count) {
+    auto& s = *state;
+    const auto index = queueIndex(queue);
+    FlushResidency();
+    id<MTLDrawable> target = (__bridge id<MTLDrawable>)drawable;
+    std::uint64_t serial = 0;
+    {
+        std::lock_guard lock(s.submitMutex[index]);
+        [s.queues[index] waitForDrawable:target];
+        for (std::size_t first = 0; first < count; first += InlineCommits) {
+            const auto chunk = std::min(InlineCommits, count - first);
+            __unsafe_unretained id<MTL4CommandBuffer> list[InlineCommits];
+            for (std::size_t item = 0; item < chunk; ++item) list[item] = (__bridge id<MTL4CommandBuffer>)commandBuffers[first + item];
+            [s.queues[index] commit:list count:chunk];
+        }
+        [s.queues[index] signalDrawable:target];
+        serial = s.submitted[index].load(std::memory_order_relaxed) + 1;
+        [s.queues[index] signalEvent:s.timelines[index] value:serial];
+        s.submitted[index].store(serial, std::memory_order_release);
+    }
+    [target present];
+    Collect();
+    return serial;
+}
+
 std::uint64_t Device::SubmittedSerial(QueueKind queue) const {
     return state->submitted[queueIndex(queue)].load(std::memory_order_acquire);
 }
