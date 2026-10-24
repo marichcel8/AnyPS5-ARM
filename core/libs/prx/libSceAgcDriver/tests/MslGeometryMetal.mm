@@ -133,7 +133,7 @@ id<MTLRenderPipelineState> TessellationPipeline(id<MTLDevice> device, const Comp
     descriptor.fragmentFunction = pixel.function;
     descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
     descriptor.tessellationPartitionMode = Partition(domain.layout.partitioning);
-    descriptor.maxTessellationFactor = domain.layout.partitioning == 2u ? 63u : 64u;
+    descriptor.maxTessellationFactor = 64u;
     descriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
     descriptor.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
     descriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
