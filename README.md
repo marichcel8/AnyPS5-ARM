@@ -24,6 +24,7 @@ This branch holds the phone app alone. The whole project, with the engine and th
 - **What the Mac is doing.** While a game is unlocked, updated or started, a card at the top of the phone shows the step, a bar that fills and the time it has taken, and says when the game is ready.
 - **Trophies.** A trophy earned in the game drops in at the top of the phone for a few seconds, with its icon and grade, and the phone buzzes.
 - **The launcher's theme.** The phone's home screen takes the colors of the theme the launcher wears, also one made in its Theme Studio.
+- **AnyTogether.** About → AnyTogether signs the phone in to [AnyTogether](https://anytogether.kodla.agency): with the Mac's account in one tap (the launcher, signed in, approves it) or with an email code. Signed in, the phone approves the Mac when the launcher asks to sign in with it.
 - **Language.** The phone uses the launcher's language: English by default, or Turkish.
 - The version is shown faintly in the bottom right corner.
 

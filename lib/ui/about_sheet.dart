@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../strings.dart';
+import '../together/together_account.dart';
+import 'together_sheet.dart';
 import '../version.dart';
 
 /// Who made the app and where its code is, over the screen it was opened from; with
@@ -14,10 +16,15 @@ Future<void> showAbout(
   ValueChanged<bool>? onMotion,
   bool? remotePlay,
   ValueChanged<bool>? onRemotePlay,
+  TogetherAccount? together,
+  String? macName,
+  Future<void> Function()? onUseMac,
 }) => showModalBottomSheet<void>(
   context: context,
   backgroundColor: const Color(0xF2101218),
   isScrollControlled: true,
+  // A phone on its side: the text and the switches side by side across its width.
+  constraints: const BoxConstraints(maxWidth: 980),
   shape: const RoundedRectangleBorder(
     borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
   ),
@@ -28,6 +35,9 @@ Future<void> showAbout(
     onMotion: onMotion,
     remotePlay: remotePlay,
     onRemotePlay: onRemotePlay,
+    together: together,
+    macName: macName,
+    onUseMac: onUseMac,
   ),
 );
 
@@ -39,6 +49,9 @@ class _About extends StatefulWidget {
     this.onMotion,
     this.remotePlay,
     this.onRemotePlay,
+    this.together,
+    this.macName,
+    this.onUseMac,
   });
 
   final bool? vibration;
@@ -47,6 +60,9 @@ class _About extends StatefulWidget {
   final ValueChanged<bool>? onMotion;
   final bool? remotePlay;
   final ValueChanged<bool>? onRemotePlay;
+  final TogetherAccount? together;
+  final String? macName;
+  final Future<void> Function()? onUseMac;
 
   @override
   State<_About> createState() => _AboutState();
@@ -61,7 +77,7 @@ class _AboutState extends State<_About> {
   Widget build(BuildContext context) {
     final texts = Texts.of(context);
     return SafeArea(
-      child: Padding(
+      child: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(28, 22, 28, 18),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -90,78 +106,6 @@ class _AboutState extends State<_About> {
                     style: const TextStyle(color: Colors.white60, fontSize: 14),
                   ),
                   const SizedBox(height: 14),
-                  if (_vibration != null)
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      title: Text(
-                        texts.vibration,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                        ),
-                      ),
-                      subtitle: Text(
-                        texts.vibrationDetail,
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12.5,
-                        ),
-                      ),
-                      value: _vibration!,
-                      onChanged: (value) {
-                        setState(() => _vibration = value);
-                        widget.onVibration?.call(value);
-                      },
-                    ),
-                  if (_motion != null)
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      title: Text(
-                        texts.motion,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                        ),
-                      ),
-                      subtitle: Text(
-                        texts.motionDetail,
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12.5,
-                        ),
-                      ),
-                      value: _motion!,
-                      onChanged: (value) {
-                        setState(() => _motion = value);
-                        widget.onMotion?.call(value);
-                      },
-                    ),
-                  if (_remotePlay != null)
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      dense: true,
-                      title: Text(
-                        texts.remotePlay,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                        ),
-                      ),
-                      subtitle: Text(
-                        texts.remotePlayDetail,
-                        style: const TextStyle(
-                          color: Colors.white54,
-                          fontSize: 12.5,
-                        ),
-                      ),
-                      value: _remotePlay!,
-                      onChanged: (value) {
-                        setState(() => _remotePlay = value);
-                        widget.onRemotePlay?.call(value);
-                      },
-                    ),
                   _Row(label: texts.madeBy, value: author),
                   _Row(
                     label: texts.sourceCode,
@@ -173,9 +117,111 @@ class _AboutState extends State<_About> {
                     value: 'github.com/boykopovar/AnyPS5',
                     link: upstream,
                   ),
+                  if (widget.together case final together?)
+                    ListenableBuilder(
+                      listenable: together,
+                      builder: (context, _) => _Row(
+                        label: texts.together,
+                        value: together.user == null
+                            ? texts.togetherSignIn
+                            : '@${together.user!.handle}',
+                        onTap: () => showTogether(
+                          context,
+                          account: together,
+                          macName: widget.macName,
+                          onUseMac: widget.onUseMac,
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
+            // The switches beside the text: a phone on its side has more width than height.
+            if (_vibration != null ||
+                _motion != null ||
+                _remotePlay != null) ...[
+              const SizedBox(width: 28),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_vibration != null)
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        title: Text(
+                          texts.vibration,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                          ),
+                        ),
+                        subtitle: Text(
+                          texts.vibrationDetail,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                        value: _vibration!,
+                        onChanged: (value) {
+                          setState(() => _vibration = value);
+                          widget.onVibration?.call(value);
+                        },
+                      ),
+                    if (_motion != null)
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        title: Text(
+                          texts.motion,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                          ),
+                        ),
+                        subtitle: Text(
+                          texts.motionDetail,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                        value: _motion!,
+                        onChanged: (value) {
+                          setState(() => _motion = value);
+                          widget.onMotion?.call(value);
+                        },
+                      ),
+                    if (_remotePlay != null)
+                      SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
+                        dense: true,
+                        title: Text(
+                          texts.remotePlay,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                          ),
+                        ),
+                        subtitle: Text(
+                          texts.remotePlayDetail,
+                          style: const TextStyle(
+                            color: Colors.white54,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                        value: _remotePlay!,
+                        onChanged: (value) {
+                          setState(() => _remotePlay = value);
+                          widget.onRemotePlay?.call(value);
+                        },
+                      ),
+                  ],
+                ),
+              ),
+            ],
           ],
         ),
       ),
@@ -184,18 +230,21 @@ class _AboutState extends State<_About> {
 }
 
 class _Row extends StatelessWidget {
-  const _Row({required this.label, required this.value, this.link});
+  const _Row({required this.label, required this.value, this.link, this.onTap});
 
   final String label;
   final String value;
   final String? link;
+
+  /// Opens something in the app instead of a [link].
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
     final target = link;
     return InkWell(
       onTap: target == null
-          ? null
+          ? onTap
           : () => launchUrl(
               Uri.parse(target),
               mode: LaunchMode.externalApplication,
@@ -206,7 +255,7 @@ class _Row extends StatelessWidget {
         child: Row(
           children: [
             SizedBox(
-              width: 150,
+              width: 116,
               child: Text(
                 label,
                 style: const TextStyle(color: Colors.white54, fontSize: 14),
@@ -216,7 +265,7 @@ class _Row extends StatelessWidget {
               child: Text(
                 value,
                 style: TextStyle(
-                  color: target == null
+                  color: target == null && onTap == null
                       ? Colors.white
                       : const Color(0xFF8AB4FF),
                   fontSize: 14,
@@ -224,6 +273,14 @@ class _Row extends StatelessWidget {
                 ),
               ),
             ),
+            if (onTap != null) ...[
+              const SizedBox(width: 4),
+              const Icon(
+                Icons.chevron_right_rounded,
+                size: 18,
+                color: Color(0xFF8AB4FF),
+              ),
+            ],
             if (target != null) ...[
               const SizedBox(width: 6),
               const Icon(
