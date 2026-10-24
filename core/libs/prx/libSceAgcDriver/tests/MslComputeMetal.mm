@@ -14,7 +14,6 @@ namespace {
 
 using namespace ShaderRecompiler;
 
-constexpr std::uint32_t OutputBytes = MslComputePrograms::Threads * sizeof(std::uint32_t);
 
 struct BdaTable {
     BdaAbi::Header header;
@@ -56,7 +55,8 @@ id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, const std::string& so
 
 double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputePrograms::Program& program, std::uint64_t address, std::uint32_t waveSize) {
     const auto name = std::string(program.name) + " (wave" + std::to_string(waveSize) + ")";
-    const auto userData = MslComputePrograms::UserData();
+    const auto userData = MslComputePrograms::UserData(program.threads);
+    const std::uint32_t outputBytes = program.threads * sizeof(std::uint32_t);
     const auto result = Recompile(MslComputePrograms::Request(program, address, userData, waveSize));
     Require(result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
     const auto source = std::string(result.msl.Source());
@@ -64,15 +64,15 @@ double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputeProg
     id<MTLComputePipelineState> pipeline = Pipeline(device, source, name);
     const auto compileMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count();
 
-    id<MTLBuffer> output = Zeroed(device, OutputBytes);
+    id<MTLBuffer> output = Zeroed(device, outputBytes);
     id<MTLBuffer> push = Zeroed(device, std::max<std::size_t>(result.pushConstants.size(), 16u));
     if (!result.pushConstants.empty()) std::memcpy(push.contents, result.pushConstants.data(), result.pushConstants.size());
     id<MTLBuffer> fault = Zeroed(device, BdaAbi::FaultBufferBytes);
     id<MTLBuffer> buffers = Zeroed(device, sizeof(MetalAbi::GuestBufferEntry));
-    const MetalAbi::GuestBufferEntry entry{output.gpuAddress, OutputBytes, 0u};
+    const MetalAbi::GuestBufferEntry entry{output.gpuAddress, outputBytes, 0u};
     std::memcpy(buffers.contents, &entry, sizeof(entry));
     id<MTLBuffer> table = Zeroed(device, sizeof(BdaTable));
-    const BdaTable bda{{BdaAbi::Version, 1u, sizeof(BdaAbi::Range), 0u}, {MslComputePrograms::BdaGuestBase, MslComputePrograms::BdaGuestBase + OutputBytes, output.gpuAddress, BdaAbi::Read | BdaAbi::Write, 0u}};
+    const BdaTable bda{{BdaAbi::Version, 1u, sizeof(BdaAbi::Range), 0u}, {MslComputePrograms::BdaGuestBase, MslComputePrograms::BdaGuestBase + outputBytes, output.gpuAddress, BdaAbi::Read | BdaAbi::Write, 0u}};
     std::memcpy(table.contents, &bda, sizeof(bda));
 
     id<MTLCommandBuffer> commands = [queue commandBuffer];
@@ -83,7 +83,7 @@ double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputeProg
     [encoder setBuffer:fault offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::FaultBuffer)];
     [encoder setBuffer:buffers offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::GuestBuffers)];
     [encoder useResource:output usage:MTLResourceUsageRead | MTLResourceUsageWrite];
-    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(MslComputePrograms::Threads, 1, 1)];
+    [encoder dispatchThreadgroups:MTLSizeMake(1, 1, 1) threadsPerThreadgroup:MTLSizeMake(MslComputePrograms::HostThreads(waveSize, program.threads), 1, 1)];
     [encoder endEncoding];
     [commands commit];
     [commands waitUntilCompleted];
@@ -92,7 +92,7 @@ double Run(id<MTLDevice> device, id<MTLCommandQueue> queue, const MslComputeProg
     const auto* faultWords = static_cast<const std::uint32_t*>(fault.contents);
     Require(faultWords[0] == 0u, name + ": the kernel recorded fault reason " + std::to_string(faultWords[1]));
     const auto* values = static_cast<const std::uint32_t*>(output.contents);
-    for (std::uint32_t lane = 0; lane < MslComputePrograms::Threads; ++lane) {
+    for (std::uint32_t lane = 0; lane < program.threads; ++lane) {
         const auto expected = MslComputePrograms::Expected(program.expect, lane);
         if (values[lane] != expected) {
             std::string words;

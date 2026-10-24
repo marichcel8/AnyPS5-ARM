@@ -262,7 +262,7 @@ Local LdsArray(State& state) {
 
 Local ScratchArray(State& state) {
     state.features |= Scratch;
-    const auto arguments = "(aps5_scratch, " + U32(state.scratchDwords) + ", ";
+    const auto arguments = "(aps5_scratch" + HalfSuffix() + ", " + U32(state.scratchDwords) + ", ";
     return {"aps5_read_scratch" + arguments, "aps5_write_scratch" + arguments};
 }
 
@@ -424,8 +424,8 @@ void AddressAtomic(State& state, const IrValue& inst) {
         ScratchArray(state);
         Line(state, unaligned);
         Open(state, "else if ((" + low + " >> 2u) < " + U32(state.scratchDwords) + ") {");
-        Line(state, result + " = aps5_scratch[" + low + " >> 2u];");
-        Line(state, "aps5_scratch[" + low + " >> 2u] = aps5_update(" + U32(atomic.op) + ", " + result + ", " + atomic.a + ", " + atomic.b + ");");
+        Line(state, result + " = aps5_scratch" + HalfSuffix() + "[" + low + " >> 2u];");
+        Line(state, "aps5_scratch" + HalfSuffix() + "[" + low + " >> 2u] = aps5_update(" + U32(atomic.op) + ", " + result + ", " + atomic.a + ", " + atomic.b + ");");
         Close(state);
         Close(state, "} else {");
         ++state.depth;
@@ -688,10 +688,10 @@ void LoadVectorWindow(State& state, const IrValue& inst) {
     const auto index = Typed(state, inst, 0u);
     const IrValue* value = inst.Argument(0)->Resolve();
     if (value->HasImmediate()) {
-        Define(state, inst, value->ImmediateU32() < state.windowDwords ? "aps5_window[" + index + "]" : std::string("0u"));
+        Define(state, inst, value->ImmediateU32() < state.windowDwords ? "aps5_window" + HalfSuffix() + "[" + index + "]" : std::string("0u"));
         return;
     }
-    Define(state, inst, index + " < " + U32(state.windowDwords) + " ? aps5_window[" + index + "] : 0u");
+    Define(state, inst, index + " < " + U32(state.windowDwords) + " ? aps5_window" + HalfSuffix() + "[" + index + "] : 0u");
 }
 
 void StoreVectorWindow(State& state, const IrValue& inst) {
@@ -700,10 +700,10 @@ void StoreVectorWindow(State& state, const IrValue& inst) {
     const auto data = Typed(state, inst, 1u);
     const IrValue* value = inst.Argument(0)->Resolve();
     if (value->HasImmediate()) {
-        if (value->ImmediateU32() < state.windowDwords) Line(state, "aps5_window[" + index + "] = " + data + ";");
+        if (value->ImmediateU32() < state.windowDwords) Line(state, "aps5_window" + HalfSuffix() + "[" + index + "] = " + data + ";");
         return;
     }
-    Line(state, "if (" + index + " < " + U32(state.windowDwords) + ") aps5_window[" + index + "] = " + data + ";");
+    Line(state, "if (" + index + " < " + U32(state.windowDwords) + ") aps5_window" + HalfSuffix() + "[" + index + "] = " + data + ";");
 }
 
 }

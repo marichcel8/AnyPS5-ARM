@@ -100,6 +100,8 @@ void TestRunsAndDeduplicates() {
     });
     Check(again == first && runs == 1, "a finished result is served without a second compile");
     Check(service.Find(Key(1)) == first && service.Find(Key(99)) == nullptr, "Find returns known tickets only");
+    for (int attempt = 0; attempt < 5000 && backend->created < 2; ++attempt) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
     Check(backend->created == 2, "each worker built its context once");
     Check(service.WaitIdle(5000), "the service goes idle");
     const auto stats = service.Stats();

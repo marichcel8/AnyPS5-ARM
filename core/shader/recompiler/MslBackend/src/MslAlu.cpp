@@ -53,6 +53,10 @@ std::string Nan(std::string_view value) {
     return "aps5_nan(as_type<uint>(" + std::string(value) + "))";
 }
 
+std::string GuestIndex() {
+    return "(aps5_index + (aps5_index & ~31u) + " + U32(CurrentHalf() * 32u) + ")";
+}
+
 std::string Builtin(State& state, const IrValue& inst) {
     const auto kind = static_cast<StageInputKind>(ImmediateValue(inst, 0));
     const auto component = ImmediateValue(inst, 1);
@@ -61,14 +65,25 @@ std::string Builtin(State& state, const IrValue& inst) {
         state.features |= WorkgroupId;
         return "aps5_group." + Component(component);
     case StageInputKind::LocalInvocationId:
-        state.features |= LocalId;
-        return "aps5_local." + Component(component);
-    case StageInputKind::GlobalInvocationId:
-        state.features |= GlobalId;
-        return "aps5_global." + Component(component);
+    case StageInputKind::GlobalInvocationId: {
+        if (state.lanes == 1u) {
+            state.features |= kind == StageInputKind::LocalInvocationId ? LocalId : GlobalId;
+            return std::string(kind == StageInputKind::LocalInvocationId ? "aps5_local." : "aps5_global.") + Component(component);
+        }
+        const auto* workgroup = state.input.compute;
+        if (workgroup == nullptr || component >= 3u) Fail(inst, "needs the workgroup size");
+        std::uint32_t divisor = 1u;
+        for (std::uint32_t axis = 0; axis < component; ++axis) divisor *= std::max(workgroup->threadsNum[axis], 1u);
+        const auto size = std::max(workgroup->threadsNum[component], 1u);
+        state.features |= LocalIndex;
+        const auto local = "((" + GuestIndex() + " / " + U32(divisor) + ") % " + U32(size) + ")";
+        if (kind == StageInputKind::LocalInvocationId) return local;
+        state.features |= WorkgroupId;
+        return "(" + local + " + aps5_group." + Component(component) + " * " + U32(size) + ")";
+    }
     case StageInputKind::LocalInvocationIndex:
         state.features |= LocalIndex;
-        return "aps5_index";
+        return state.lanes == 1u ? std::string("aps5_index") : GuestIndex();
     case StageInputKind::DispatchThreadLimit:
         return ShaderDataWord(state, state.layout.DispatchThreadLimitDword() + component);
     default:

@@ -32,7 +32,6 @@ enum Feature : std::uint32_t {
     FloatClass = 1u << 16u,
     Descriptors = 1u << 17u,
     Wave = 1u << 18u,
-    WaveExchange = 1u << 19u,
     Permute = 1u << 20u,
     Images = 1u << 21u,
     Samplers = 1u << 22u,
@@ -64,7 +63,7 @@ struct State {
     std::uint32_t windowDwords = 0;
     std::uint32_t waveLds = 0;
     bool stopAllowed = false;
-    bool spanned = false;
+    std::uint32_t lanes = 1;
     std::unordered_set<const IrValue*> hoisted;
     std::unordered_set<const IrValue*> defined;
     std::vector<const IrValue*> hoistOrder;
@@ -83,6 +82,8 @@ struct State {
 [[noreturn]] void Fail(const IrValue& inst, std::string_view reason);
 [[noreturn]] void Fail(std::string_view reason);
 
+std::uint32_t& CurrentHalf();
+std::string HalfSuffix();
 std::string Name(const IrValue& value);
 std::string TypeName(IrType type);
 std::string Literal(const IrValue& value);
@@ -103,8 +104,11 @@ std::uint8_t Precision(const State& state, const IrValue& inst);
 bool EmitAlu(State& state, const IrValue& inst);
 bool EmitMemory(State& state, const IrValue& inst);
 bool EmitWave(State& state, const IrValue& inst);
+bool IsCrossLane(IrOpcode opcode);
 std::string WaveLane(State& state);
-std::string WaveAny(State& state, const std::string& predicate);
+std::string WaveAny(State& state, const std::string& zero, const std::string& one);
+std::string HalfArg(State& state, const IrValue& inst, std::size_t index, std::uint32_t half);
+void DefineHalves(State& state, const IrValue& inst, std::string_view zero, std::string_view one);
 bool EmitImage(State& state, const IrValue& inst);
 void EmitInstruction(State& state, const IrValue& inst);
 void EmitBlockBody(State& state, const IrBlock& block);
@@ -114,6 +118,18 @@ void PrepareStage(State& state);
 std::string StageBuiltin(State& state, StageInputKind kind, std::uint32_t component);
 bool EmitStage(State& state, const IrValue& inst);
 std::string StageHeader(const State& state, const std::string& parameters);
+
+template <class Body>
+void ForEachHalf(const State& state, Body&& body) {
+    struct Restore {
+        std::uint32_t previous = CurrentHalf();
+        ~Restore() { CurrentHalf() = previous; }
+    } restore;
+    for (std::uint32_t half = 0; half < state.lanes; ++half) {
+        CurrentHalf() = half;
+        body(half);
+    }
+}
 
 }
 

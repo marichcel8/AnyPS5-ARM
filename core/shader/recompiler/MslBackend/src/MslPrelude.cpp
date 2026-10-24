@@ -508,36 +508,6 @@ constexpr std::string_view Atomic64GpuText = R"(static inline device atomic_uint
 constexpr std::string_view WaveText = R"(static inline uint aps5_ballot32(bool predicate) { return uint(static_cast<simd_vote::vote_t>(simd_ballot(predicate))); }
 )";
 
-constexpr std::string_view WaveExchangeText = R"(static inline uint2 aps5_ballot64(bool predicate, uint index, threadgroup uint* wave, thread uint& phase) {
-    const uint base = (phase++ & 1u) * 66u;
-    const uint mask = aps5_ballot32(predicate);
-    if (simd_is_first()) wave[base + 64u + ((index >> 5u) & 1u)] = mask;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return uint2(wave[base + 64u], wave[base + 65u]);
-}
-static inline bool aps5_any64(bool predicate, uint index, threadgroup uint* wave, thread uint& phase) {
-    const uint2 mask = aps5_ballot64(predicate, index, wave, phase);
-    return (mask.x | mask.y) != 0u;
-}
-static inline uint aps5_read64(uint value, uint lane, uint index, threadgroup uint* wave, thread uint& phase) {
-    const uint base = (phase++ & 1u) * 66u;
-    wave[base + (index & 63u)] = value;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    return wave[base + (lane & 63u)];
-}
-static inline uint aps5_readfirst64(uint value, bool active, uint index, threadgroup uint* wave, thread uint& phase) {
-    const uint base = (phase++ & 1u) * 66u;
-    const uint mask = aps5_ballot32(active);
-    wave[base + (index & 63u)] = value;
-    if (simd_is_first()) wave[base + 64u + ((index >> 5u) & 1u)] = mask;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const uint low = wave[base + 64u];
-    const uint high = wave[base + 65u];
-    const uint first = low != 0u ? ctz(low) : (high != 0u ? 32u + ctz(high) : 0u);
-    return wave[base + first];
-}
-)";
-
 constexpr std::string_view PermuteText = R"(static inline uint aps5_permute(uint value, uint address, bool active, uint lane) {
     const uint request = active ? (((address >> 2u) & 31u) | 0x100u) : 0u;
     uint result = 0u;
@@ -683,8 +653,7 @@ std::string Prelude(const State& state) {
     }
     if (has(Dot2)) text += Dot2Text;
     if (has(Half)) text += HalfText;
-    if (has(Wave | WaveExchange)) text += WaveText;
-    if (has(WaveExchange)) text += WaveExchangeText;
+    if (has(Wave)) text += WaveText;
     if (has(Permute)) text += PermuteText;
     if (has(Fault | Bda | GuestBuffers)) text += FaultText;
     if (has(Bda)) {
