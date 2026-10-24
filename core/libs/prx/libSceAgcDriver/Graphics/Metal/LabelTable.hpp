@@ -22,12 +22,14 @@ struct LabelRecord {
     std::uint64_t stamp = 0;
     QueueKind queue = QueueKind::Graphics;
     std::uint64_t serial = 0;
+    bool deferred = false;
 };
 
 class LabelTable {
 public:
     void Add(const LabelRecord& record);
     void Settle(const SerialSet& completed);
+    void Land(QueueKind queue, std::uint64_t serial);
     bool Overlaps(std::uint64_t address, std::uint64_t bytes) const;
     SerialSet SerialsOver(std::uint64_t address, std::uint64_t bytes) const;
     std::optional<LabelRecord> Newest(std::uint64_t address, std::uint64_t bytes, std::uint64_t afterStamp) const;

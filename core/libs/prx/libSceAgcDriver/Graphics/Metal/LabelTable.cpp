@@ -20,7 +20,13 @@ void LabelTable::Add(const LabelRecord& record) {
 void LabelTable::Settle(const SerialSet& completed) {
     if (count.load(std::memory_order_acquire) == 0) return;
     std::lock_guard lock(mutex);
-    std::erase_if(records, [&](const LabelRecord& record) { return record.serial <= completed[static_cast<std::size_t>(record.queue)]; });
+    std::erase_if(records, [&](const LabelRecord& record) { return !record.deferred && record.serial <= completed[static_cast<std::size_t>(record.queue)]; });
+    count.store(records.size(), std::memory_order_release);
+}
+
+void LabelTable::Land(QueueKind queue, std::uint64_t serial) {
+    std::lock_guard lock(mutex);
+    std::erase_if(records, [&](const LabelRecord& record) { return record.deferred && record.queue == queue && record.serial == serial; });
     count.store(records.size(), std::memory_order_release);
 }
 

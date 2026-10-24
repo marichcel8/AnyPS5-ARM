@@ -18,7 +18,7 @@ void Check(bool condition, const char* message) {
 void Labels() {
     LabelTable table;
     Check(!table.Overlaps(0x1000, 8) && table.Size() == 0, "an empty table overlaps nothing");
-    table.Add({0x1000, 8, 1, QueueKind::Graphics, 5});
+    table.Add({0x1000, 8, 1, QueueKind::Graphics, 5, false});
     table.Add({0x2000, 4, 2, QueueKind::Compute, 3});
     table.Add({0x1004, 4, 3, QueueKind::Graphics, 7});
     Check(table.Size() == 3, "three labels are tracked");
@@ -31,6 +31,13 @@ void Labels() {
     Check(!table.Newest(0x1000, 8, 3), "nothing is newer than the newest");
     table.Settle({5, 0});
     Check(table.Size() == 2 && table.Overlaps(0x1004, 4) && !table.Overlaps(0x1000, 4), "settling drops completed labels per queue");
+    table.Add({0x3000, 4, 4, QueueKind::Graphics, 9, true});
+    table.Settle({20, 20});
+    Check(table.Overlaps(0x3000, 4), "a deferred label outlives its serial until it lands");
+    table.Land(QueueKind::Graphics, 8);
+    Check(table.Overlaps(0x3000, 4), "landing another serial keeps it");
+    table.Land(QueueKind::Graphics, 9);
+    Check(!table.Overlaps(0x3000, 4), "landing the serial drops it");
     table.Settle({7, 3});
     Check(table.Size() == 0 && !table.Overlaps(0x1004, 4) && !table.Overlaps(0x2000, 4), "settling everything empties the table");
 }

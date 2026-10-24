@@ -3,6 +3,9 @@
 #import <Metal/Metal.h>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <thread>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -104,6 +107,17 @@ struct LabelGroup {
     std::uint64_t offset = 0;
 };
 
+struct StoreItem {
+    std::uint64_t address = 0;
+    std::uint32_t bytes = 0;
+    std::uint64_t offset = 0;
+};
+
+struct StoreBatch {
+    std::vector<StoreItem> items;
+    std::vector<std::byte> payload;
+};
+
 struct QueueState {
     std::mutex slotMutex;
     std::vector<std::unique_ptr<Slot>> slots;
@@ -116,11 +130,13 @@ struct QueueState {
 
 struct Core {
     CompletionActions actions;
+    std::mutex runMutex;
     std::array<id<MTLSharedEvent>, QueueCount> timelines;
     std::atomic<bool> closed{false};
 };
 
 void drain(const std::shared_ptr<Core>& core, QueueKind queue) {
+    std::lock_guard run(core->runMutex);
     if (core->closed.load(std::memory_order_acquire)) return;
     const auto completed = core->timelines[queueIndex(queue)].signaledValue;
     for (auto& action : core->actions.Take(queue, completed)) action();
@@ -173,6 +189,8 @@ struct Sync::State {
     std::atomic<std::uint64_t> labelsEncoded{0};
     std::atomic<std::uint64_t> labelsDropped{0};
     std::atomic<std::uint64_t> labelDispatches{0};
+    std::atomic<std::uint64_t> labelsStored{0};
+    std::atomic<bool> gpuLabels{false};
     std::atomic<std::uint64_t> labelBytes{0};
     std::atomic<std::uint64_t> stagingChunks{0};
     std::atomic<std::uint64_t> stagingBytes{0};
@@ -236,6 +254,32 @@ struct Sync::State {
         chunks[id]->serial = serial;
     }
 
+    void store(const StoreBatch& batch, QueueKind queue, std::uint64_t serial) {
+        const auto snapshot = device.Guest().Snapshot();
+        for (const auto& item : batch.items) {
+            const auto resolved = Resolve(*snapshot, item.address, item.bytes);
+            if (!resolved || !resolved.window->writable || resolved.window->copied) {
+                labelsDropped.fetch_add(1, std::memory_order_relaxed);
+                continue;
+            }
+            const auto* source = batch.payload.data() + item.offset;
+            if (item.bytes == 8 && item.address % 8 == 0) {
+                std::uint64_t value;
+                std::memcpy(&value, source, 8);
+                std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(item.address)).store(value, std::memory_order_release);
+            } else {
+                for (std::uint32_t done = 0; done < item.bytes; done += 4) {
+                    std::uint32_t value;
+                    std::memcpy(&value, source + done, 4);
+                    std::atomic_ref<std::uint32_t>(*reinterpret_cast<std::uint32_t*>(item.address + done)).store(value, std::memory_order_relaxed);
+                }
+                std::atomic_thread_fence(std::memory_order_release);
+            }
+            labelsStored.fetch_add(1, std::memory_order_relaxed);
+        }
+        table.Land(queue, serial);
+    }
+
     bool queuedOverlap(std::uint64_t address, std::uint64_t bytes) {
         for (auto& queue : queues) {
             std::lock_guard lock(queue.labelMutex);
@@ -269,6 +313,8 @@ std::unique_ptr<Sync> Sync::Create(Device& device, std::string* failure) {
             if (state->queues[index].table == nil) return fail("label argument table");
             state->core->timelines[index] = (__bridge id<MTLSharedEvent>)device.NativeTimeline(static_cast<QueueKind>(index));
         }
+        const char* gpuLabels = std::getenv("APS5_METAL_GPU_LABELS");
+        state->gpuLabels.store(gpuLabels != nullptr && *gpuLabels != '0', std::memory_order_relaxed);
         dispatch_queue_attr_t attributes = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
         state->listener = [[MTLSharedEventListener alloc] initWithDispatchQueue:dispatch_queue_create("anyps5.metal.sync", attributes)];
         return std::unique_ptr<Sync>(new Sync(std::move(state)));
@@ -279,7 +325,10 @@ Sync::Sync(std::unique_ptr<State> state) : state(std::move(state)) {}
 
 Sync::~Sync() {
     if (state == nullptr) return;
-    state->core->closed.store(true, std::memory_order_release);
+    {
+        std::lock_guard run(state->core->runMutex);
+        state->core->closed.store(true, std::memory_order_release);
+    }
     state->core->actions.Clear();
     state->device.WaitIdle(5000);
     for (auto& chunk : state->chunks) state->device.ReleaseBuffer(chunk->buffer);
@@ -345,13 +394,24 @@ std::uint64_t Sync::Submit(Recording* recordings, std::size_t count) {
                 slot.inUse = false;
             }
         }
+        std::shared_ptr<StoreBatch> batch;
         for (std::size_t index = 0; index < count; ++index) {
             for (const auto id : recordings[index].staging) s.sealChunk(id, serial);
-            for (auto label : recordings[index].labels) {
+            const bool stores = !recordings[index].labelOffsets.empty();
+            if (stores && !batch) batch = std::make_shared<StoreBatch>();
+            for (std::size_t item = 0; item < recordings[index].labels.size(); ++item) {
+                auto label = recordings[index].labels[item];
                 label.serial = serial;
+                label.deferred = stores;
                 s.table.Add(label);
+                if (stores) batch->items.push_back({label.address, label.bytes, batch->payload.size()});
+                if (stores) batch->payload.insert(batch->payload.end(), recordings[index].labelPayload.begin() + recordings[index].labelOffsets[item], recordings[index].labelPayload.begin() + recordings[index].labelOffsets[item] + label.bytes);
             }
             recordings[index] = {};
+        }
+        if (batch) {
+            State* owner = &s;
+            OnComplete(queue, serial, [owner, batch, queue, serial] { owner->store(*batch, queue, serial); });
         }
         s.submits.fetch_add(1, std::memory_order_relaxed);
         return serial;
@@ -387,7 +447,7 @@ LabelOutcome Sync::WriteLabel(QueueKind queue, std::uint64_t address, std::span<
     }
     auto& q = s.queues[queueIndex(queue)];
     std::lock_guard lock(q.labelMutex);
-    if (!openWork && q.pending.empty() && s.device.CompletedSerial(queue) >= s.device.SubmittedSerial(queue)) {
+    if (!openWork && q.pending.empty() && s.table.Size() == 0 && s.device.CompletedSerial(queue) >= s.device.SubmittedSerial(queue)) {
         s.labelsDirect.fetch_add(1, std::memory_order_relaxed);
         return LabelOutcome::Direct;
     }
@@ -414,6 +474,16 @@ std::size_t Sync::EncodeLabels(Recording& recording) {
             payload.swap(q.payload);
         }
         if (labels.empty()) return 0;
+        if (!s.gpuLabels.load(std::memory_order_relaxed)) {
+            for (const auto& label : labels) {
+                recording.labels.push_back({label.address, label.bytes, label.stamp, recording.queue, 0});
+                recording.labelOffsets.push_back(recording.labelPayload.size());
+                recording.labelPayload.insert(recording.labelPayload.end(), payload.begin() + label.offset, payload.begin() + label.offset + label.bytes);
+                s.labelBytes.fetch_add(label.bytes, std::memory_order_relaxed);
+            }
+            s.labelsEncoded.fetch_add(labels.size(), std::memory_order_relaxed);
+            return labels.size();
+        }
         const auto snapshot = s.device.Guest().Snapshot();
         std::vector<ResolvedLabel> items;
         items.reserve(labels.size());
@@ -528,8 +598,13 @@ bool Sync::WaitLabels(std::uint64_t address, std::uint64_t bytes, std::uint32_t 
     for (std::size_t index = 0; index < QueueCount; ++index) {
         if (serials[index] != 0 && !s.device.WaitSerial(static_cast<QueueKind>(index), serials[index], timeoutMs)) return false;
     }
-    s.settle();
-    return true;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    for (;;) {
+        s.settle();
+        if (!s.table.Overlaps(address, bytes)) return true;
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::yield();
+    }
 }
 
 std::optional<LabelRecord> Sync::NewestLabel(std::uint64_t address, std::uint64_t bytes, std::uint64_t afterStamp) {
@@ -562,12 +637,13 @@ void Sync::WaitOnGate(QueueKind waiter, const Gate& gate, std::uint64_t value) {
 
 void Sync::OnComplete(QueueKind queue, std::uint64_t serial, std::function<void()> action) {
     auto& s = *state;
-    if (s.device.CompletedSerial(queue) >= serial) {
+    const bool done = s.device.CompletedSerial(queue) >= serial;
+    const bool fresh = s.core->actions.Push(queue, serial, std::move(action));
+    if (done) {
         s.completionsInline.fetch_add(1, std::memory_order_relaxed);
-        action();
+        drain(s.core, queue);
         return;
     }
-    const bool fresh = s.core->actions.Push(queue, serial, std::move(action));
     s.completionsDeferred.fetch_add(1, std::memory_order_relaxed);
     if (fresh) {
         auto core = s.core;
@@ -576,6 +652,14 @@ void Sync::OnComplete(QueueKind queue, std::uint64_t serial, std::function<void(
         }];
     }
     if (s.device.CompletedSerial(queue) >= serial) drain(s.core, queue);
+}
+
+void Sync::SetGpuLabels(bool enabled) {
+    state->gpuLabels.store(enabled, std::memory_order_relaxed);
+}
+
+bool Sync::GpuLabels() const {
+    return state->gpuLabels.load(std::memory_order_relaxed);
 }
 
 void Sync::Trim(std::size_t keepIdle) {
@@ -607,6 +691,7 @@ SyncCounters Sync::Counters() const {
     counters.labelsEncoded = s.labelsEncoded.load(std::memory_order_relaxed);
     counters.labelsDropped = s.labelsDropped.load(std::memory_order_relaxed);
     counters.labelDispatches = s.labelDispatches.load(std::memory_order_relaxed);
+    counters.labelsStored = s.labelsStored.load(std::memory_order_relaxed);
     counters.labelBytes = s.labelBytes.load(std::memory_order_relaxed);
     counters.stagingChunks = s.stagingChunks.load(std::memory_order_relaxed);
     counters.stagingBytes = s.stagingBytes.load(std::memory_order_relaxed);

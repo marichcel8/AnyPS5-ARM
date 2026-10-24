@@ -58,7 +58,7 @@ std::uint32_t Heavy(std::uint32_t x) {
 }
 
 std::uint32_t Load(const void* address) {
-    return std::atomic_ref<std::uint32_t>(*static_cast<std::uint32_t*>(const_cast<void*>(address))).load(std::memory_order_relaxed);
+    return std::atomic_ref<std::uint32_t>(*static_cast<std::uint32_t*>(const_cast<void*>(address))).load(std::memory_order_acquire);
 }
 
 struct Probe {
@@ -181,11 +181,14 @@ std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, bool flushInit, do
 
 void Ordering(Probe& probe) {
     double worst = 0;
-    const auto queueOnly = OrderingRun(probe, false, false, &worst);
-    const auto withProducer = OrderingRun(probe, true, false, &worst);
-    const auto flushed = OrderingRun(probe, false, true, &worst);
-    std::printf("sync.ordering queue_barrier_violations=%u producer_barrier_violations=%u flushed_violations=%u worst_us=%.1f\n", queueOnly, withProducer, flushed, worst);
-    Check(flushed == 0, "the label never lands before earlier work");
+    probe.sync.SetGpuLabels(false);
+    const auto completion = OrderingRun(probe, false, false, &worst);
+    probe.sync.SetGpuLabels(true);
+    const auto gpuQueue = OrderingRun(probe, false, false, &worst);
+    const auto gpuProducer = OrderingRun(probe, true, false, &worst);
+    probe.sync.SetGpuLabels(false);
+    std::printf("sync.ordering completion_path_violations=%u gpu_label_queue_barrier_violations=%u gpu_label_producer_barrier_violations=%u worst_us=%.1f\n", completion, gpuQueue, gpuProducer, worst);
+    Check(completion == 0, "the label never lands before earlier work");
 }
 
 void SameAddress(Probe& probe) {
@@ -257,6 +260,7 @@ void GateTest(Probe& probe) {
     const auto begin = Clock::now();
     gate->Signal(1);
     Check(probe.device.WaitSerial(QueueKind::Graphics, serial, 10000), "the queue continues after the gate opens");
+    Check(probe.sync.WaitLabels(reinterpret_cast<std::uint64_t>(label), 4, 10000), "the gated label lands");
     Check(*label == mark, "the gated label lands after the gate");
     probe.sync.WaitOnGate(QueueKind::Graphics, *gate, 1);
     std::printf("sync.gate ok release_us=%.1f\n", Microseconds(begin));
@@ -308,6 +312,7 @@ void Throughput(Probe& probe) {
         if (index % 6 == 5) probe.device.WaitSerial(QueueKind::Graphics, serial - 3, 10000);
     }
     probe.device.WaitSerial(QueueKind::Graphics, serial, 10000);
+    Check(probe.sync.WaitLabels(guest, 8, 10000), "the last label lands");
     Check(*reinterpret_cast<std::uint64_t*>(guest) == cycles, "the last label of the run landed");
     const auto after = probe.sync.Counters();
     Check(after.allocatorsCreated - before.allocatorsCreated <= 24, "command allocators are recycled");

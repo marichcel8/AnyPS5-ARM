@@ -21,6 +21,8 @@ struct Recording {
     std::uint32_t slot = 0;
     std::vector<std::uint32_t> staging;
     std::vector<LabelRecord> labels;
+    std::vector<std::uint64_t> labelOffsets;
+    std::vector<std::byte> labelPayload;
 
     explicit operator bool() const { return commands != nullptr; }
 };
@@ -36,6 +38,7 @@ struct SyncCounters {
     std::uint64_t labelsEncoded = 0;
     std::uint64_t labelsDropped = 0;
     std::uint64_t labelDispatches = 0;
+    std::uint64_t labelsStored = 0;
     std::uint64_t labelBytes = 0;
     std::uint64_t stagingChunks = 0;
     std::uint64_t stagingBytes = 0;
@@ -90,6 +93,8 @@ public:
 
     void OnComplete(QueueKind queue, std::uint64_t serial, std::function<void()> action);
 
+    void SetGpuLabels(bool enabled);
+    bool GpuLabels() const;
     void Trim(std::size_t keepIdle);
     SyncCounters Counters() const;
 
