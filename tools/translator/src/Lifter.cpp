@@ -4,7 +4,9 @@
 
 namespace Translator {
 
-Lifter::Impl::Impl(const Elf& elf, llvm::LLVMContext& context) : elf(elf), context(context), builder(context), imageBegin(elf.ImageBegin()) {
+Lifter::Impl::Impl(const Elf& elf, llvm::LLVMContext& context, Program& program)
+    : elf(elf), context(context), builder(context), imageBegin(elf.ImageBegin()), decoded(program.decoded), functions(program.functions), tableTargets(program.tableTargets),
+      jumpTables(program.jumpTables) {
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstone) != CS_ERR_OK) throw std::runtime_error("cannot open capstone");
     cs_option(capstone, CS_OPT_DETAIL, CS_OPT_ON);
 }
@@ -44,10 +46,12 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
             if (instruction.size == 0) break;
             path.push_back(address);
             if (instruction.id == X86_INS_JMP && instruction.x86.op_count == 1 && instruction.Op(0).type == X86_OP_REG) {
-                for (const auto target : JumpTable(path, addresses)) {
+                auto table = JumpTable(path, addresses);
+                for (const auto target : table.targets) {
                     tableTargets[entry].insert(target);
                     work.push_back(target);
                 }
+                jumpTables[address] = std::move(table);
             }
             const auto target = instruction.DirectTarget();
             const bool internal = target && elf.InExecutable(*target) && functions.count(*target) == 0;
@@ -73,7 +77,7 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
 // The lea may be hoisted out of a loop, so it is also looked up in the rest of the function. Without
 // the bounds check, entries are taken while they land in executable code near the jump; an extra
 // target only costs translated code, it is never jumped to.
-std::vector<std::uint64_t> Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function) {
+JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function) {
     const auto& jump = decoded.at(path.back());
     const auto jumpReg = RegisterOf(jump.Op(0).reg).index;
     std::optional<std::uint64_t> table;
@@ -120,11 +124,12 @@ std::vector<std::uint64_t> Lifter::Impl::JumpTable(const std::vector<std::uint64
             }
         }
     }
-    std::vector<std::uint64_t> targets;
+    JumpTableTargets result;
+    auto& targets = result.targets;
     if (std::getenv("APS5_TRANSLATOR_TRACE_TABLES"))
         std::fprintf(stderr, "jump table at %llx: base reg %u index %u table %llx count %lld\n", (unsigned long long)jump.address, baseReg, indexReg,
                      (unsigned long long)table.value_or(0), count ? (long long)*count : -1ll);
-    if (!table) return targets;
+    if (!table) return result;
     const std::uint64_t limit = count.value_or(256);
     for (std::uint64_t i = 0; i < limit && i < 4096; ++i) {
         const auto* slot = elf.At(*table + i * 4, 4);
@@ -136,7 +141,8 @@ std::vector<std::uint64_t> Lifter::Impl::JumpTable(const std::vector<std::uint64
         if (!count && (target + 0x10000 < jump.address || target > jump.address + 0x10000)) break;
         targets.push_back(target);
     }
-    return targets;
+    result.bounded = count && targets.size() == *count;
+    return result;
 }
 
 llvm::ConstantInt* Lifter::Impl::Const(unsigned bits, std::uint64_t value) {
@@ -355,16 +361,44 @@ void Lifter::Impl::Jump(std::uint64_t target) {
     else TailCall(target);
 }
 
-// An indirect jump dispatches over the function's direct branch targets; any other target leaves
-// the function through the runtime lookup.
-void Lifter::Impl::JumpIndirect(llvm::Value* target) {
+// An indirect jump through a jump table switches over the table's targets. Every other indirect
+// jump goes to the function's dispatch, which switches over all its branch targets; a target outside
+// the function leaves through the runtime lookup. One shared dispatch keeps the control flow graph
+// linear in the number of indirect jumps.
+llvm::BasicBlock* Lifter::Impl::Dispatch() {
+    if (dispatch != nullptr) return dispatch;
+    llvm::IRBuilderBase::InsertPointGuard guard(builder);
+    dispatch = NewBlock("dispatch");
     auto* outside = NewBlock("indirect");
-    auto* offset = builder.CreateSub(target, builder.CreatePtrToInt(image, builder.getInt64Ty()));
-    auto* dispatch = builder.CreateSwitch(offset, outside, static_cast<unsigned>(branchTargets.size()));
-    for (const auto address : branchTargets) dispatch->addCase(builder.getInt64(address - imageBegin), blocks.at(address));
+    builder.SetInsertPoint(dispatch);
+    dispatchTarget = builder.CreatePHI(builder.getInt64Ty(), 4);
+    auto* offset = builder.CreateSub(dispatchTarget, builder.CreatePtrToInt(image, builder.getInt64Ty()));
+    auto* cases = builder.CreateSwitch(offset, outside, static_cast<unsigned>(branchTargets.size()));
+    for (const auto address : branchTargets) cases->addCase(builder.getInt64(address - imageBegin), blocks.at(address));
     builder.SetInsertPoint(outside);
-    builder.CreateCall(callRuntime, {state, target})->setTailCall();
+    builder.CreateCall(callRuntime, {state, dispatchTarget})->setTailCall();
     builder.CreateRetVoid();
+    return dispatch;
+}
+
+void Lifter::Impl::JumpIndirect(llvm::Value* target) {
+    auto* general = Dispatch();
+    const auto table = jumpTables.find(currentAddress);
+    if (table == jumpTables.end() || table->second.targets.empty()) {
+        dispatchTarget->addIncoming(target, builder.GetInsertBlock());
+        builder.CreateBr(general);
+        return;
+    }
+    auto* other = NewBlock("table-miss");
+    auto* offset = builder.CreateSub(target, builder.CreatePtrToInt(image, builder.getInt64Ty()));
+    const std::set<std::uint64_t> targets(table->second.targets.begin(), table->second.targets.end());
+    auto* cases = builder.CreateSwitch(offset, other, static_cast<unsigned>(targets.size()));
+    for (const auto address : targets) {
+        if (const auto found = blocks.find(address); found != blocks.end()) cases->addCase(builder.getInt64(address - imageBegin), found->second);
+    }
+    builder.SetInsertPoint(other);
+    dispatchTarget->addIncoming(target, other);
+    builder.CreateBr(general);
 }
 
 void Lifter::Impl::Trap(llvm::FunctionCallee callee, std::uint64_t address) {
@@ -930,13 +964,47 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
     }
 }
 
-// Removes what a failed instruction emitted: its own block's instructions and the blocks it appended.
-void Lifter::Impl::Discard(llvm::BasicBlock* block, std::size_t keepBlocks) {
+// Removes what a failed instruction emitted: what it added to its block after `last` and the blocks
+// it appended.
+void Lifter::Impl::Discard(llvm::BasicBlock* block, llvm::Instruction* last, std::size_t keepBlocks) {
     std::vector<llvm::BasicBlock*> appended;
     for (auto it = std::next(current->begin(), static_cast<std::ptrdiff_t>(keepBlocks)); it != current->end(); ++it) appended.push_back(&*it);
-    for (auto* extra : appended) extra->dropAllReferences();
-    while (!block->empty()) block->back().eraseFromParent();
-    for (auto* extra : appended) extra->eraseFromParent();
+    if (dispatchTarget != nullptr) {
+        for (auto* from : appended) {
+            if (dispatchTarget->getBasicBlockIndex(from) >= 0) dispatchTarget->removeIncomingValue(from, false);
+        }
+        if (dispatchTarget->getBasicBlockIndex(block) >= 0) dispatchTarget->removeIncomingValue(block, false);
+    }
+    for (auto* extra : appended) {
+        if (extra == dispatch || (dispatch != nullptr && extra == dispatch->getNextNode())) continue;
+        extra->dropAllReferences();
+    }
+    while (!block->empty() && &block->back() != last) block->back().eraseFromParent();
+    for (auto* extra : appended) {
+        if (extra == dispatch || (dispatch != nullptr && extra == dispatch->getNextNode())) continue;
+        extra->eraseFromParent();
+    }
+}
+
+// The instructions that start a basic block: the entry, branch targets, and any instruction control
+// does not reach by falling through from the one before it alone. The rest continue their
+// predecessor's block, which keeps the graph LLVM optimizes small.
+std::set<std::uint64_t> Lifter::Impl::Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses) const {
+    std::set<std::uint64_t> leaders(branchTargets.begin(), branchTargets.end());
+    leaders.insert(entry);
+    std::map<std::uint64_t, unsigned> fallIns;
+    for (const auto address : addresses) {
+        const auto& instruction = decoded.at(address);
+        if (instruction.size == 0 || EndsPath(instruction.id)) continue;
+        if (addresses.count(instruction.Next()) != 0) ++fallIns[instruction.Next()];
+    }
+    const Instruction* previous = nullptr;
+    for (const auto address : addresses) {
+        const bool fallsIn = previous != nullptr && previous->size != 0 && !EndsPath(previous->id) && previous->Next() == address;
+        if (!fallsIn || fallIns[address] != 1) leaders.insert(address);
+        previous = &decoded.at(address);
+    }
+    return leaders;
 }
 
 void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_t>& addresses, Statistics& stats) {
@@ -945,41 +1013,53 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
     state = current->getArg(0);
     blocks.clear();
     branchTargets.clear();
+    dispatch = nullptr;
+    dispatchTarget = nullptr;
     auto* prologue = NewBlock("entry");
-    for (const auto address : addresses) blocks[address] = llvm::BasicBlock::Create(context, "x" + Hex(address - imageBegin), current);
     for (const auto address : addresses) {
         const auto& instruction = decoded.at(address);
         const auto target = instruction.DirectTarget();
-        if (target && (instruction.id == X86_INS_JMP || IsConditionalJump(instruction.id)) && blocks.count(*target) != 0) branchTargets.insert(*target);
+        if (target && (instruction.id == X86_INS_JMP || IsConditionalJump(instruction.id)) && addresses.count(*target) != 0) branchTargets.insert(*target);
     }
     branchTargets.insert(entry);
     if (const auto found = tableTargets.find(entry); found != tableTargets.end()) {
         for (const auto target : found->second) {
-            if (blocks.count(target) != 0) branchTargets.insert(target);
+            if (addresses.count(target) != 0) branchTargets.insert(target);
         }
     }
+    for (const auto address : Leaders(entry, addresses)) blocks[address] = llvm::BasicBlock::Create(context, "x" + Hex(address - imageBegin), current);
+    const auto dead = DeadFlags(entry, addresses);
     builder.SetInsertPoint(prologue);
     builder.CreateBr(blocks.at(entry));
     for (const auto address : addresses) {
         const auto& instruction = decoded.at(address);
-        auto* block = blocks.at(address);
-        builder.SetInsertPoint(block);
+        if (const auto leader = blocks.find(address); leader != blocks.end()) {
+            builder.SetInsertPoint(leader->second);
+        } else if (builder.GetInsertBlock()->getTerminator() != nullptr) {
+            builder.SetInsertPoint(NewBlock("unreached"));
+        }
+        auto* block = builder.GetInsertBlock();
+        auto* last = block->empty() ? nullptr : &block->back();
         const auto keep = current->size();
+        currentAddress = address;
+        const auto deadHere = dead.find(address);
+        deadFlags = deadHere != dead.end() ? deadHere->second : 0;
         try {
             if (instruction.size == 0) throw Unsupported{"(undecodable)"};
             Emit(instruction);
             ++stats.instructions;
-            if (!builder.GetInsertBlock()->hasTerminator()) {
+            if (builder.GetInsertBlock()->getTerminator() == nullptr) {
                 if (const auto next = blocks.find(instruction.Next()); next != blocks.end()) builder.CreateBr(next->second);
-                else Trap(unsupportedRuntime, instruction.Next());
+                else if (addresses.count(instruction.Next()) == 0) Trap(unsupportedRuntime, instruction.Next());
             }
         } catch (const Unsupported& unsupported) {
-            Discard(block, keep);
+            Discard(block, last, keep);
             builder.SetInsertPoint(block);
             ++stats.unsupported[unsupported.what];
             Trap(unsupportedRuntime, address);
         }
     }
+    deadFlags = 0;
 }
 
 // The guest image: the loaded segments at their offsets from the lowest one, with each 8-byte slot a
@@ -1080,13 +1160,18 @@ void Lifter::Impl::EmitImageMetadata() {
     llvm::appendToUsed(*module, {meta});
 }
 
-Lifter::Lifter(const Elf& elf, llvm::LLVMContext& context) : impl(std::make_unique<Impl>(elf, context)) {}
+void Lifter::Impl::DeclareImage() {
+    image = new llvm::GlobalVariable(*module, builder.getInt8Ty(), false, llvm::GlobalValue::ExternalLinkage, nullptr, "aps5_guest_image");
+    image->setAlignment(llvm::Align(0x4000));
+}
+
+Lifter::Lifter(const Elf& elf) : elf(elf), program(std::make_unique<Program>()) {}
 
 Lifter::~Lifter() = default;
 
 void Lifter::Discover() {
-    auto& lifter = *impl;
-    const auto& elf = lifter.elf;
+    llvm::LLVMContext scratch;
+    Impl lifter(elf, scratch, *program);
     std::deque<std::uint64_t> pending;
     auto seed = [&](std::uint64_t address) {
         if (elf.InExecutable(address)) pending.push_back(address);
@@ -1109,10 +1194,27 @@ void Lifter::Discover() {
     stats.functions = lifter.functions.size();
 }
 
-std::unique_ptr<llvm::Module> Lifter::Lift() {
-    auto& lifter = *impl;
-    if (lifter.functions.empty()) Discover();
-    auto module = std::make_unique<llvm::Module>("guest", lifter.context);
+std::size_t Lifter::FunctionSize(std::uint64_t entry) const {
+    return program->functions.at(entry).size();
+}
+
+std::vector<std::vector<std::uint64_t>> Lifter::Partitions(std::size_t instructions) const {
+    std::vector<std::vector<std::uint64_t>> partitions(1);
+    std::size_t filled = 0;
+    for (const auto& [entry, addresses] : program->functions) {
+        if (filled != 0 && filled + addresses.size() > instructions) {
+            partitions.emplace_back();
+            filled = 0;
+        }
+        partitions.back().push_back(entry);
+        filled += addresses.size();
+    }
+    return partitions;
+}
+
+std::unique_ptr<llvm::Module> Lifter::Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, Statistics& partitionStats) const {
+    Impl lifter(elf, context, *program);
+    auto module = std::make_unique<llvm::Module>("guest", context);
     lifter.module = module.get();
     auto& builder = lifter.builder;
     auto* ptr = builder.getPtrTy();
@@ -1122,19 +1224,29 @@ std::unique_ptr<llvm::Module> Lifter::Lift() {
         *callee = module->getOrInsertFunction(name, llvm::FunctionType::get(builder.getVoidTy(), {ptr, builder.getInt64Ty()}, false));
         llvm::cast<llvm::Function>(callee->getCallee())->setDoesNotReturn();
     }
-    lifter.EmitImage(stats);
+    if (first) lifter.EmitImage(partitionStats);
+    else lifter.DeclareImage();
+    const std::set<std::uint64_t> own(entries.begin(), entries.end());
     auto* functionType = llvm::FunctionType::get(builder.getVoidTy(), {ptr}, false);
     for (const auto& [entry, addresses] : lifter.functions) {
-        auto* function = llvm::Function::Create(functionType, llvm::GlobalValue::InternalLinkage, "g_" + Hex(entry - lifter.imageBegin), module.get());
+        const bool defined = own.count(entry) != 0;
+        if (!defined && !shared) continue;
+        const auto linkage = shared ? llvm::GlobalValue::ExternalLinkage : llvm::GlobalValue::InternalLinkage;
+        auto* function = llvm::Function::Create(functionType, linkage, "g_" + Hex(entry - lifter.imageBegin), module.get());
+        if (shared) function->setVisibility(llvm::GlobalValue::HiddenVisibility);
         // Guest code never holds a pointer to its GuestState, so guest memory accesses cannot alias it.
         function->addParamAttr(0, llvm::Attribute::NoAlias);
-        function->setUWTableKind(llvm::UWTableKind::Default);
-        function->addFnAttr("frame-pointer", "non-leaf");
+        if (defined) {
+            function->setUWTableKind(llvm::UWTableKind::Default);
+            function->addFnAttr("frame-pointer", "non-leaf");
+        }
         lifter.lifted[entry] = function;
     }
-    for (const auto& [entry, addresses] : lifter.functions) lifter.LiftFunction(entry, addresses, stats);
-    lifter.EmitTables();
-    lifter.EmitImageMetadata();
+    for (const auto entry : entries) lifter.LiftFunction(entry, lifter.functions.at(entry), partitionStats);
+    if (first) {
+        lifter.EmitTables();
+        lifter.EmitImageMetadata();
+    }
     lifter.module = nullptr;
     return module;
 }

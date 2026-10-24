@@ -60,6 +60,13 @@ struct Instruction {
     }
 };
 
+// The targets of one "jmp reg" through a jump table. A bounded table is guarded by a compare
+// against its size, so the jump never goes anywhere else.
+struct JumpTableTargets {
+    std::vector<std::uint64_t> targets;
+    bool bounded = false;
+};
+
 struct Register {
     enum Kind { Invalid, Gpr, Vector, Rip } kind = Invalid;
     unsigned index = 0;
@@ -139,21 +146,33 @@ inline std::string Hex(std::uint64_t value) {
 }
 
 
+// What discovery finds, shared read-only by the partitions' lifters.
+struct Lifter::Program {
+    std::map<std::uint64_t, Instruction> decoded;
+    std::map<std::uint64_t, std::set<std::uint64_t>> functions;
+    std::map<std::uint64_t, std::set<std::uint64_t>> tableTargets; // per function: its jump table targets
+    std::map<std::uint64_t, JumpTableTargets> jumpTables;           // per jump instruction
+};
+
 struct Lifter::Impl {
-    Impl(const Elf& elf, llvm::LLVMContext& context);
+    Impl(const Elf& elf, llvm::LLVMContext& context, Program& program);
     ~Impl() { cs_close(&capstone); }
 
     const Instruction& Decode(std::uint64_t address);
     void Explore(std::uint64_t entry, std::deque<std::uint64_t>& pending);
-    std::vector<std::uint64_t> JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function);
+    JumpTableTargets JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function);
 
     void EmitImage(Statistics& stats);
+    void DeclareImage();
     llvm::Constant* SlotValue(const Relocation& relocation);
     void EmitTables();
     void EmitImageMetadata();
     void LiftFunction(std::uint64_t entry, const std::set<std::uint64_t>& addresses, Statistics& stats);
     void Emit(const Instruction& instruction);
-    void Discard(llvm::BasicBlock* block, std::size_t keepBlocks);
+    std::map<std::uint64_t, std::uint8_t> DeadFlags(std::uint64_t entry, const std::set<std::uint64_t>& addresses); // FlagLiveness.cpp
+    std::set<std::uint64_t> Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses) const;
+    void Discard(llvm::BasicBlock* block, llvm::Instruction* last, std::size_t keepBlocks);
+    llvm::BasicBlock* Dispatch();
 
     // Values
     llvm::IntegerType* Int(unsigned bits) { return builder.getIntNTy(bits); }
@@ -176,7 +195,10 @@ struct Lifter::Impl {
 
     // Flags
     llvm::Value* GetFlag(Flag flag) { return builder.CreateICmpNE(builder.CreateLoad(builder.getInt8Ty(), Field(StateLayout::Flags + flag)), builder.getInt8(0)); }
-    void SetFlag(Flag flag, llvm::Value* bit) { builder.CreateStore(builder.CreateZExt(bit, builder.getInt8Ty()), Field(StateLayout::Flags + flag)); }
+    void SetFlag(Flag flag, llvm::Value* bit) {
+        if ((deadFlags >> flag) & 1u) return;
+        builder.CreateStore(builder.CreateZExt(bit, builder.getInt8Ty()), Field(StateLayout::Flags + flag));
+    }
     void ResultFlags(llvm::Value* result);
     void AuxiliaryFlag(llvm::Value* a, llvm::Value* b, llvm::Value* result);
     llvm::Value* Add(llvm::Value* a, llvm::Value* b, llvm::Value* carry);
@@ -229,9 +251,10 @@ struct Lifter::Impl {
     llvm::IRBuilder<> builder;
     csh capstone = 0;
     std::uint64_t imageBegin = 0;
-    std::map<std::uint64_t, Instruction> decoded;
-    std::map<std::uint64_t, std::set<std::uint64_t>> functions;
-    std::map<std::uint64_t, std::set<std::uint64_t>> tableTargets; // per function: its jump table targets
+    std::map<std::uint64_t, Instruction>& decoded;
+    std::map<std::uint64_t, std::set<std::uint64_t>>& functions;
+    std::map<std::uint64_t, std::set<std::uint64_t>>& tableTargets;
+    std::map<std::uint64_t, JumpTableTargets>& jumpTables;
 
     llvm::Module* module = nullptr;
     llvm::GlobalVariable* image = nullptr;
@@ -241,8 +264,12 @@ struct Lifter::Impl {
     llvm::Function* current = nullptr;
     std::uint64_t currentEntry = 0;
     llvm::Value* state = nullptr;
-    std::map<std::uint64_t, llvm::BasicBlock*> blocks;
+    std::uint64_t currentAddress = 0;
+    std::uint8_t deadFlags = 0; // flags the current instruction writes that nothing reads
+    std::map<std::uint64_t, llvm::BasicBlock*> blocks; // the function's leaders: branch targets and blocks control falls into from elsewhere
     std::set<std::uint64_t> branchTargets;
+    llvm::BasicBlock* dispatch = nullptr; // the function's one indirect jump dispatch over branchTargets
+    llvm::PHINode* dispatchTarget = nullptr;
 };
 
 }

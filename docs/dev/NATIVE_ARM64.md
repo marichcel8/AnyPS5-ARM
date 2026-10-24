@@ -72,6 +72,25 @@ python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm
 
 `aps5-translator <eboot.elf> <guest.o>` writes one arm64 object with the lifted functions, the guest image and the function table. The image's relocated slots are symbolic, so the host linker binds the guest's imports to the NID exports of the arm64 prx libraries. Linking it with `libaps5-translator-runtime.a` and the needed `.prx` files gives a native executable.
 
+### Large titles
+
+A title's code is split into partitions of about 16k guest instructions. Each partition is lifted, optimized and compiled in its own LLVM context on its own thread, and `ld -r` joins the partition objects into the one `guest.o`. Partition objects are cached under `~/Library/Caches/AnyPS5/translator/<ELF hash>`, keyed by the translator binary, the ELF and the settings, so a repeated or interrupted run only compiles what is missing.
+
+Three things keep very large guest functions from stalling LLVM:
+
+- **Flag liveness.** A backward data flow over each function finds the arithmetic flags no later instruction reads; their stores (and the parity and adjust computations behind them) are not emitted. Flags are dead across calls, returns and jumps to other functions, as the System V ABI preserves none. `APS5_TRANSLATOR_ALL_FLAGS=1` keeps every flag store.
+- **A small graph.** Only branch targets and instructions control reaches from elsewhere start a basic block. A jump through a bounded jump table switches over that table's targets only; every other indirect jump goes to one shared dispatch per function.
+- **Optimization tiers.** Functions above 2000 guest instructions are not inlined. Above 8000 they skip the O2 pipeline for a few linear passes (EarlyCSE, InstCombine, SimplifyCFG, DSE, ADCE). Above 32000 they are also compiled with fast instruction selection and register allocation, because live range splitting in the greedy allocator grows too fast on them.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `APS5_TRANSLATOR_JOBS` | CPU cores | threads |
+| `APS5_TRANSLATOR_PARTITION` | 16384 | guest instructions per partition |
+| `APS5_TRANSLATOR_LARGE` / `_HUGE` / `_GIANT` | 2000 / 8000 / 32000 | tier limits in guest instructions |
+| `APS5_TRANSLATOR_CACHE` | `~/Library/Caches/AnyPS5/translator` | cache directory, `off` disables it |
+| `APS5_TRANSLATOR_LD` | `ld` | linker that joins the partitions |
+| `APS5_TRANSLATOR_STATS` | unset | print the time of each partition |
+
 ## Milestones
 
 1. ✅ The prx libraries build for arm64. The x86-only parts throw until they are ported.
