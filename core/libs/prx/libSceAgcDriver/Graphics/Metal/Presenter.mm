@@ -378,7 +378,7 @@ std::unique_ptr<Presenter> Presenter::Create(Device& device, void* metalLayer, c
             if (layer.residencySet != nil) [queue addResidencySet:layer.residencySet];
             state->layer = layer;
         }
-        state->scalerSupported = [MTLFXSpatialScalerDescriptor supportsMetal4FXDevice:state->mtl];
+        state->scalerSupported = [MTLFXSpatialScalerDescriptor supportsMetal4FX:state->mtl];
         const double refresh = displayRefreshHz();
         state->refreshHz.store(refresh);
         state->userFps.store(options.targetFps);
@@ -455,6 +455,7 @@ PresentResult Presenter::Present(const PresentSource& source) {
             return result;
         }
         const auto slot = s.acquireSlot();
+        const auto acquired = nowNs();
         bool upscaled = false;
         if (!s.record(slot, source, drawable.texture, advice, true, upscaled)) return result;
         auto displayedSlot = s.displayed;
@@ -471,10 +472,12 @@ PresentResult Presenter::Present(const PresentSource& source) {
         result.upscaled = upscaled;
         result.serial = serial;
         result.pacedMs = millis(paced - begin);
-        result.encodeMs = millis(end - paced);
+        result.waitMs = millis(acquired - paced);
+        result.encodeMs = millis(end - acquired);
         ++s.stats.presented;
         if (upscaled) ++s.stats.upscaled;
         s.stats.pacedMs += result.pacedMs;
+        s.stats.waitMs += result.waitMs;
         s.stats.encodeMs += result.encodeMs;
     }
     return result;

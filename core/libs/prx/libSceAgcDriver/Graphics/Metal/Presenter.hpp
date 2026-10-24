@@ -38,6 +38,7 @@ struct PresentResult {
     bool upscaled = false;
     std::uint64_t serial = 0;
     double pacedMs = 0.0;
+    double waitMs = 0.0;
     double encodeMs = 0.0;
 };
 
@@ -50,6 +51,7 @@ struct PresenterStats {
     double refreshHz = 0.0;
     double effectiveHz = 0.0;
     double pacedMs = 0.0;
+    double waitMs = 0.0;
     double encodeMs = 0.0;
     PowerAdvice advice;
     PacerStats pacer;

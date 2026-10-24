@@ -155,8 +155,8 @@ double MeasurePacing(Device& device, CAMetalLayer* layer, double fps, int frames
     std::sort(intervals.begin(), intervals.end());
     const double median = intervals[intervals.size() / 2];
     const auto stats = presenter->Stats();
-    std::printf("target %.0f fps: median %.2f ms, p95 %.2f ms, effective %.1f Hz, paced %.1f ms total, encode %.3f ms/frame, footprint +%.1f MiB\n",
-        fps, median, intervals[intervals.size() * 95 / 100], stats.effectiveHz, stats.pacedMs, stats.encodeMs / std::max<std::uint64_t>(1, stats.presented),
+    std::printf("target %.0f fps: median %.2f ms, p95 %.2f ms, effective %.1f Hz, paced %.1f ms total, drawable wait %.3f ms/frame, encode %.3f ms/frame, footprint +%.1f MiB\n",
+        fps, median, intervals[intervals.size() * 95 / 100], stats.effectiveHz, stats.pacedMs, stats.waitMs / std::max<std::uint64_t>(1, stats.presented), stats.encodeMs / std::max<std::uint64_t>(1, stats.presented),
         (static_cast<double>(PhysFootprintBytes()) - static_cast<double>(footprint)) / 1048576.0);
     return median;
 }
