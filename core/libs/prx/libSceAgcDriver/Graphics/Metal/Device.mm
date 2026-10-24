@@ -290,6 +290,7 @@ void Device::Collect() {
     std::uint64_t bytes = 0;
     for (const auto& release : ready) bytes += release.driverBytes;
     if (bytes != 0) s.driverBytes.fetch_sub(bytes, std::memory_order_relaxed);
+    FlushResidency();
 }
 
 MemoryReport Device::Memory() const {
