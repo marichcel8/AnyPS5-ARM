@@ -35,7 +35,7 @@ id<MTLBuffer> Zeroed(id<MTLDevice> device, std::size_t bytes) {
 
 id<MTLComputePipelineState> Pipeline(id<MTLDevice> device, const std::string& source, const std::string& name) {
     MTLCompileOptions* options = [MTLCompileOptions new];
-    options.languageVersion = MTLLanguageVersion3_1;
+    options.languageVersion = MTLLanguageVersion3_2;
     if (@available(macOS 15.0, *)) options.mathMode = MTLMathModeFast;
     NSError* error = nil;
     id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&error];
