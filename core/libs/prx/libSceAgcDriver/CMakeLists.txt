@@ -277,6 +277,7 @@ set(agcDriverVulkanSources
 
 set(agcDriverMetalSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Null/NullBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm
 )
 
 if(ANYPS5_GPU_BACKEND STREQUAL "Metal")
@@ -335,6 +336,10 @@ if(APS5_ENABLE_TRACY)
     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
 endif()
 if(APPLE AND ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    add_subdirectory(Graphics/Metal ${CMAKE_CURRENT_BINARY_DIR}/metal)
+    target_link_libraries(libSceAgcDriver PRIVATE agc_metal)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_target_properties(libSceAgcDriver PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)
     target_link_options(libSceAgcDriver PRIVATE
             "$<$<STREQUAL:$<TARGET_PROPERTY:SDL2-static,TYPE>,STATIC_LIBRARY>:LINKER:-force_load,$<TARGET_FILE:SDL2-static>>")
 endif()
@@ -2914,9 +2919,18 @@ if(ANYPS5_GPU_BACKEND STREQUAL "Metal")
             set_target_properties(${agcTarget} PROPERTIES EXCLUDE_FROM_ALL ON)
         endif()
     endforeach()
+    set(agcMetalExecutionTests)
+    foreach(agcExecutionTest IN LISTS agcExecutionTests)
+        string(REGEX REPLACE "_tests$" "" agcExecutionTestName "${agcExecutionTest}")
+        list(APPEND agcMetalExecutionTests ${agcExecutionTestName})
+    endforeach()
+    add_custom_target(agc_metal_execution_tests)
     get_directory_property(agcDirectoryTests TESTS)
     foreach(agcTest IN LISTS agcDirectoryTests)
-        if(NOT agcTest STREQUAL "agc_null_backend" AND NOT agcTest MATCHES "^agc_msl_")
+        if(agcTest IN_LIST agcMetalExecutionTests)
+            set_tests_properties(${agcTest} PROPERTIES LABELS "metal-execution")
+            add_dependencies(agc_metal_execution_tests ${agcTest}_tests)
+        elseif(NOT agcTest STREQUAL "agc_null_backend" AND NOT agcTest MATCHES "^agc_msl_")
             set_tests_properties(${agcTest} PROPERTIES DISABLED TRUE)
         endif()
     endforeach()
