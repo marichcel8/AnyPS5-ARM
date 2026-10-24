@@ -32,7 +32,9 @@ endif()
 
 get_filename_component(ANYPS5_METAL_REPO_DIR "${ANYPS5_METAL_LIBS_DIR}/../.." ABSOLUTE)
 get_filename_component(ANYPS5_METAL_GRAPHICS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
-find_path(ANYPS5_METAL_VULKAN_HEADERS vulkan/vulkan.h HINTS "${ANYPS5_METAL_REPO_DIR}/3rdparty/Vulkan-Headers/include")
+if(EXISTS "${ANYPS5_METAL_REPO_DIR}/3rdparty/Vulkan-Headers/include/vulkan/vulkan.h")
+    set(ANYPS5_METAL_VULKAN_HEADERS "${ANYPS5_METAL_REPO_DIR}/3rdparty/Vulkan-Headers/include")
+endif()
 
 if(ANYPS5_METAL_VULKAN_HEADERS)
     file(GLOB ANYPS5_METAL_RECOMPILER_INCLUDES LIST_DIRECTORIES true "${ANYPS5_METAL_RECOMPILER_DIR}/*/include")
