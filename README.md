@@ -8,7 +8,7 @@ This branch holds the launcher alone. The whole project, with the engine the lau
 
 ## Windows and Linux
 
-This launcher is for macOS. On **Windows and Linux**, use [**AnyPS5 Launcher** by AlxcBTW](https://github.com/AlxcBTW/anyps5-launcher), a port of this launcher for [AnyPS5](https://github.com/boykopovar/AnyPS5) on those systems: the same PS5-style home screen, with unlocking and starting games, per-game controls, trophies and Discord. Downloads are on its [releases page](https://github.com/AlxcBTW/anyps5-launcher/releases/latest).
+This launcher is for macOS. On **Windows and Linux**, use [**AnyPS5 Desktop**](https://github.com/utkuhalis/AnyPS5-Desktop): the same launcher for those systems, with the PS5-style home screen, unlocking and starting games, per-game controls, trophies and AnyTogether. Downloads are on its [releases page](https://github.com/utkuhalis/AnyPS5-Desktop/releases/latest).
 
 ## What it does
 
