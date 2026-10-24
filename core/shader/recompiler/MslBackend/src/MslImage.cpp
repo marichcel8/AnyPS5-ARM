@@ -24,8 +24,8 @@ struct Shape {
 
 Shape ShapeOf(RdnaImageDimension dimension) {
     switch (dimension) {
-    case RdnaImageDimension::Dim1D: return {1u, 1u, false, false, "texture1d"};
-    case RdnaImageDimension::Dim1DArray: return {2u, 1u, true, false, "texture1d_array"};
+    case RdnaImageDimension::Dim1D: return {1u, 1u, false, false, "texture2d"};
+    case RdnaImageDimension::Dim1DArray: return {2u, 1u, true, false, "texture2d_array"};
     case RdnaImageDimension::Dim2D: return {2u, 2u, false, false, "texture2d"};
     case RdnaImageDimension::Dim2DArray: return {3u, 2u, true, false, "texture2d_array"};
     case RdnaImageDimension::Dim2DMsaa: return {2u, 2u, false, true, "texture2d_ms"};
@@ -242,6 +242,11 @@ std::string SpatialPart(const std::string& coord, const Shape& shape) {
     return coord;
 }
 
+std::string HostPlane(const std::string& spatial, const Shape& shape, bool floating) {
+    if (shape.spatial != 1u) return spatial;
+    return floating ? "float2(" + spatial + ", 0.5f)" : "uint2(" + spatial + ", 0u)";
+}
+
 std::string LayerPart(const std::string& coord, const Shape& shape, bool rounded) {
     const auto layer = coord + (shape.spatial == 1u ? ".y" : ".z");
     return rounded ? "uint(max(floor(" + layer + " + 0.5f), 0.0f))" : "uint(" + layer + ")";
@@ -346,9 +351,9 @@ void EmitRead(Access& access, const std::string& texture, const std::string& res
     if (shape.multisampled) {
         call = texture + ".read(" + SpatialPart(coord, shape) + (shape.arrayed ? ", " + coord + ".z" : "") + ", " + SampleIndex(access) + ")";
     } else if (shape.arrayed) {
-        call = texture + ".read(" + SpatialPart(coord, shape) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ", " + LodU32(access) + ")";
+        call = texture + ".read(" + HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ", " + LodU32(access) + ")";
     } else {
-        call = texture + ".read(" + coord + ", " + LodU32(access) + ")";
+        call = texture + ".read(" + HostPlane(coord, shape, false) + ", " + LodU32(access) + ")";
     }
     Line(state, result + " = " + ResultVector(access, call, access.image.numericClass, false, false) + ";");
     Close(state);
@@ -405,8 +410,8 @@ void EmitWrite(Access& access, const std::string& texture) {
     const auto coord = Temp(state);
     Line(state, "const auto " + coord + " = " + CoordU32(access) + ";");
     const auto texel = StoreTexel(access, Typed(state, access.inst, 2u), integer);
-    if (shape.arrayed) Line(state, texture + ".write(" + texel + ", " + SpatialPart(coord, shape) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ");");
-    else Line(state, texture + ".write(" + texel + ", " + coord + ");");
+    if (shape.arrayed) Line(state, texture + ".write(" + texel + ", " + HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ");");
+    else Line(state, texture + ".write(" + texel + ", " + HostPlane(coord, shape, false) + ");");
     Close(state);
 }
 
@@ -434,7 +439,7 @@ void EmitAtomic(Access& access, const std::string& texture, const std::string& r
     const auto coord = Temp(state);
     Line(state, "const auto " + coord + " = " + CoordU32(access) + ";");
     const auto value = "uint4(" + Typed(state, access.inst, 2u) + ", 0u, 0u, 0u)";
-    const auto position = shape.arrayed ? SpatialPart(coord, shape) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") : coord;
+    const auto position = shape.arrayed ? HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") : HostPlane(coord, shape, false);
     Line(state, "atomic_thread_fence(mem_flags::mem_texture, memory_order_seq_cst, thread_scope_device);");
     Line(state, result + " = " + texture + "." + name + "(" + position + ", " + value + ").x;");
     Close(state);
@@ -463,7 +468,7 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     const auto texture = parts.texture;
     const auto coordinate = Temp(state);
     Line(state, "const auto " + coordinate + " = " + CoordF32(access, layout.coord, shape.coordinates, ShapeOf(mem.imageDimension).coordinates) + ";");
-    const auto spatial = SpatialPart(coordinate, shape);
+    const auto spatial = HostPlane(SpatialPart(coordinate, shape), shape, true);
     const std::string array = shape.arrayed ? LayerPart(coordinate, shape, true) : std::string();
 
     std::string options;
