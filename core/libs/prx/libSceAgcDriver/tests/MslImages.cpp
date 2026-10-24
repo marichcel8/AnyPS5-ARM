@@ -18,7 +18,6 @@ void CheckProgram(const MslImagePrograms::Program& program, std::uint64_t addres
     const auto result = Recompile(MslImagePrograms::Request(program, address, userData));
     const auto source = std::string(result.msl.Source());
     const auto name = std::string(program.name);
-    if (std::getenv("APS5_MSL_DUMP") != nullptr) std::printf("// ---- %s\n%s\n", name.c_str(), source.c_str());
     Require(result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
     Require(result.spirv.empty(), name + ": an MSL artifact also carries SPIR-V");
     Require(source.find("device const ulong* aps5_images [[buffer(7)]]") != std::string::npos, name + ": the kernel takes no image table");
