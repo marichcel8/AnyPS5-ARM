@@ -14,10 +14,16 @@
 #include <span>
 #include <stdexcept>
 #include <utility>
+#include <string>
 #include <string_view>
 #include <vector>
 
 namespace ShaderRecompiler {
+
+enum class ShaderBackendKind : std::uint8_t {
+    Spirv,
+    Msl
+};
 
 enum class ShaderStage {
     Compute,
@@ -278,6 +284,24 @@ struct SpirvTarget {
     bool robustBufferAccess2 = false;
 };
 
+struct MslTarget {
+    std::uint32_t metalVersion = 0;
+    std::uint32_t simdgroupSize = 32;
+    std::uint32_t bdaAbiVersion = 0;
+    std::array<std::uint32_t, 3> maxThreadgroupSize{};
+    std::uint32_t maxThreadsPerThreadgroup = 0;
+    std::uint32_t maxThreadgroupMemoryBytes = 0;
+    std::optional<MeshTargetLimits> mesh;
+    std::optional<TessellationTargetLimits> tessellation;
+    bool relaxedFloat = true;
+    bool fragmentBarycentric = true;
+    bool vertexSimdgroups = false;
+    bool float16DenormPreserve = false;
+    bool float32DenormPreserve = false;
+    bool spannedWaves = false;
+    std::uint32_t subgroupStages = 0xffffffffu;
+};
+
 struct BindingLayout {
     std::uint32_t descriptorSet;
     std::uint32_t firstBinding;
@@ -369,6 +393,8 @@ struct RecompileRequest {
     BindingLayout layout;
     std::optional<GraphicsCompileContext> graphics;
     bool useCache = true;
+    ShaderBackendKind backend = ShaderBackendKind::Spirv;
+    MslTarget msl{};
 };
 
 inline std::uint32_t TessellationInstancePatches(const RecompileRequest& request) {
@@ -582,6 +608,70 @@ private:
     std::shared_ptr<Holder> holder;
 };
 
+inline std::uint64_t HashShaderBytes(std::string_view bytes, std::uint64_t seed) {
+    constexpr std::uint64_t multiplier = 0x9e3779b97f4a7c15ull;
+    std::uint64_t hash = seed ^ (static_cast<std::uint64_t>(bytes.size()) * multiplier);
+    std::size_t index = 0;
+    for (; index + 8 <= bytes.size(); index += 8) {
+        std::uint64_t chunk = 0;
+        for (std::size_t i = 0; i < 8; ++i) chunk |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[index + i])) << (8u * i);
+        chunk *= 0xff51afd7ed558ccdull;
+        chunk ^= chunk >> 32u;
+        hash = (hash ^ chunk) * multiplier;
+        hash = (hash << 27u) | (hash >> 37u);
+    }
+    std::uint64_t tail = 0x8000000000000000ull;
+    for (std::size_t i = 0; index + i < bytes.size(); ++i) tail |= static_cast<std::uint64_t>(static_cast<unsigned char>(bytes[index + i])) << (8u * i);
+    tail *= 0xff51afd7ed558ccdull;
+    tail ^= tail >> 32u;
+    hash = (hash ^ tail) * multiplier;
+    hash ^= hash >> 33u;
+    hash *= 0xff51afd7ed558ccdull;
+    hash ^= hash >> 33u;
+    hash *= 0xc4ceb9fe1a85ec53ull;
+    hash ^= hash >> 33u;
+    return hash;
+}
+
+class SharedMsl {
+public:
+    SharedMsl() = default;
+    SharedMsl(std::string source) : holder(std::make_shared<Holder>(std::move(source), nullptr, std::string_view{})) {}
+    SharedMsl(std::shared_ptr<const void> owner, std::string_view view) : holder(std::make_shared<Holder>(std::string{}, std::move(owner), view)) {}
+
+    [[nodiscard]] std::string_view Source() const { return holder ? holder->Source() : std::string_view{}; }
+    [[nodiscard]] SpirvContentHash ContentHash() const {
+        if (holder == nullptr) return {};
+        if (holder->hashed.load(std::memory_order_acquire)) return {holder->hashLow.load(std::memory_order_relaxed), holder->hashHigh.load(std::memory_order_relaxed)};
+        const auto source = holder->Source();
+        if (source.empty()) return {};
+        const SpirvContentHash hash{HashShaderBytes(source, 0x5eed5a1d00000011ull), HashShaderBytes(source, 0x5eed5a1d00000012ull)};
+        holder->hashLow.store(hash.low, std::memory_order_relaxed);
+        holder->hashHigh.store(hash.high, std::memory_order_relaxed);
+        holder->hashed.store(true, std::memory_order_release);
+        return hash;
+    }
+    [[nodiscard]] std::size_t size() const { return Source().size(); }
+    [[nodiscard]] bool empty() const { return Source().empty(); }
+    friend bool operator==(const SharedMsl& left, const SharedMsl& right) { return left.Source() == right.Source(); }
+
+private:
+    struct Holder {
+        Holder(std::string text, std::shared_ptr<const void> owner, std::string_view view) : text(std::move(text)), owner(std::move(owner)), view(view) {}
+        [[nodiscard]] std::string_view Source() const { return owner ? view : std::string_view(text); }
+        std::string text;
+        std::shared_ptr<const void> owner;
+        std::string_view view;
+        mutable std::atomic<std::uint64_t> hashLow{0};
+        mutable std::atomic<std::uint64_t> hashHigh{0};
+        mutable std::atomic<bool> hashed{false};
+    };
+
+    std::shared_ptr<Holder> holder;
+};
+
+inline constexpr std::string_view MslEntryPoint = "aps5_main";
+
 struct VertexInput {
     std::uint32_t location;
     std::uint32_t components;
@@ -609,6 +699,8 @@ struct MeshEmulationSlots {
 struct CompiledShaderArtifact {
     std::vector<VertexInputPatch> vertexInputPatches;
     SharedSpirv spirv;
+    ShaderBackendKind backend = ShaderBackendKind::Spirv;
+    SharedMsl msl;
     std::uint32_t memoryOffsetDword = 0;
     std::uint32_t shaderDataDwords = 0;
     std::uint32_t imageMetadataDword = 0;
@@ -670,7 +762,7 @@ struct RecompileResult : CompiledShaderArtifact, ShaderInvocation {
     std::vector<std::uint32_t> shaderDataUserWords;
     [[nodiscard]] std::uint64_t PipelineVariantId() const { return specializationId != 0 ? specializationId : variantId; }
     [[nodiscard]] PipelineIdentity Identity() const {
-        const auto hash = spirv.ContentHash();
+        const auto hash = backend == ShaderBackendKind::Msl ? msl.ContentHash() : spirv.ContentHash();
         if (hash == SpirvContentHash{}) return {};
         PipelineIdentity identity{hash.low, hash.high};
         const auto mix = [&](std::uint64_t value) {

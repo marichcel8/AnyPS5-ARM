@@ -1,0 +1,111 @@
+#ifndef CORE_LIBS_PRX_LIBSCEAGCDRIVER_TESTS_MSLCOMPUTEPROGRAMS_HPP
+#define CORE_LIBS_PRX_LIBSCEAGCDRIVER_TESTS_MSLCOMPUTEPROGRAMS_HPP
+
+#include "Recompiler.hpp"
+#include "MslBackend/MslEmitter.hpp"
+#include <cstdint>
+#include <string_view>
+#include <vector>
+
+namespace MslComputePrograms {
+
+inline constexpr std::uint32_t Threads = 64u;
+inline constexpr std::uint32_t BufferGuestBase = 0x10000000u;
+inline constexpr std::uint64_t BdaGuestBase = 0x120000000ull;
+inline constexpr std::uint32_t BufferStore = 0xe0702000u;
+inline constexpr std::uint32_t BufferStoreOperands = 0x80000100u;
+inline constexpr std::uint32_t EndProgram = 0xbf810000u;
+
+enum class Expect { Plus5, Swapped, FirstLanePlus, LowHalfSeven, Half, Times4, CounterAt0, QuadSwap, RowShift, Mirror, SwapHalf, ReverseHalf, RotateHalf, ReadLane5, Ballot32, Ballot64, ReadLane37, FirstUpperPlus };
+
+inline constexpr std::uint32_t Wave32 = 1u;
+inline constexpr std::uint32_t Wave64 = 2u;
+inline constexpr std::uint32_t BothWaves = Wave32 | Wave64;
+
+struct Program {
+    std::string_view name;
+    std::vector<std::uint32_t> code;
+    std::string_view marker;
+    Expect expect;
+    bool bda = false;
+    std::uint32_t waves = Wave32;
+};
+
+inline std::uint32_t Expected(Expect expect, std::uint32_t lane) {
+    switch (expect) {
+    case Expect::Plus5: return lane + 5u;
+    case Expect::Swapped: return lane ^ 1u;
+    case Expect::FirstLanePlus: return (lane & ~31u) + lane;
+    case Expect::LowHalfSeven: return lane < 16u ? 7u : 3u;
+    case Expect::Half: return lane / 2u;
+    case Expect::Times4: return lane * 4u;
+    case Expect::CounterAt0: return lane == 0u ? Threads : 0u;
+    case Expect::QuadSwap: return lane ^ 1u;
+    case Expect::RowShift: return (lane & 15u) == 0u ? 100u : lane - 1u;
+    case Expect::Mirror: return lane ^ 15u;
+    case Expect::SwapHalf: return lane ^ 16u;
+    case Expect::ReverseHalf: return (lane & ~31u) | (31u - (lane & 31u));
+    case Expect::RotateHalf: return (lane & ~31u) | ((lane + 31u) & 31u);
+    case Expect::ReadLane5: return (lane & ~31u) + 5u;
+    case Expect::Ballot32: return lane < 32u ? 0xffe00000u : 0xffffffffu;
+    case Expect::Ballot64: return 0x001fffffu;
+    case Expect::ReadLane37: return 37u;
+    case Expect::FirstUpperPlus: return lane > 32u ? 33u + lane : 0u;
+    }
+    return 0u;
+}
+
+inline std::vector<Program> Programs() {
+    return {
+        {"vector add", {0x4a020085u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_buffer_store", Expect::Plus5},
+        {"lds exchange", {0x34040082u, 0xd8340000u, 0x00000002u, 0xbf8cc07fu, 0xbf8a0000u, 0x3a060484u, 0xd8d80000u, 0x01000003u, 0xbf8cc07fu, BufferStore, BufferStoreOperands, EndProgram}, "threadgroup uint aps5_lds", Expect::Swapped},
+        {"readfirstlane", {0x7e080500u, 0x4a020004u, BufferStore, BufferStoreOperands, EndProgram}, "simd_broadcast_first", Expect::FirstLanePlus},
+        {"exec mask select", {0x7e020283u, 0x7d880090u, 0xbe883c6au, 0x7e020287u, 0x887e087eu, BufferStore, BufferStoreOperands, EndProgram}, "7u : 3u", Expect::LowHalfSeven},
+        {"execz branch", {0x7e020283u, 0x7d880090u, 0xbe883c6au, 0xbf880001u, 0x7e020287u, 0x887e087eu, BufferStore, BufferStoreOperands, EndProgram}, "simd_any", Expect::LowHalfSeven},
+        {"float convert", {0x7e020d00u, 0x100202f0u, 0x7e020f01u, BufferStore, BufferStoreOperands, EndProgram}, "float(", Expect::Half},
+        {"scalar loop", {0xbe880380u, 0x7e020280u, 0x4a020300u, 0x80088108u, 0xbf0a8408u, 0xbf85fffcu, BufferStore, BufferStoreOperands, EndProgram}, "while (true)", Expect::Times4},
+        {"buffer atomic", {0x7e020281u, 0xe0c80000u, 0x80000100u, EndProgram}, "aps5_atomic(", Expect::CounterAt0},
+        {"global store", {0x34040082u, 0x4a020085u, 0xdc708000u, 0x00040102u, EndProgram}, "aps5_bda_store", Expect::Plus5, true},
+        {"dpp quad swap", {0x7e0202fau, 0xff00b100u, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle_xor", Expect::QuadSwap, false, BothWaves},
+        {"dpp row shift", {0x7e0202ffu, 0x00000064u, 0x7e0202fau, 0xff011100u, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle_up", Expect::RowShift, false, BothWaves},
+        {"dpp row mirror", {0x7e0202fau, 0xff014000u, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle_xor", Expect::Mirror, false, BothWaves},
+        {"ds swizzle", {0xd8d4401fu, 0x01000000u, 0xbf8cc07fu, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle_xor", Expect::SwapHalf, false, BothWaves},
+        {"ds bpermute", {0x3a04009fu, 0x34040482u, 0xdacc0000u, 0x01000002u, 0xbf8cc07fu, BufferStore, BufferStoreOperands, EndProgram}, "aps5_ballot32", Expect::ReverseHalf, false, BothWaves},
+        {"ds permute", {0x4a040081u, 0x3604049fu, 0x34040482u, 0xdac80000u, 0x01000002u, 0xbf8cc07fu, BufferStore, BufferStoreOperands, EndProgram}, "aps5_permute", Expect::RotateHalf, false, BothWaves},
+        {"permlane16", {0xbe8403ffu, 0x89abcdefu, 0xbe8503ffu, 0x01234567u, 0xd7770001u, 0x00140900u, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle", Expect::Mirror, false, BothWaves},
+        {"readlane", {0xd7600004u, 0x00010b00u, 0x7e020204u, BufferStore, BufferStoreOperands, EndProgram}, "simd_shuffle(", Expect::ReadLane5},
+        {"ballot", {0xd4c10008u, 0x00020094u, 0x7e020208u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_ballot32", Expect::Ballot32},
+        {"wave64 ballot", {0xd4c10008u, 0x00020094u, 0x7e020209u, 0x3a020208u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_ballot64", Expect::Ballot64, false, Wave64},
+        {"wave64 readlane", {0xd7600004u, 0x00014b00u, 0x7e020204u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_read64", Expect::ReadLane37, false, Wave64},
+        {"wave64 readfirstlane", {0xd4c10008u, 0x000200a0u, 0xbefe0408u, 0x7e080500u, 0x4a020004u, BufferStore, BufferStoreOperands, EndProgram}, "aps5_readfirst64", Expect::FirstUpperPlus, false, Wave64},
+        {"wave64 execz branch", {0x7e020283u, 0xd4c40008u, 0x00020090u, 0xbe8a2408u, 0xbf880001u, 0x7e020287u, 0xbefe040au, BufferStore, BufferStoreOperands, EndProgram}, "aps5_any64", Expect::LowHalfSeven, false, Wave64},
+    };
+}
+
+inline std::vector<std::uint32_t> UserData() {
+    return {BufferGuestBase, 0x00040000u, Threads, 0x00027facu, static_cast<std::uint32_t>(BdaGuestBase), static_cast<std::uint32_t>(BdaGuestBase >> 32u)};
+}
+
+inline ShaderRecompiler::RecompileRequest Request(const Program& program, std::uint64_t address, const std::vector<std::uint32_t>& userData, std::uint32_t waveSize = 32u) {
+    using namespace ShaderRecompiler;
+    RecompileRequest request{};
+    request.shader = {ShaderStage::Compute, address, program.code, 0, {}};
+    request.context.waveSize = waveSize;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{Threads, 1u, 1u}, Threads, {false, false, false}, false, 1u};
+    request.backend = ShaderBackendKind::Msl;
+    request.msl.simdgroupSize = 32;
+    request.msl.bdaAbiVersion = 1;
+    request.msl.maxThreadgroupSize = {1024u, 1024u, 1024u};
+    request.msl.maxThreadsPerThreadgroup = 1024;
+    request.msl.maxThreadgroupMemoryBytes = 32768;
+    request.target = MslFrontendTarget(request.msl);
+    request.layout = {0, 0, 0, 128};
+    request.useCache = false;
+    return request;
+}
+
+}
+
+#endif

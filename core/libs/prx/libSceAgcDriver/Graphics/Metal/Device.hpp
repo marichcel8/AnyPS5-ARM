@@ -4,6 +4,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestWindows.hpp"
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -62,6 +63,10 @@ public:
     NativeBuffer NewPrivateBuffer(std::uint64_t bytes, const char* label);
     void ReleaseBuffer(const NativeBuffer& buffer);
 
+    void AddResidentAllocation(void* allocation);
+    void RetireAllocation(void* allocation, std::function<void()> destroy);
+    void Defer(std::function<void()> destroy);
+
     void FlushResidency();
     std::uint64_t Submit(QueueKind queue, void* const* commandBuffers, std::size_t count);
     std::uint64_t SubmitPresent(QueueKind queue, void* drawable, void* const* commandBuffers, std::size_t count);
@@ -69,6 +74,9 @@ public:
     std::uint64_t CompletedSerial(QueueKind queue) const;
     bool WaitSerial(QueueKind queue, std::uint64_t serial, std::uint32_t timeoutMs);
     bool WaitIdle(std::uint32_t timeoutMs);
+    void* NativeTimeline(QueueKind queue) const;
+    void WaitOnQueue(QueueKind waiter, QueueKind signaler, std::uint64_t serial);
+    void WaitOnEvent(QueueKind waiter, void* sharedEvent, std::uint64_t value);
     void Collect();
 
     MemoryReport Memory() const;
