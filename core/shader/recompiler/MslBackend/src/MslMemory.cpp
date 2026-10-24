@@ -1,6 +1,7 @@
 #include "MslState.hpp"
 #include "BdaAbi.hpp"
 #include "FlatApertures.hpp"
+#include "SpirvBackend/SpirvBufferFormat.hpp"
 #include <algorithm>
 #include <functional>
 
@@ -61,7 +62,6 @@ std::uint32_t BufferElement(State& state, const IrValue& inst, const MemoryInfo&
 std::string VSharp(State& state, const IrValue& inst, const MemoryInfo& mem) {
     const IrValue* handle = inst.Argument(0)->Resolve();
     if (handle->Opcode() != IrOpcode::GetBufferResource || handle->ArgumentCount() != 4u) Fail(inst, "requires a runtime four-dword V#");
-    if (mem.formatted) throw MslUnsupported("MSL backend: formatted buffer access is not emitted (section S3)");
     std::string words;
     for (std::size_t index = 0; index < 4u; ++index) words += Arg(state, *handle, index) + ", ";
     std::string element = "0u";
@@ -85,6 +85,69 @@ std::string BufferLoad(State& state, const IrValue& inst, const MemoryInfo& mem,
     return "aps5_buffer_load(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ", " + U32(bytes) + ")";
 }
 
+std::string Uint3(std::uint32_t x, std::uint32_t y, std::uint32_t z) {
+    return "uint3(" + U32(x) + ", " + U32(y) + ", " + U32(z) + ")";
+}
+
+std::string FormatInfo(const SpirvBufferFormatInfo& info) {
+    std::uint32_t layout = info.componentCount | (info.packedBitfield ? 8u : 0u) | (static_cast<std::uint32_t>(info.type) << 4u);
+    std::uint32_t bytes = 0;
+    std::uint32_t bits = 0;
+    for (std::uint32_t component = 0; component < info.componentCount; ++component) {
+        layout |= info.componentBits[component] << (8u + component * 6u);
+        bytes |= GetFormatComponentByteOffset(info, component) << (component * 8u);
+        bits |= info.componentBitOffset[component] << (component * 8u);
+    }
+    return Uint3(layout, bytes, bits);
+}
+
+struct FormatArgs {
+    std::string info;
+    std::string sel;
+};
+
+FormatArgs FormatOf(State& state, const IrValue& inst, const MemoryInfo& mem, const std::string& resource) {
+    state.features |= Formatted;
+    if (mem.typed) {
+        const auto info = GetFormatInfo(DecodeTBufferFormat(mem.dataFormat, mem.numberFormat));
+        if (info.type == SpirvFormatComponentType::Unknown) Fail(inst, "typed buffer instruction has an invalid format");
+        std::uint32_t sel = 0;
+        for (std::uint32_t output = 0; output < 4u; ++output) sel |= (output < info.componentCount ? 4u + output : 0u) << (output * 3u);
+        return {FormatInfo(info), U32(sel)};
+    }
+    const IrValue* word = inst.Argument(0)->Resolve()->Argument(3)->Resolve();
+    if (mem.gpuDescriptor && word->HasImmediate()) {
+        const auto format = static_cast<IrBufferFormat>((word->ImmediateU32() >> 12u) & 0x7fu);
+        if (format == IrBufferFormat::Invalid) Fail(inst, "formatted buffer instruction has an invalid constant format");
+        return {FormatInfo(GetFormatInfo(format)), resource + ".word3"};
+    }
+    return {"aps5_fmt_info(extract_bits(" + resource + ".word3, 12u, 7u))", resource + ".word3"};
+}
+
+std::string FormatTarget(State& state, const IrValue& inst, const MemoryInfo& mem) {
+    if (mem.gpuDescriptor) return "_gpu(aps5_c, 0u, ";
+    return "(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", ";
+}
+
+void LoadFormatted(State& state, const IrValue& inst, const MemoryInfo& mem, std::uint32_t components, const std::string& result) {
+    const auto resource = VSharp(state, inst, mem);
+    const auto format = FormatOf(state, inst, mem, resource);
+    const auto offset = Typed(state, inst, 2u) + " + " + U32(mem.offset);
+    const bool check = mem.gpuDescriptor && !mem.typed;
+    static constexpr std::string_view Swizzles[4] = {".x", ".xy", ".xyz", ""};
+    Line(state, result + " = aps5_fmt_load" + FormatTarget(state, inst, mem) + resource + ", " + offset + ", " + Typed(state, inst, 3u) + ", " + format.info + ", " + format.sel + ", " + U32(components) + ", " + (mem.d16 ? "true" : "false") + ", " + (check ? "true" : "false") + ", " + Pc(inst) + ")" + std::string(Swizzles[components - 1u]) + ";");
+}
+
+void StoreFormatted(State& state, const IrValue& inst, const MemoryInfo& mem, std::uint32_t components) {
+    const auto resource = VSharp(state, inst, mem);
+    const auto format = FormatOf(state, inst, mem, resource);
+    if (mem.gpuDescriptor) state.features |= BdaWrites;
+    const auto offset = Typed(state, inst, 2u) + " + " + U32(mem.offset);
+    static constexpr std::string_view Padding[4] = {", 0u, 0u, 0u", ", 0u, 0u", ", 0u", ""};
+    const auto data = "uint4(" + Typed(state, inst, inst.ArgumentCount() - 2u) + std::string(Padding[components - 1u]) + ")";
+    Line(state, "aps5_fmt_store" + FormatTarget(state, inst, mem) + resource + ", " + offset + ", " + Typed(state, inst, 3u) + ", " + format.info + ", " + U32(components) + ", " + data + ", " + (mem.d16 ? "true" : "false") + ", " + Pc(inst) + ");");
+}
+
 void LoadBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     const auto& mem = Memory(state, inst);
     if (mem.planningOnly) {
@@ -94,6 +157,13 @@ void LoadBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     if (mem.kind != ResourceKind::Buffer) Fail(inst, "must access a buffer resource");
     const auto result = Result(state, inst);
     OpenActive(state, Active(state, inst));
+    if (mem.formatted) {
+        LoadFormatted(state, inst, mem, components, result);
+        Close(state);
+        if (mem.gpuDescriptor) StopCheck(state);
+        Define(state, inst, result);
+        return;
+    }
     const auto resource = VSharp(state, inst, mem);
     const auto offset = Typed(state, inst, 2u);
     const auto soffset = Typed(state, inst, 3u);
@@ -114,6 +184,12 @@ void StoreBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     const auto& mem = Memory(state, inst);
     if (mem.kind != ResourceKind::Buffer) Fail(inst, "must access a buffer resource");
     OpenActive(state, Active(state, inst));
+    if (mem.formatted) {
+        StoreFormatted(state, inst, mem, components);
+        Close(state);
+        if (mem.gpuDescriptor) StopCheck(state);
+        return;
+    }
     const auto resource = VSharp(state, inst, mem);
     const auto offset = Typed(state, inst, 2u);
     const auto soffset = Typed(state, inst, 3u);
