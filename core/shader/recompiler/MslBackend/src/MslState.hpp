@@ -3,6 +3,7 @@
 
 #include "MslBackend/MslEmitter.hpp"
 #include <cstdint>
+#include <map>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -32,7 +33,9 @@ enum Feature : std::uint32_t {
     Descriptors = 1u << 17u,
     Wave = 1u << 18u,
     WaveExchange = 1u << 19u,
-    Permute = 1u << 20u
+    Permute = 1u << 20u,
+    Images = 1u << 21u,
+    Samplers = 1u << 22u
 };
 
 struct State {
@@ -53,6 +56,8 @@ struct State {
     std::unordered_set<const IrValue*> hoisted;
     std::unordered_set<const IrValue*> defined;
     std::vector<const IrValue*> hoistOrder;
+    std::map<std::uint32_t, std::uint32_t> constants;
+    std::vector<std::string> imageTypes;
 };
 
 [[noreturn]] void Fail(const IrValue& inst, std::string_view reason);
@@ -78,6 +83,7 @@ bool EmitMemory(State& state, const IrValue& inst);
 bool EmitWave(State& state, const IrValue& inst);
 std::string WaveLane(State& state);
 std::string WaveAny(State& state, const std::string& predicate);
+bool EmitImage(State& state, const IrValue& inst);
 void EmitInstruction(State& state, const IrValue& inst);
 void EmitBlockBody(State& state, const IrBlock& block);
 void EmitFlow(State& state);

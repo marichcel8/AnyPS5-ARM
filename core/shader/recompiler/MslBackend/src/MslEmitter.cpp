@@ -250,6 +250,8 @@ std::string Parameters(const State& state) {
     if (has(Fault)) parameters.push_back("device atomic_uint* aps5_fault_buffer [[buffer(" + slot(MetalAbi::BufferSlot::FaultBuffer) + ")]]");
     if (has(FlattenedSrt)) parameters.push_back("device const uint* aps5_srt [[buffer(" + slot(MetalAbi::BufferSlot::FlattenedSrt) + ")]]");
     if (has(GuestBuffers)) parameters.push_back("device const aps5_guest_buffer* aps5_buffers [[buffer(" + slot(MetalAbi::BufferSlot::GuestBuffers) + ")]]");
+    if (has(Images)) parameters.push_back("device const ulong* aps5_images [[buffer(" + slot(MetalAbi::BufferSlot::GuestImages) + ")]]");
+    if (has(Samplers)) parameters.push_back("device const ulong* aps5_samplers [[buffer(" + slot(MetalAbi::BufferSlot::GuestSamplers) + ")]]");
     if (has(WorkgroupId)) parameters.push_back("uint3 aps5_group [[threadgroup_position_in_grid]]");
     if (has(LocalId)) parameters.push_back("uint3 aps5_local [[thread_position_in_threadgroup]]");
     if (has(GlobalId)) parameters.push_back("uint3 aps5_global [[thread_position_in_grid]]");

@@ -681,6 +681,7 @@ bool EmitMemory(State& state, const IrValue& inst) {
     case IrOpcode::StoreVectorWindow: StoreVectorWindow(state, inst); return true;
     default: break;
     }
+    if (EmitImage(state, inst)) return true;
     const auto name = IrOpcodeName(inst.Opcode());
     if (name.starts_with("Image") || name.starts_with("LoadImage") || name.starts_with("StoreImage")) throw MslUnsupported("MSL backend: " + std::string(name) + " is not emitted (images are section S3)");
     if (name.starts_with("BufferAtomic") || name.starts_with("AddressAtomic") || name.starts_with("SharedAtomic")) throw MslUnsupported("MSL backend: " + std::string(name) + " is not emitted (64-bit atomics are section S5)");
