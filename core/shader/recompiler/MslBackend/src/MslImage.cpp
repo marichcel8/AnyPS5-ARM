@@ -194,7 +194,8 @@ std::string TextureRef(State& state, const ImageResource& image, std::uint32_t e
         return "((device const " + Wrapper(state, type) + "*)" + (image.resourceClass == ImageResourceClass::Storage ? "aps5_storage_table" : "aps5_image_table") + ")[" + table->element + "].t";
     }
     state.features |= Images;
-    return "((device const " + Wrapper(state, type) + "*)aps5_images)[" + U32(MetalAbi::GuestImageIndex(static_cast<std::uint32_t>(kind), element)) + "].t";
+    const auto index = Constant(state, PipelineSpecialization::DescriptorIndex(static_cast<std::uint32_t>(kind), element), element);
+    return "((device const " + Wrapper(state, type) + "*)aps5_images)[" + U32(MetalAbi::GuestImageIndex(static_cast<std::uint32_t>(kind), 0u)) + " + " + index + "].t";
 }
 
 bool PointSampled(const State& state, const ImageResource& image, std::uint32_t sampler) {
@@ -210,7 +211,7 @@ std::string SamplerRef(State& state, const ImageResource& image, std::uint32_t s
     }
     state.features |= Samplers;
     const auto element = ElementOf(state, DescriptorBindingKind::Samplers, sampler) + (point ? 1u : 0u);
-    return "((device const aps5_sampler*)aps5_samplers)[" + U32(element) + "].s";
+    return "((device const aps5_sampler*)aps5_samplers)[" + Constant(state, PipelineSpecialization::DescriptorIndex(static_cast<std::uint32_t>(DescriptorBindingKind::Samplers), element), element) + "].s";
 }
 
 std::string AddressU32(const Access& access, std::uint32_t component) {
