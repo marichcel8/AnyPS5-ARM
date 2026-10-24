@@ -104,12 +104,20 @@ public enum RemoteMessage: Codable, Equatable, Sendable {
     case trophy(name: String, detail: String, grade: String, icon: String?)
     /// What the launcher is doing with a game, sent as it changes; nil once it is done.
     case activity(RemoteActivity?)
+    /// The launcher's theme for the phone to wear: its deep and middle tones and its accent, #RRGGBB.
+    case look(deep: String, middle: String, accent: String)
+    /// Remote Play: the phone wants the game's picture and sound at about this size, or no more.
+    case stream(on: Bool, width: Int, height: Int)
+    /// The phone lost part of the picture and waits for a key frame.
+    case keyFrame
+    /// How Remote Play is going for the phone: on, off, noPermission (screen recording) or noGame.
+    case streaming(state: String)
 
     public static let protocolVersion = 1
 
     enum CodingKeys: String, CodingKey {
         case type, `protocol`, deviceID, deviceName, key, code, session, udpPort, macName, reason, milliseconds
-        case games, selected, running, language, id, icon, background, name, layout, detail, grade, activity
+        case games, selected, running, language, id, icon, background, name, layout, detail, grade, activity, deep, middle, accent, on, width, height, state
     }
 
     public init(from decoder: Decoder) throws {
@@ -156,6 +164,15 @@ public enum RemoteMessage: Codable, Equatable, Sendable {
                            grade: try values.decode(String.self, forKey: .grade), icon: try values.decodeIfPresent(String.self, forKey: .icon))
         case "activity":
             self = .activity(try values.decodeIfPresent(RemoteActivity.self, forKey: .activity))
+        case "stream":
+            self = .stream(on: try values.decode(Bool.self, forKey: .on), width: try values.decodeIfPresent(Int.self, forKey: .width) ?? 0,
+                           height: try values.decodeIfPresent(Int.self, forKey: .height) ?? 0)
+        case "keyFrame":
+            self = .keyFrame
+        case "streaming":
+            self = .streaming(state: try values.decode(String.self, forKey: .state))
+        case "look":
+            self = .look(deep: try values.decode(String.self, forKey: .deep), middle: try values.decode(String.self, forKey: .middle), accent: try values.decode(String.self, forKey: .accent))
         case let other:
             throw DecodingError.dataCorruptedError(forKey: .type, in: values, debugDescription: "unknown message type \(other)")
         }
@@ -225,6 +242,21 @@ public enum RemoteMessage: Codable, Equatable, Sendable {
         case .activity(let activity):
             try values.encode("activity", forKey: .type)
             try values.encode(activity, forKey: .activity)
+        case .stream(let on, let width, let height):
+            try values.encode("stream", forKey: .type)
+            try values.encode(on, forKey: .on)
+            try values.encode(width, forKey: .width)
+            try values.encode(height, forKey: .height)
+        case .keyFrame:
+            try values.encode("keyFrame", forKey: .type)
+        case .streaming(let state):
+            try values.encode("streaming", forKey: .type)
+            try values.encode(state, forKey: .state)
+        case .look(let deep, let middle, let accent):
+            try values.encode("look", forKey: .type)
+            try values.encode(deep, forKey: .deep)
+            try values.encode(middle, forKey: .middle)
+            try values.encode(accent, forKey: .accent)
         }
     }
 
@@ -246,6 +278,10 @@ public enum RemoteMessage: Codable, Equatable, Sendable {
         case .home: return "home"
         case .saveLayout(_, let layout): return "saveLayout(\(layout?.count ?? 0) bytes)"
         case .trophy(let name, _, let grade, _): return "trophy(\(grade), \(name))"
+        case .look(_, _, let accent): return "look(\(accent))"
+        case .stream(let on, let width, let height): return "stream(\(on) \(width)x\(height))"
+        case .keyFrame: return "keyFrame"
+        case .streaming(let state): return "streaming(\(state))"
         case .activity(let activity): return "activity(\(activity.map { "\($0.phase.rawValue) \($0.fraction.map { String(format: "%.2f", $0) } ?? "-")" } ?? "none"))"
         }
     }

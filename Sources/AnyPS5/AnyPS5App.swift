@@ -52,6 +52,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    /// anyps5:// links, and folders opened with AnyPS5 from Finder.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated { AppModel.received(urls) }
+    }
 }
 
 struct RootView: View {
@@ -122,6 +127,9 @@ struct RootView: View {
                 SidePanel(title: model.overlay == .confirmUninstall ? T.text(.uninstall) : game.name, subtitle: T.text(subtitleKey))
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
+        case .themes, .studio:
+            SidePanel(title: T.text(model.overlay == .studio ? .themeStudio : .themes), subtitle: T.text(model.overlay == .studio ? .themeStudioSubtitle : .themesDetail))
+                .transition(.move(edge: .trailing).combined(with: .opacity))
         case .log:
             LogView().transition(.opacity)
         case .trophies:

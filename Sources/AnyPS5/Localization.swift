@@ -43,7 +43,7 @@ enum T {
         case stepUnwrap, stepRelink, stepCopy, stepBundle, stepFinish
         case titleID, version, size, status, folder
         case gameSettings, resolution, resolutionDefault, display, windowed, fullscreen, windowSize, vsync, on, off
-        case overlay, overlayOff, overlayTopLeft, overlayTopRight, overlayBottomLeft, overlayBottomRight, overlayStyle, overlayMinimal, overlayDetailed, frameGeneration, frameGenerationDetail, frameGenerationLowPower, saveSync, saveSyncDetail, saveSyncNoFolder, syncFolder, syncFolderICloud, syncFolderNone, savesSyncedFrom, saveSyncFailed, clips, clipsDetail, clipLength, seconds, clipsNeedPermission, clipsNeedPermissionDetail, clipsOff, clipsOffDetail, clipSaved, clipSavedDetail, clipFailed, lowPowerTitle, lowPowerFrameGeneration, lowPowerRefresh, gameLanguage, followLauncher
+        case overlay, overlayOff, overlayTopLeft, overlayTopRight, overlayBottomLeft, overlayBottomRight, overlayStyle, overlayMinimal, overlayDetailed, frameGeneration, frameGenerationDetail, frameGenerationLowPower, linkNoGame, folderNoGames, useGamesFolder, useGamesFolderDetail, useGamesFolderConfirm, copyLink, linkCopied, saveSync, saveSyncDetail, saveSyncNoFolder, syncFolder, syncFolderICloud, syncFolderNone, savesSyncedFrom, saveSyncFailed, clips, clipsDetail, clipLength, seconds, clipsNeedPermission, clipsNeedPermissionDetail, clipsOff, clipsOffDetail, clipSaved, clipSavedDetail, clipFailed, lowPowerTitle, lowPowerFrameGeneration, lowPowerRefresh, gameLanguage, followLauncher
         case reinstall, showInFinder, openLog, uninstall, clearShaderCache, uninstallConfirm, uninstallDone, cacheCleared
         case appearance, theme, accent, background, backgroundTheme, backgroundImage, backgroundVideo, chooseFile, gameArtwork
         case motion, motionFull, motionReduced, sounds, language, storage, rescan, installedSize, about, aboutText, toolkitVersion
@@ -53,7 +53,8 @@ enum T {
         case themeCosmic, themeAurora, themeSunset, hintMove, hintGame, hintSelect, hintBack, hintOptions
         case unlockFailed, startFailed, gameEnded, logTitle, close, quit, confirm
         case unreadableDump
-        case controls, controlsHint, pressKey, resetControls, noKey, dpad, leftStick, rightStick, touchpadLeft, touchpadRight
+        case remotePlayNeedsPermission, remotePlayPermissionTitle, themes, themesDetail, themeStudio, themeStudioDetail, themeStudioSubtitle, themesOnMac, themesHub, hubLoading, hubFailed, hubEmpty, installThemeFile, themeBy, themeActive, themeInstalled, themeDownloading, themeInstallFailed, themeSaveFailed, themeSaved, themeName, themeAuthor, themeMotion, themeHue, themeHighlight, themeDepth, themeAccent, themeBackground, themeNoFile, themeRemoveBackground, themeMusic, themeMusicDetail, themeRemoveMusic, exportTheme, exportThemeDetail, shareTheme, shareThemeDetail, shareThemeHint, themeShareNext, deleteTheme, newThemeName
+        case controls, controlsHint, controlsFromGame, pressKey, resetControls, noKey, dpad, leftStick, rightStick, touchpadLeft, touchpadRight
         case directionUp, directionDown, directionLeft, directionRight, keySpace, keyEnter
         case mouseLeft, mouseRight, mouseMiddle, mouseBack, mouseForward, wheelUp, wheelDown
         case trophies, trophyHidden, trophyHiddenDetail, trophyLocked, gradePlatinum, gradeGold, gradeSilver, gradeBronze
@@ -65,6 +66,47 @@ enum T {
     }
 
     static let turkish: [Key: String] = [
+        .remotePlayPermissionTitle: "Remote Play için izin gerekli",
+        .remotePlayNeedsPermission: "Oyunu telefona göndermek için Sistem Ayarları > Gizlilik > Ekran Kaydı'nda AnyPS5'e izin ver.",
+        .themes: "Temalar",
+        .themesDetail: "Seninkiler ve paylaşılanlar",
+        .themeStudio: "Tema Stüdyosu",
+        .themeStudioDetail: "Kendi görünümünü canlı yap",
+        .themeStudioSubtitle: "Her değişiklik anında görünür",
+        .themesOnMac: "Bu Mac'te",
+        .themesHub: "AnyPS5 Hub",
+        .hubLoading: "Hub'a bakılıyor…",
+        .hubFailed: "Hub'a ulaşılamadı. Tekrar dene",
+        .hubEmpty: "Henüz paylaşılan yok",
+        .installThemeFile: "Dosyadan kur…",
+        .themeBy: "yapan: %@",
+        .themeActive: "Kullanımda",
+        .themeInstalled: "%@ kuruldu",
+        .themeDownloading: "%@ indiriliyor…",
+        .themeInstallFailed: "Tema kurulamadı",
+        .themeSaveFailed: "Tema kaydedilemedi",
+        .themeSaved: "Tema kaydedildi",
+        .themeName: "Ad",
+        .themeAuthor: "Yapan",
+        .themeMotion: "Hareket",
+        .themeHue: "Renk",
+        .themeHighlight: "Parıltı",
+        .themeDepth: "Aydınlık",
+        .themeAccent: "Vurgu",
+        .themeBackground: "Resim ya da video",
+        .themeNoFile: "Yok",
+        .themeRemoveBackground: "Resmi kaldır",
+        .themeMusic: "Menü müziği",
+        .themeMusicDetail: "Seçili oyunun şarkısı yoksa çalar",
+        .themeRemoveMusic: "Müziği kaldır",
+        .exportTheme: "Dosya olarak kaydet…",
+        .exportThemeDetail: "Tek bir .anyps5theme dosyası, istediğine ver",
+        .shareTheme: "Hub'da paylaş",
+        .shareThemeDetail: "Dosyayı kaydeder, gönderme sayfasını açar",
+        .shareThemeHint: "Kullandığın tema, Stüdyo'dan",
+        .themeShareNext: "Açılan sayfaya dosyayı ekle",
+        .deleteTheme: "Temayı sil",
+        .newThemeName: "Temam",
         .welcome: "AnyPS5'e hoş geldin",
         .welcomeSubtitle: "PS5 oyunlarını Mac'inde oyna. Önce birkaç şeyi ayarlayalım.",
         .chooseLanguage: "Dil",
@@ -128,6 +170,13 @@ enum T {
         .frameGeneration: "Ara Kare Üretimi",
         .frameGenerationDetail: "Deneysel · her iki karenin arasına bir kare; dikey senkronizasyonu açar",
         .frameGenerationLowPower: "Düşük Güç Modu açık: ekran 60 Hz'de kalıyor, ara kare çalışmaz",
+        .linkNoGame: "%@ kütüphanende yok",
+        .folderNoGames: "Bu klasörde PS5 oyunu yok",
+        .useGamesFolder: "Oyun klasörü “%@” olsun mu?",
+        .useGamesFolderDetail: "İçinde %d oyun var: %@. Launcher oyunlarını bundan sonra burada arar.",
+        .useGamesFolderConfirm: "Oyun Klasörü Yap",
+        .copyLink: "Bağlantıyı Kopyala",
+        .linkCopied: "Bağlantı kopyalandı: tıklayan launcher'da bu oyunu açar",
         .saveSync: "Kayıt Senkronu",
         .saveSyncDetail: "Kayıtlar ve kupalar %@ üzerinden diğer Mac'lerle aynı kalır",
         .saveSyncNoFolder: "Kayıtlar ve kupalar bir klasör üzerinden diğer Mac'lerle aynı kalır; önce klasör seç",
@@ -339,6 +388,7 @@ enum T {
         .gradeSilver: "Gümüş",
         .gradeBronze: "Bronz",
         .controlsHint: "Bir satır seç, sonra atamak istediğin tuşa bas. Esc vazgeçer. Kumanda bağlıysa kendi tuşlarıyla çalışır.",
+        .controlsFromGame: "Her tuşun altında oyunun kendi dosyalarında o tuşa verdiği iş yazıyor.",
         .pressKey: "Bir tuşa bas…",
         .resetControls: "Varsayılan Tuşlara Dön",
         .noKey: "Yok",
@@ -364,6 +414,47 @@ enum T {
     ]
 
     static let english: [Key: String] = [
+        .remotePlayPermissionTitle: "Remote Play needs a permission",
+        .remotePlayNeedsPermission: "To send the game to the phone, allow AnyPS5 in System Settings > Privacy > Screen Recording.",
+        .themes: "Themes",
+        .themesDetail: "Yours and the ones people share",
+        .themeStudio: "Theme Studio",
+        .themeStudioDetail: "Make your own look, live",
+        .themeStudioSubtitle: "Every change shows at once",
+        .themesOnMac: "On this Mac",
+        .themesHub: "AnyPS5 Hub",
+        .hubLoading: "Looking at the Hub…",
+        .hubFailed: "The Hub could not be reached. Try again",
+        .hubEmpty: "Nothing shared yet",
+        .installThemeFile: "Install from a file…",
+        .themeBy: "by %@",
+        .themeActive: "In use",
+        .themeInstalled: "%@ installed",
+        .themeDownloading: "Downloading %@…",
+        .themeInstallFailed: "The theme could not be installed",
+        .themeSaveFailed: "The theme could not be saved",
+        .themeSaved: "Theme saved",
+        .themeName: "Name",
+        .themeAuthor: "Made by",
+        .themeMotion: "Motion",
+        .themeHue: "Color",
+        .themeHighlight: "Highlight",
+        .themeDepth: "Lightness",
+        .themeAccent: "Accent",
+        .themeBackground: "Picture or video",
+        .themeNoFile: "None",
+        .themeRemoveBackground: "Remove the picture",
+        .themeMusic: "Menu music",
+        .themeMusicDetail: "Plays when the selected game has no song",
+        .themeRemoveMusic: "Remove the music",
+        .exportTheme: "Save as a file…",
+        .exportThemeDetail: "One .anyps5theme file, to give to anyone",
+        .shareTheme: "Share on the Hub",
+        .shareThemeDetail: "Saves the file and opens the page to send it",
+        .shareThemeHint: "The theme in use, from the Studio",
+        .themeShareNext: "Attach the file on the page that opened",
+        .deleteTheme: "Delete theme",
+        .newThemeName: "My theme",
         .welcome: "Welcome to AnyPS5",
         .welcomeSubtitle: "Play PS5 games on your Mac. Let's set a few things up first.",
         .chooseLanguage: "Language",
@@ -427,6 +518,13 @@ enum T {
         .frameGeneration: "Frame Generation",
         .frameGenerationDetail: "Experimental · a frame between each two; turns on vertical sync",
         .frameGenerationLowPower: "Low Power Mode is on: the display stays at 60 Hz, so frame generation cannot work",
+        .linkNoGame: "%@ is not in your library",
+        .folderNoGames: "There is no PS5 game in that folder",
+        .useGamesFolder: "Use “%@” as the games folder?",
+        .useGamesFolderDetail: "It holds %d games: %@. The launcher looks for games there from now on.",
+        .useGamesFolderConfirm: "Use as Games Folder",
+        .copyLink: "Copy Link",
+        .linkCopied: "Link copied: opening it shows this game in the launcher",
         .saveSync: "Save Sync",
         .saveSyncDetail: "Saves and trophies stay the same on your other Macs through %@",
         .saveSyncNoFolder: "Saves and trophies stay the same on your other Macs through a folder; choose one first",
@@ -638,6 +736,7 @@ enum T {
         .gradeSilver: "Silver",
         .gradeBronze: "Bronze",
         .controlsHint: "Pick a row, then press the key you want for it. Esc cancels. A connected controller keeps its own buttons.",
+        .controlsFromGame: "Under each button is what the game's own files say it does.",
         .pressKey: "Press a key…",
         .resetControls: "Reset to Default Keys",
         .noKey: "None",

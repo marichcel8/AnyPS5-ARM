@@ -43,11 +43,13 @@ public final class RemoteServer: @unchecked Sendable {
         public var connecting: @Sendable (String?) -> Void
         /// The game said a phone became another player, or none (`phonePlayers`).
         public var players: @Sendable () -> Void
+        /// A phone asked for Remote Play or stopped wanting it (`streamWishes`).
+        public var streamWishes: @Sendable () -> Void
 
         public init(pairing: @escaping @Sendable (PairingRequest) -> Void = { _ in }, connected: @escaping @Sendable (String) -> Void = { _ in },
                     disconnected: @escaping @Sendable () -> Void = {}, latency: @escaping @Sendable (Double) -> Void = { _ in },
                     request: @escaping @Sendable (RemoteMessage) -> Void = { _ in }, connecting: @escaping @Sendable (String?) -> Void = { _ in },
-                    players: @escaping @Sendable () -> Void = {}) {
+                    players: @escaping @Sendable () -> Void = {}, streamWishes: @escaping @Sendable () -> Void = {}) {
             self.pairing = pairing
             self.connected = connected
             self.disconnected = disconnected
@@ -55,6 +57,7 @@ public final class RemoteServer: @unchecked Sendable {
             self.request = request
             self.connecting = connecting
             self.players = players
+            self.streamWishes = streamWishes
         }
     }
 
@@ -69,6 +72,11 @@ public final class RemoteServer: @unchecked Sendable {
         var slot: Int?
         /// Where the phone sends its pad from.
         var address: sockaddr_storage?
+        /// Remote Play's picture size the phone asked for; nil while it wants none.
+        var streamSize: (width: Int, height: Int)?
+        /// The phone sends its pad on this channel (on a cable, with no UDP path), and is
+        /// answered on it.
+        var padOnChannel = false
 
         init(connection: NWConnection) { self.connection = connection }
     }
@@ -223,7 +231,9 @@ public final class RemoteServer: @unchecked Sendable {
                 client.connection.cancel()
                 return
             }
-            if let data, metadata?.opcode == .text || metadata?.opcode == .binary {
+            if let data, metadata?.opcode == .binary, let session = RemotePacket.inputSession(data) {
+                self.padFromChannel(data, session: session, client: client)
+            } else if let data, metadata?.opcode == .text || metadata?.opcode == .binary {
                 if let message = try? JSONDecoder().decode(RemoteMessage.self, from: data) {
                     self.handle(message, from: client)
                 } else {
@@ -262,10 +272,43 @@ public final class RemoteServer: @unchecked Sendable {
             }
         case .latency(let milliseconds):
             if client === phones.first { events.latency(milliseconds) }
-        case .wantArt, .command, .select, .launch, .close, .home, .saveLayout:
+        case .wantArt, .command, .select, .launch, .close, .home, .saveLayout, .keyFrame:
             if phones.contains(where: { $0 === client }) { events.request(message) }
-        case .pairing, .welcome, .rejected, .library, .art, .trophy, .activity:
+        case .stream(let on, let width, let height):
+            guard phones.contains(where: { $0 === client }) else { return }
+            client.streamSize = on ? (max(160, width), max(90, height)) : nil
+            events.streamWishes()
+        case .pairing, .welcome, .rejected, .library, .art, .trophy, .activity, .look, .streaming:
             break
+        }
+    }
+
+    /// The phones that want Remote Play, and the picture size each asked for.
+    public var streamWishes: [(deviceID: String, width: Int, height: Int)] {
+        queue.sync { phones.compactMap { client in client.streamSize.map { (client.deviceID ?? "", $0.width, $0.height) } } }
+    }
+
+    /// Remote Play's packets to every phone that wants them: by UDP to where its pad comes
+    /// from, or on its control channel when it is on a cable.
+    public func sendStream(_ packets: [Data]) {
+        queue.async { [self] in
+            for client in phones where client.streamSize != nil {
+                if client.padOnChannel {
+                    for packet in packets {
+                        let context = NWConnection.ContentContext(identifier: "stream", metadata: [NWProtocolWebSocket.Metadata(opcode: .binary)])
+                        client.connection.send(content: packet, contentContext: context, isComplete: true, completion: .idempotent)
+                    }
+                } else if var address = client.address, phoneSocket >= 0 {
+                    for packet in packets { RemoteServer.send(packet, from: phoneSocket, to: &address) }
+                }
+            }
+        }
+    }
+
+    /// Tells one phone, by device ID, how Remote Play is going.
+    public func tell(_ message: RemoteMessage, deviceID: String) {
+        queue.async { [self] in
+            for client in phones where client.deviceID == deviceID { send(message, to: client) }
         }
     }
 
@@ -305,6 +348,7 @@ public final class RemoteServer: @unchecked Sendable {
             phones.removeAll { $0 === client }
             if let slot = client.slot, gamePlayers.indices.contains(slot) { gamePlayers[slot] = nil }
             events.disconnected()
+            if client.streamSize != nil { events.streamWishes() }
         }
     }
 
@@ -417,6 +461,14 @@ public final class RemoteServer: @unchecked Sendable {
         }
     }
 
+    /// A pad packet on a welcomed phone's own control channel goes to the game as if it had
+    /// come on UDP.
+    private func padFromChannel(_ data: Data, session: UInt64, client: Client) {
+        guard client.session == session, phones.contains(where: { $0 === client }), let slot = client.slot, gameAddresses.indices.contains(slot) else { return }
+        client.padOnChannel = true
+        if var game = gameAddresses[slot] { RemoteServer.send(data, from: bridgeSockets[slot], to: &game) }
+    }
+
     /// A hello names the game to send to on that bridge; its answers go back to the slot's phone.
     private func fromGame(_ slot: Int) {
         while let (data, source) = RemoteServer.receive(bridgeSockets[slot]) {
@@ -428,8 +480,13 @@ public final class RemoteServer: @unchecked Sendable {
                     events.players()
                 }
             } else if RemotePacket.isOutput(data), let game = gameAddresses[slot], RemoteServer.same(source, game),
-                      var phone = phones.first(where: { $0.slot == slot })?.address {
-                RemoteServer.send(data, from: phoneSocket, to: &phone)
+                      let client = phones.first(where: { $0.slot == slot }) {
+                if client.padOnChannel {
+                    let context = NWConnection.ContentContext(identifier: "pad", metadata: [NWProtocolWebSocket.Metadata(opcode: .binary)])
+                    client.connection.send(content: data, contentContext: context, isComplete: true, completion: .idempotent)
+                } else if var phone = client.address {
+                    RemoteServer.send(data, from: phoneSocket, to: &phone)
+                }
             }
         }
     }

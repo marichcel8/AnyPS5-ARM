@@ -12,6 +12,8 @@ struct Preferences: Codable, Equatable {
     var language = Language.english
     var theme = Theme.cosmic
     var accent: AccentColor?
+    /// A made or installed theme (ThemeDesign id) in place of the built-in theme and accent.
+    var customTheme: String?
     var backdrop = Backdrop.theme
     var backdropFile: String?
     var gameArtwork = true
@@ -86,6 +88,9 @@ enum Overlay: Equatable {
     case advanced
     /// The selected game's F12 screenshots.
     case gallery
+    /// The themes on this Mac and on the Hub, and the Theme Studio.
+    case themes
+    case studio
 }
 
 struct Toast: Identifiable, Equatable {
@@ -143,6 +148,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var connectedPhones: [String] = []
     /// Which player each connected phone is in the game playing, from 1, by device ID.
     @Published private(set) var phonePlayers: [String: Int] = [:]
+    /// What each game does with each pad button, by game, read from its own Unreal files the
+    /// first time its controls are opened; empty when they say nothing.
+    @Published private(set) var gameControls: [String: [PadAction: [String]]] = [:]
 
     /// The connected phones as the indicator shows them: by player in a game, a phone not
     /// pressed yet with no number; outside a game, numbered as they connected.
@@ -173,6 +181,10 @@ final class AppModel: ObservableObject {
     private let discord = DiscordPresence(applicationID: DiscordPresence.anyps5ApplicationID)
     private var starts: [String: Date] = [:]
     private var remote: RemoteServer?
+    /// iPhones on a cable reach the phone server through it, with no Wi-Fi.
+    private var cable: UsbTunnel?
+    /// Android phones on a cable, through adb when it is installed.
+    private var androidCable: AdbTunnel?
     private let pairedDevices = PairedDevices()
     /// The library the phone was told last, and what keeps it told.
     private var phoneLibrary: RemoteMessage?
@@ -193,7 +205,15 @@ final class AppModel: ObservableObject {
     init(preferences: Preferences? = nil) {
         self.persists = preferences == nil
         self.preferences = preferences ?? Preferences.load()
+        themes = preferences == nil ? ThemeLibrary() : ThemeLibrary(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-themes"))
+        designs = themes.all
         apply()
+        if persists {
+            AppModel.opener = { [weak self] urls in self?.open(urls) }
+            let waiting = AppModel.pending
+            AppModel.pending = []
+            if !waiting.isEmpty { DispatchQueue.main.async { [weak self] in self?.open(waiting) } }
+        }
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.active = true
@@ -340,10 +360,25 @@ final class AppModel: ObservableObject {
     /// The selected game's song while the launcher is in front and idle, silence otherwise.
     private func updateMusic() {
         let quiet = !preferences.onboarded || !active || running != nil || starting != nil || musicVolume == 0
-        ThemeMusic.shared.play(quiet ? nil : selectedGame)
+        let menuMusic = activeDesign.flatMap { themes.file($0.music, of: $0) }
+        ThemeMusic.shared.play(quiet ? nil : selectedGame, fallback: quiet ? nil : menuMusic)
     }
 
-    var accent: Color { preferences.accentColor }
+    var accent: Color { activeDesign.map { Color(rgb: $0.accentRGB) } ?? preferences.accentColor }
+
+    // MARK: Themes
+
+    /// Previews keep their themes in a folder of their own.
+    let themes: ThemeLibrary
+    /// The themes on this Mac, made here or installed.
+    @Published var designs: [ThemeDesign] = []
+    @Published var hub = HubState.idle
+
+    /// The theme in use, when it is a made or installed one.
+    var activeDesign: ThemeDesign? { preferences.customTheme.flatMap { id in designs.first { $0.id == id } } }
+
+    /// The animated background drawn: the made theme's, else the built-in theme.
+    var lookStyle: Theme { activeDesign.flatMap { Theme(rawValue: $0.style) } ?? preferences.theme }
     var root: URL? { preferences.gamesFolder.map { URL(fileURLWithPath: $0) } }
     var selectedGame: Game? { games.indices.contains(selected) ? games[selected] : nil }
 
@@ -635,6 +670,73 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Links and folders
+
+    /// What macOS hands the app before the model is there, and where it goes once it is.
+    private static var pending: [URL] = []
+    private static var opener: (([URL]) -> Void)?
+
+    static func received(_ urls: [URL]) {
+        if let opener { opener(urls) } else { pending += urls }
+    }
+
+    private func open(_ urls: [URL]) {
+        guard preferences.onboarded else { return }
+        for url in urls {
+            if url.isFileURL && url.pathExtension.lowercased() == ThemeDesign.fileExtension {
+                installTheme(url)
+            } else if url.isFileURL {
+                openFolder(url)
+            } else if let link = DeepLink(url: url) {
+                follow(link)
+            }
+        }
+    }
+
+    private func follow(_ link: DeepLink) {
+        bringLauncherFront()
+        switch link {
+        case .library: open(.library)
+        case .settings: open(.settings)
+        case .game(let id), .play(let id):
+            guard let index = games.firstIndex(where: { $0.titleID == id }) else {
+                return show(T.format(.linkNoGame, id), symbol: "questionmark.folder")
+            }
+            if overlay != nil { closeOverlay() }
+            withAnimation(Motion.focus) { selected = index }
+            if case .play = link { primaryAction(games[index]) }
+        }
+    }
+
+    /// A folder opened with AnyPS5: a game in the library is selected; a game or a folder of
+    /// games elsewhere becomes the games folder, once the user agrees.
+    private func openFolder(_ folder: URL) {
+        bringLauncherFront()
+        if let index = games.firstIndex(where: { $0.folder.standardizedFileURL == folder.standardizedFileURL }) {
+            if overlay != nil { closeOverlay() }
+            withAnimation(Motion.focus) { selected = index }
+            return
+        }
+        let single = GameLibrary.inspect(folder)
+        let root = single != nil ? folder.deletingLastPathComponent() : folder
+        let found = GameLibrary.scan(root)
+        guard !found.isEmpty else { return show(T.text(.folderNoGames), symbol: "questionmark.folder") }
+        let alert = NSAlert()
+        alert.messageText = T.format(.useGamesFolder, root.lastPathComponent)
+        alert.informativeText = T.format(.useGamesFolderDetail, found.count, root.abbreviatedPath)
+        alert.addButton(withTitle: T.text(.useGamesFolderConfirm))
+        alert.addButton(withTitle: T.text(.cancel))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        chooseFolder(root)
+        if let single, let index = games.firstIndex(where: { $0.titleID == single.titleID }) { selected = index }
+    }
+
+    func copyLink(_ game: Game) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(DeepLink.game(game.titleID).url.absoluteString, forType: .string)
+        show(T.text(.linkCopied), symbol: "link")
+    }
+
     // MARK: Save sync
 
     /// The game whose saves are being synced, so it does not start twice meanwhile.
@@ -669,6 +771,42 @@ final class AppModel: ObservableObject {
         if let url = chooseDirectory(start: syncRoot) {
             preferences.syncFolder = url.path
             preferences.saveSync = true
+        }
+    }
+
+    // MARK: Remote Play
+
+    let remotePlay = RemotePlay()
+    /// The running game has a window to send.
+    private var gameWindowShown = false
+
+    /// Sends the running game to the phones that ask for it, at the largest size one asked for
+    /// up to 720p; stops when none asks or no game plays.
+    func updateRemotePlay() {
+        guard let remote else { return }
+        let wishes = remote.streamWishes
+        guard !wishes.isEmpty else {
+            remotePlay.stop()
+            return
+        }
+        guard let pid = running?.app.processIdentifier, gameWindowShown else {
+            remotePlay.stop()
+            for wish in wishes { remote.tell(.streaming(state: "noGame"), deviceID: wish.deviceID) }
+            return
+        }
+        // The phone's long side across: the size it asked for, no more than 1280 x 720.
+        let height = min(720, wishes.map { min($0.width, $0.height) }.max() ?? 720)
+        let width = min(1280, wishes.map { max($0.width, $0.height) }.max() ?? 1280)
+        Task { @MainActor in
+            do {
+                try await self.remotePlay.start(pid: pid, width: width, height: height) { [weak remote] packets in remote?.sendStream(packets) }
+                for wish in wishes { remote.tell(.streaming(state: "on"), deviceID: wish.deviceID) }
+            } catch RemotePlay.Failure.noPermission {
+                for wish in wishes { remote.tell(.streaming(state: "noPermission"), deviceID: wish.deviceID) }
+                TrophyBanner.shared.notice(T.text(.remotePlayPermissionTitle), detail: T.text(.remotePlayNeedsPermission), symbol: "iphone.gen3", sounds: self.preferences.sounds)
+            } catch {
+                for wish in wishes { remote.tell(.streaming(state: "noGame"), deviceID: wish.deviceID) }
+            }
         }
     }
 
@@ -764,6 +902,8 @@ final class AppModel: ObservableObject {
             if let game = running?.game, preferences.discordPresence ?? true { discord.playing(game.name, since: Date()) }
             if let game = running?.game { tellLowPower(about: game) }
             startClips(for: app)
+            gameWindowShown = true
+            updateRemotePlay()
             withAnimation(Motion.overlay) { starting = nil }
             if preferences.hideWhilePlaying { hideWindows() }
         }
@@ -806,6 +946,8 @@ final class AppModel: ObservableObject {
         guard let running, running.app.processIdentifier == pid else { return }
         self.running = nil
         clipRecorder.stop()
+        gameWindowShown = false
+        updateRemotePlay()
         syncSaves(running.game) {}
         discord.clear()
         loadTrophies(running.game, again: true)
@@ -849,6 +991,7 @@ final class AppModel: ObservableObject {
                     TrophyBanner.shared.notice(T.format(.phoneConnected, name), detail: T.text(.phoneConnectedDetail), symbol: "iphone.gen3", sounds: self.preferences.sounds)
                 }
                 self.phoneLibrary = nil
+                self.phoneLookSent = nil
                 self.phoneActivity = nil
                 self.tellPhone()
             } },
@@ -867,7 +1010,8 @@ final class AppModel: ObservableObject {
             } },
             players: { Task { @MainActor in
                 withAnimation(Motion.overlay) { self.phonePlayers = self.remote?.phonePlayers ?? [:] }
-            } })
+            } },
+            streamWishes: { Task { @MainActor in self.updateRemotePlay() } })
         // Whatever the launcher shows changes the library the phone shows.
         librarySink = objectWillChange.debounce(for: .milliseconds(150), scheduler: RunLoop.main).sink { [weak self] _ in
             MainActor.assumeIsolated { self?.tellPhone() }
@@ -877,6 +1021,12 @@ final class AppModel: ObservableObject {
             let server = RemoteServer(name: Host.current().localizedName ?? "Mac", devices: pairedDevices, events: events, controlPort: port, bridgePort: bridge)
             if (try? server.start()) != nil {
                 remote = server
+                if let port = server.controlPort {
+                    cable = UsbTunnel(targetPort: port)
+                    cable?.start()
+                    androidCable = AdbTunnel.locate().map { AdbTunnel(adb: $0, targetPort: port) }
+                    androidCable?.start()
+                }
                 return
             }
         }
@@ -907,6 +1057,16 @@ final class AppModel: ObservableObject {
     func previewPhone(_ name: String, latency: Double?) { phone = (name, latency) }
 
     func previewPhoneConnecting(_ name: String) { phoneConnecting = name }
+
+    func previewThemes(_ shown: [ThemeDesign], active: ThemeDesign?, hub shared: [ThemeDesign]) {
+        designs = shown
+        preferences.customTheme = active?.id
+        hub = .loaded(shared.map { ThemeHub.Theme(design: $0, package: URL(string: "https://example.com/\($0.id).anyps5theme")!, preview: nil) })
+    }
+
+    func previewGameControls(_ controls: [PadAction: [String]]) {
+        if let game = selectedGame { gameControls[game.id] = controls }
+    }
 
     private var previewBadges: [PhoneBadge]?
     func previewPhones(_ badges: [PhoneBadge]) {
@@ -948,12 +1108,27 @@ final class AppModel: ObservableObject {
             phoneActivity = .some(activity)
             remote.publish(.activity(activity))
         }
+        let look = phoneLook
+        if look != phoneLookSent {
+            phoneLookSent = look
+            remote.publish(look)
+        }
         let library = RemoteMessage.library(games: games.map(remoteGame), selected: selectedGame?.id, running: (running?.game ?? starting)?.id,
                                             language: preferences.language.rawValue)
         guard library != phoneLibrary else { return }
         phoneLibrary = library
         remote.publish(library)
     }
+
+    /// The theme in use, as the phone wears it.
+    private var phoneLook: RemoteMessage {
+        let (deep, middle, _) = activeDesign?.palette ?? preferences.theme.palette
+        let accent = NSColor(accent).usingColorSpace(.sRGB) ?? .systemBlue
+        return .look(deep: ThemeDesign.hex(deep), middle: ThemeDesign.hex(middle),
+                     accent: ThemeDesign.hex(SIMD3(Float(accent.redComponent), Float(accent.greenComponent), Float(accent.blueComponent))))
+    }
+
+    private var phoneLookSent: RemoteMessage?
 
     /// What the phone last heard the launcher doing; nil before it heard anything.
     private var phoneActivity: RemoteActivity??
@@ -1005,6 +1180,8 @@ final class AppModel: ObservableObject {
                 remote.publish(.art(id: id, icon: RemoteArt.jpeg(game.icon, longestSide: RemoteArt.iconSide),
                                     background: RemoteArt.jpeg(game.background, longestSide: RemoteArt.backgroundSide)))
             }
+        case .keyFrame:
+            remotePlay.wantKey()
         case .command("capture"):
             // Create on the phone's pad: a clip of the game, the game staying in front.
             saveClip()
@@ -1335,16 +1512,33 @@ final class AppModel: ObservableObject {
 
     // MARK: Overlays and toasts
 
+    private func readControls(_ game: Game) {
+        guard gameControls[game.id] == nil else { return }
+        gameControls[game.id] = [:]
+        let folder = game.folder, id = game.id
+        Task.detached(priority: .utility) {
+            let controls = UnrealControls.read(game: folder) ?? [:]
+            await MainActor.run { withAnimation(Motion.overlay) { self.gameControls[id] = controls } }
+        }
+    }
+
     func open(_ next: Overlay) {
         panelCategory = 0
         panelRow = 0
         panelInRows = next == .gameSettings || next == .confirmUninstall || next == .controls || next == .updateChoice
         // The controls panel opens on its first key, below the hint.
-        if next == .controls { panelRow = 1 }
+        if next == .controls {
+            panelRow = 1
+            if let game = selectedGame { readControls(game) }
+        }
         if next == .trophies { trophyIndex = 0 }
         if next == .gallery { loadGallery() }
         if next == .advanced { panelRow = 1 }
-        panelInRows = panelInRows || next == .advanced
+        panelInRows = panelInRows || next == .advanced || next == .themes || next == .studio
+        if next == .themes {
+            panelRow = themeRows().firstIndex { row in row.id == "design-\(preferences.customTheme ?? "")" || row.id == "builtin-\(preferences.theme.rawValue)" && preferences.customTheme == nil } ?? 1
+            loadHub()
+        }
         withAnimation(Motion.overlay) { overlay = next }
         Sounds.shared.play(.select)
     }
