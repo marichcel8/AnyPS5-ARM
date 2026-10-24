@@ -539,6 +539,10 @@ CompiledVariant emitMslVariant(const RecompileRequest& request, IrProgram& progr
     result.imageMetadataDword = bindings.layout.ImageMetadataDword();
     result.runtimeImageCount = bindings.layout.runtimeImageCount;
     result.hostSubgroupSize = HostSubgroupSize(request);
+    if (inputInfo.compute != nullptr) {
+        const std::array<std::uint32_t, 3> threads{std::max(inputInfo.compute->threadsNum[0], 1u), std::max(inputInfo.compute->threadsNum[1], 1u), std::max(inputInfo.compute->threadsNum[2], 1u)};
+        result.hostThreadgroup = program.WaveSize() == 64u ? std::array<std::uint32_t, 3>{(threads[0] * threads[1] * threads[2] + 63u) / 64u * 32u, 1u, 1u} : threads;
+    }
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
     result.vertexOffsetShared = program.Info().vertexOffsetShared;
@@ -947,6 +951,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         .instanceOffsetConflict = artifact.instanceOffsetConflict,
         .hostSubgroupSize = artifact.hostSubgroupSize,
         .fullSubgroups = artifact.fullSubgroups,
+        .hostThreadgroup = artifact.hostThreadgroup,
         .parameterExports = artifact.parameterExports,
         .fragmentParameters = artifact.fragmentParameters,
         .barycentricEmulation = artifact.barycentricEmulation,
@@ -1633,6 +1638,33 @@ std::shared_ptr<const ResourceCapture> CaptureResources(const RecompileRequest& 
     if (profile) capture->sourceNanoseconds = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
     materializeCapture(*capture, runtime);
     return capture;
+}
+
+namespace {
+
+struct BackendDefaults {
+    ShaderBackendKind backend = ShaderBackendKind::Spirv;
+    MslTarget msl{};
+};
+
+std::atomic<const BackendDefaults*>& CurrentBackendDefaults() {
+    static const BackendDefaults initial{};
+    static std::atomic<const BackendDefaults*> current{&initial};
+    return current;
+}
+
+}
+
+void SetDefaultShaderBackend(ShaderBackendKind backend, const MslTarget& msl) {
+    CurrentBackendDefaults().store(new BackendDefaults{backend, msl}, std::memory_order_release);
+}
+
+ShaderBackendKind DefaultShaderBackend() {
+    return CurrentBackendDefaults().load(std::memory_order_acquire)->backend;
+}
+
+MslTarget DefaultMslTarget() {
+    return CurrentBackendDefaults().load(std::memory_order_acquire)->msl;
 }
 
 RecompileResult Recompile(const RecompileRequest& request) {

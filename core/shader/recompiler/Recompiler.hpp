@@ -386,6 +386,10 @@ struct GraphicsCompileContext {
     GraphicsDrawParameters draw;
 };
 
+void SetDefaultShaderBackend(ShaderBackendKind backend, const MslTarget& msl);
+[[nodiscard]] ShaderBackendKind DefaultShaderBackend();
+[[nodiscard]] MslTarget DefaultMslTarget();
+
 struct RecompileRequest {
     ShaderBinary shader;
     GuestContext context;
@@ -393,8 +397,8 @@ struct RecompileRequest {
     BindingLayout layout;
     std::optional<GraphicsCompileContext> graphics;
     bool useCache = true;
-    ShaderBackendKind backend = ShaderBackendKind::Spirv;
-    MslTarget msl{};
+    ShaderBackendKind backend = DefaultShaderBackend();
+    MslTarget msl = DefaultMslTarget();
 };
 
 inline std::uint32_t TessellationInstancePatches(const RecompileRequest& request) {
@@ -718,6 +722,7 @@ struct CompiledShaderArtifact {
     bool instanceOffsetConflict = false;
     std::uint32_t hostSubgroupSize = 0;
     bool fullSubgroups = false;
+    std::array<std::uint32_t, 3> hostThreadgroup{};
     std::vector<std::uint32_t> parameterExports;
     std::vector<FragmentParameter> fragmentParameters;
     BarycentricEmulation barycentricEmulation;

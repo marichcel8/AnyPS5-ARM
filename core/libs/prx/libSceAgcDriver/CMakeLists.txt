@@ -277,6 +277,11 @@ set(agcDriverVulkanSources
 
 set(agcDriverMetalSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Null/NullBackend.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestTextureResource.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
 )
 
 if(ANYPS5_GPU_BACKEND STREQUAL "Metal")
@@ -335,6 +340,10 @@ if(APS5_ENABLE_TRACY)
     target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
 endif()
 if(APPLE AND ANYPS5_GPU_BACKEND STREQUAL "Metal")
+    add_subdirectory(Graphics/Metal ${CMAKE_CURRENT_BINARY_DIR}/metal)
+    target_link_libraries(libSceAgcDriver PRIVATE agc_metal)
+    set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    set_target_properties(libSceAgcDriver PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)
     target_link_options(libSceAgcDriver PRIVATE
             "$<$<STREQUAL:$<TARGET_PROPERTY:SDL2-static,TYPE>,STATIC_LIBRARY>:LINKER:-force_load,$<TARGET_FILE:SDL2-static>>")
 endif()
@@ -1720,6 +1729,12 @@ foreach(agcExecutionTestSource IN LISTS agcExecutionTestSources)
     get_filename_component(agcExecutionTestName ${agcExecutionTestSource} NAME_WE)
     if(ANYPS5_AGC_EXECUTION_TESTS AND NOT agcExecutionTestName IN_LIST ANYPS5_AGC_EXECUTION_TESTS)
         set(agcExecutionTestSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/ExecutionTestNotBuilt.cpp)
+    elseif(ANYPS5_GPU_BACKEND STREQUAL "Metal")
+        file(READ ${agcExecutionTestSource} agcExecutionTestText)
+        set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${agcExecutionTestSource})
+        if(agcExecutionTestText MATCHES "GetContext|graphicsContext|Graphics::Context|Graphics::Buffer|CommandBatch|DecodeColorBuffer|StorageTexture::Find|FlushAllPending|QueryBda|HostImport|SharedResourceCache|SetImportWatch|ImportWatch|CachedTextures|ClearDepthSurfaces|DepthSurfaceView|PixelEarlyZ|TextureDetiler|\\.Keep\\(|VulkanDeviceTestAccess|BufferPool|SurfaceForTarget|PipelineLibrary|KeyWaitCounts|IndirectDrawCounts|DrawPassTotals|CompareSpans|CompareHelpers|CmaskBytes|Recorder::(Reap|NoteLabel|AfterRecordedWork)|recorder(\\.|->)(Reap|NoteLabel|AfterRecordedWork)|vk[A-Z][A-Za-z]+\\(")
+            set(agcExecutionTestSource ${CMAKE_CURRENT_SOURCE_DIR}/tests/ExecutionTestNotBuilt.cpp)
+        endif()
     endif()
     string(REGEX REPLACE "([a-z0-9])([A-Z])" "\\1_\\2" agcExecutionTestName "${agcExecutionTestName}")
     string(TOLOWER "agc_driver_${agcExecutionTestName}_tests" agcExecutionTest)
@@ -1753,7 +1768,7 @@ if(ANYPS5_ENABLE_SPIRV_TOOLS)
     target_link_libraries(agc_driver_stencil_null_feedback_tests PRIVATE SPIRV-Tools-static)
 endif()
 
-if(NOT ANYPS5_AGC_EXECUTION_TESTS OR "PooledBufferRange" IN_LIST ANYPS5_AGC_EXECUTION_TESTS)
+if(NOT ANYPS5_GPU_BACKEND STREQUAL "Metal" AND (NOT ANYPS5_AGC_EXECUTION_TESTS OR "PooledBufferRange" IN_LIST ANYPS5_AGC_EXECUTION_TESTS))
     target_sources(agc_driver_pooled_buffer_range_tests PRIVATE
             Graphics/src/BufferPool.cpp Graphics/src/Resources.cpp tests/AllocationFailure.cpp tests/CommandBatchFailure.cpp)
 endif()
@@ -2939,9 +2954,18 @@ if(ANYPS5_GPU_BACKEND STREQUAL "Metal")
             set_target_properties(${agcTarget} PROPERTIES EXCLUDE_FROM_ALL ON)
         endif()
     endforeach()
+    set(agcMetalExecutionTests)
+    foreach(agcExecutionTest IN LISTS agcExecutionTests)
+        string(REGEX REPLACE "_tests$" "" agcExecutionTestName "${agcExecutionTest}")
+        list(APPEND agcMetalExecutionTests ${agcExecutionTestName})
+    endforeach()
+    add_custom_target(agc_metal_execution_tests)
     get_directory_property(agcDirectoryTests TESTS)
     foreach(agcTest IN LISTS agcDirectoryTests)
-        if(NOT agcTest STREQUAL "agc_null_backend" AND NOT agcTest MATCHES "^agc_msl_")
+        if(agcTest IN_LIST agcMetalExecutionTests)
+            set_tests_properties(${agcTest} PROPERTIES LABELS "metal-execution")
+            add_dependencies(agc_metal_execution_tests ${agcTest}_tests)
+        elseif(NOT agcTest STREQUAL "agc_null_backend" AND NOT agcTest MATCHES "^agc_msl_")
             set_tests_properties(${agcTest} PROPERTIES DISABLED TRUE)
         endif()
     endforeach()
