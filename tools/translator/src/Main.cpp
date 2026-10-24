@@ -49,8 +49,8 @@ std::size_t Setting(const char* name, std::size_t fallback) {
 }
 
 struct Options {
-    std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::max(1u, std::thread::hardware_concurrency()));
-    std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 16384);
+    std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
+    std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 8192);
     std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 8000);
     std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 32000);
     std::size_t large = Setting("APS5_TRANSLATOR_LARGE", 2000);

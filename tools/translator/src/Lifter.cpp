@@ -1026,7 +1026,7 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
         const auto& instruction = decoded.at(address);
         if (const auto leader = blocks.find(address); leader != blocks.end()) {
             builder.SetInsertPoint(leader->second);
-        } else if (builder.GetInsertBlock()->getTerminator() != nullptr) {
+        } else if (builder.GetInsertBlock()->hasTerminator()) {
             builder.SetInsertPoint(NewBlock("unreached"));
         }
         auto* block = builder.GetInsertBlock();
@@ -1039,7 +1039,7 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
             if (instruction.size == 0) throw Unsupported{"(undecodable)"};
             Emit(instruction);
             ++stats.instructions;
-            if (builder.GetInsertBlock()->getTerminator() == nullptr) {
+            if (!builder.GetInsertBlock()->hasTerminator()) {
                 if (const auto next = blocks.find(instruction.Next()); next != blocks.end()) builder.CreateBr(next->second);
                 else if (addresses.count(instruction.Next()) == 0) Trap(unsupportedRuntime, instruction.Next());
             }

@@ -74,7 +74,7 @@ python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm
 
 ### Large titles
 
-A title's code is split into partitions of about 16k guest instructions. Each partition is lifted, optimized and compiled in its own LLVM context on its own thread, and `ld -r` joins the partition objects into the one `guest.o`. Partition objects are cached under `~/Library/Caches/AnyPS5/translator/<ELF hash>`, keyed by the translator binary, the ELF and the settings, so a repeated or interrupted run only compiles what is missing.
+A title's code is split into partitions of about 8k guest instructions. Each partition is lifted, optimized and compiled in its own LLVM context on its own thread, and `ld -r` joins the partition objects into the one `guest.o`. Partition objects are cached under `~/Library/Caches/AnyPS5/translator/<ELF hash>`, keyed by the translator binary, the ELF and the settings, so a repeated or interrupted run only compiles what is missing.
 
 Three things keep very large guest functions from stalling LLVM:
 
@@ -84,8 +84,8 @@ Three things keep very large guest functions from stalling LLVM:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `APS5_TRANSLATOR_JOBS` | CPU cores | threads |
-| `APS5_TRANSLATOR_PARTITION` | 16384 | guest instructions per partition |
+| `APS5_TRANSLATOR_JOBS` | CPU cores, at most 4 | threads |
+| `APS5_TRANSLATOR_PARTITION` | 8192 | guest instructions per partition |
 | `APS5_TRANSLATOR_LARGE` / `_HUGE` / `_GIANT` | 2000 / 8000 / 32000 | tier limits in guest instructions |
 | `APS5_TRANSLATOR_CACHE` | `~/Library/Caches/AnyPS5/translator` | cache directory, `off` disables it |
 | `APS5_TRANSLATOR_LD` | `ld` | linker that joins the partitions |
