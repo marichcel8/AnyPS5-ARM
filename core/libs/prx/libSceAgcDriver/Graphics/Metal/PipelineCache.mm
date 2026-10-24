@@ -103,6 +103,20 @@ CompileOutcome buildRender(MetalWorker& worker, const RenderPipelineRequest& req
         attachment.destinationAlphaBlendFactor = static_cast<MTLBlendFactor>(color.destinationAlpha);
         attachment.alphaBlendOperation = static_cast<MTLBlendOperation>(color.alphaOperation);
     }
+    if (!request.vertexAttributes.empty()) {
+        MTLVertexDescriptor* vertex = [MTLVertexDescriptor vertexDescriptor];
+        for (const auto& attribute : request.vertexAttributes) {
+            vertex.attributes[attribute.location].format = static_cast<MTLVertexFormat>(attribute.format);
+            vertex.attributes[attribute.location].offset = attribute.offset;
+            vertex.attributes[attribute.location].bufferIndex = attribute.buffer;
+        }
+        for (const auto& buffer : request.vertexBuffers) {
+            vertex.layouts[buffer.buffer].stride = buffer.stride;
+            vertex.layouts[buffer.buffer].stepFunction = buffer.step == VertexStep::Instance ? MTLVertexStepFunctionPerInstance : buffer.step == VertexStep::Constant ? MTLVertexStepFunctionConstant : MTLVertexStepFunctionPerVertex;
+            vertex.layouts[buffer.buffer].stepRate = buffer.step == VertexStep::Constant ? 0 : 1;
+        }
+        descriptor.vertexDescriptor = vertex;
+    }
     setAttachmentFormat(descriptor, @"depthAttachmentPixelFormat", state.depthFormat);
     setAttachmentFormat(descriptor, @"stencilAttachmentPixelFormat", state.stencilFormat);
     descriptor.rasterSampleCount = state.sampleCount;
@@ -183,6 +197,9 @@ CompileKey PipelineCache::RenderKey(const RenderPipelineRequest& request) {
         addConstants(builder, request.fragmentConstants);
     }
     request.state.AddTo(builder);
+    builder.Add(static_cast<std::uint64_t>(request.vertexAttributes.size()));
+    for (const auto& attribute : request.vertexAttributes) builder.Add(static_cast<std::uint64_t>(attribute.location) | static_cast<std::uint64_t>(attribute.format) << 8u | static_cast<std::uint64_t>(attribute.buffer) << 24u | static_cast<std::uint64_t>(attribute.offset) << 32u);
+    for (const auto& buffer : request.vertexBuffers) builder.Add(static_cast<std::uint64_t>(buffer.buffer) | static_cast<std::uint64_t>(buffer.stride) << 8u | static_cast<std::uint64_t>(buffer.step) << 40u);
     return builder.Finish();
 }
 

@@ -344,7 +344,7 @@ if(APS5_ENABLE_TRACY)
 endif()
 if(APPLE AND ANYPS5_GPU_BACKEND STREQUAL "Metal")
     add_subdirectory(Graphics/Metal ${CMAKE_CURRENT_BINARY_DIR}/metal)
-    target_link_libraries(libSceAgcDriver PRIVATE agc_metal agc_metal_textures)
+    target_link_libraries(libSceAgcDriver PRIVATE agc_metal agc_metal_textures agc_metal_draw agc_metal_render_translate)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     set_target_properties(libSceAgcDriver PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)
     target_link_options(libSceAgcDriver PRIVATE

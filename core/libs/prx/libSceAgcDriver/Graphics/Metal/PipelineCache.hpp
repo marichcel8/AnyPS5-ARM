@@ -11,6 +11,21 @@
 
 namespace AgcDriver::Graphics::Metal {
 
+enum class VertexStep : std::uint8_t { Vertex, Instance, Constant };
+
+struct VertexAttributeLayout {
+    std::uint32_t location = 0;
+    std::uint32_t format = 0;
+    std::uint32_t buffer = 0;
+    std::uint32_t offset = 0;
+};
+
+struct VertexBufferLayout {
+    std::uint32_t buffer = 0;
+    std::uint32_t stride = 0;
+    VertexStep step = VertexStep::Vertex;
+};
+
 struct RenderPipelineRequest {
     LibrarySource vertexLibrary;
     std::string vertexFunction;
@@ -19,6 +34,8 @@ struct RenderPipelineRequest {
     std::vector<FunctionConstant> vertexConstants;
     std::vector<FunctionConstant> fragmentConstants;
     RenderPipelineState state;
+    std::vector<VertexAttributeLayout> vertexAttributes;
+    std::vector<VertexBufferLayout> vertexBuffers;
     std::string label;
     CompilePriority priority = CompilePriority::Needed;
 };
