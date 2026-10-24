@@ -11,7 +11,7 @@ namespace AgcDriver::Graphics::Metal {
 namespace {
 
 constexpr std::string_view ShardSuffix = ".mtl4a";
-constexpr std::string_view PartialSuffix = ".part";
+constexpr std::string_view StagingDirectory = "tmp";
 constexpr std::string_view BadSuffix = ".bad";
 constexpr auto StalePartial = std::chrono::minutes(1);
 constexpr auto StaleDirectory = std::chrono::hours(24 * 30);
@@ -68,20 +68,21 @@ std::vector<std::filesystem::path> CompileCacheDirectory::Shards() const {
 std::filesystem::path CompileCacheDirectory::NewShardPath() {
     const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     auto name = "shard-" + std::to_string(stamp) + "-" + std::to_string(static_cast<long>(getpid())) + "-" + std::to_string(serial++);
-    return directory / (name + std::string(ShardSuffix) + std::string(PartialSuffix));
+    std::error_code error;
+    std::filesystem::create_directories(directory / StagingDirectory, error);
+    return directory / StagingDirectory / (name + std::string(ShardSuffix));
 }
 
 bool CompileCacheDirectory::CommitShard(const std::filesystem::path& partial) {
-    auto name = partial.string();
-    if (!endsWith(name, PartialSuffix)) return false;
+    if (partial.parent_path().filename() != StagingDirectory) return false;
+    const auto target = directory / partial.filename();
     std::error_code error;
     const auto bytes = std::filesystem::file_size(partial, error);
     if (error || bytes == 0) {
         std::filesystem::remove(partial, error);
         return false;
     }
-    name.resize(name.size() - PartialSuffix.size());
-    std::filesystem::rename(partial, name, error);
+    std::filesystem::rename(partial, target, error);
     if (error) {
         std::filesystem::remove(partial, error);
         return false;
@@ -105,7 +106,7 @@ void CompileCacheDirectory::Quarantine(const std::filesystem::path& shard) {
 void CompileCacheDirectory::Prune() {
     std::error_code error;
     const auto now = std::filesystem::file_time_type::clock::now();
-    for (const auto& file : listFiles(directory, PartialSuffix)) {
+    for (const auto& file : listFiles(directory / StagingDirectory, ShardSuffix)) {
         if (now - file.modified > StalePartial) std::filesystem::remove(file.path, error);
     }
     const auto bad = listFiles(directory, BadSuffix);

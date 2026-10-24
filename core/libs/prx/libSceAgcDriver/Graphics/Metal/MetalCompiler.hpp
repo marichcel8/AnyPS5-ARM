@@ -95,6 +95,7 @@ public:
     [[nodiscard]] void* TaskOptions() const;
     std::shared_ptr<void> Library(const LibrarySource& source, std::string* error);
     void NotePipeline(double milliseconds);
+    void NoteFresh();
 
 private:
     MetalCompiler& owner;

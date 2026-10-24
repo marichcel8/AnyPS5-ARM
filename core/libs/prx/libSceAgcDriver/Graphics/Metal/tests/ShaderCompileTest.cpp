@@ -278,7 +278,7 @@ void TestCacheDirectory() {
     CompileCacheDirectory cache(root, environment, 300, 3);
     Check(cache.Shards().empty(), "a fresh cache has no shards");
     const auto first = cache.NewShardPath();
-    Check(first.extension() == ".part" && first != cache.NewShardPath(), "shard paths are unique partials");
+    Check(first.extension() == ".mtl4a" && first.parent_path().filename() == "tmp" && first != cache.NewShardPath(), "shard paths are unique partials");
     Check(!cache.CommitShard(first), "a missing partial does not commit");
     Touch(first, 100);
     Check(cache.CommitShard(first) && !std::filesystem::exists(first) && cache.Shards().size() == 1, "a partial commits to a shard");
@@ -303,6 +303,7 @@ void TestCacheDirectory() {
 
     const auto stale = cache.NewShardPath();
     Touch(stale, 10);
+    Check(cache.Shards().size() == 3, "a staged file is not a shard");
     std::filesystem::last_write_time(stale, std::filesystem::file_time_type::clock::now() - std::chrono::minutes(5));
     cache.Prune();
     Check(!std::filesystem::exists(stale), "a stale partial is removed");

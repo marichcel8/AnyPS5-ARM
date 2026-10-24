@@ -164,14 +164,13 @@ struct MetalCompiler::State {
             if ([serializer serializeAsArchiveAndFlushToURL:url error:&failure]) {
                 committed = directory->CommitShard(partial);
             } else {
-                std::fprintf(stderr, "AGC Metal: archive serialization failed: %s\n", failure.localizedDescription.UTF8String ?: "unknown");
+                std::fprintf(stderr, "AGC Metal: archive serialization to %s failed: %s (domain %s code %ld)\n", partial.c_str(), failure.localizedDescription.UTF8String ?: "no error object", failure.domain.UTF8String ?: "-", static_cast<long>(failure.code));
                 directory->AbandonShard(partial);
             }
         }
         if (committed) {
             auto name = partial.string();
-            name.resize(name.size() - 5);
-            const std::filesystem::path shard(name);
+            const auto shard = directory->Directory() / partial.filename();
             std::error_code error;
             if (!sessionShard.empty() && sessionShard != shard) std::filesystem::remove(sessionShard, error);
             sessionShard = shard;
@@ -252,8 +251,13 @@ void MetalWorker::NotePipeline(double milliseconds) {
     state.pipelineNanos += static_cast<std::uint64_t>(milliseconds * 1.0e6);
     if (milliseconds < state.config.archiveHitMilliseconds) {
         ++state.pipelinesFromArchive;
-        return;
+        if (state.shardsLoaded != 0) return;
     }
+    NoteFresh();
+}
+
+void MetalWorker::NoteFresh() {
+    auto& state = *owner.state;
     const auto fresh = ++state.newSinceFlush;
     if (fresh >= state.nextFlushAt.load(std::memory_order_relaxed)) state.scheduleFlush();
 }
