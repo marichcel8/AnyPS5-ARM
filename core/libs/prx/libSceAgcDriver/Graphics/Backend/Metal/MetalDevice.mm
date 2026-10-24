@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "BdaAbi.hpp"
+#include "ImageTableAbi.hpp"
 #include "MetalAbi.hpp"
 #include "RuntimeAbi.hpp"
 #include "MslBackend/MslEmitter.hpp"
@@ -190,6 +191,7 @@ Metal::PixelFormat NumericView(Metal::PixelFormat format, Numeric numeric) {
         {RGB10A2Unorm, Invalid, Invalid, RGB10A2Uint, Invalid, Invalid},
         {Invalid, Invalid, Invalid, Invalid, Invalid, Invalid},
     }};
+    if ((format == RG11B10Float || format == RGB9E5Float) && numeric != Numeric::Float) return numeric == Numeric::Uint ? R32Uint : R32Sint;
     for (const auto& family : families) {
         const auto found = std::find(family.begin(), family.end(), format);
         if (found == family.end() || format == Invalid) continue;
@@ -203,6 +205,33 @@ Metal::PixelFormat NumericView(Metal::PixelFormat format, Numeric numeric) {
         return wanted != Invalid ? wanted : format;
     }
     return format;
+}
+
+bool IntegerFormat(Metal::PixelFormat format) {
+    using enum Metal::PixelFormat;
+    switch (format) {
+    case R8Uint: case R8Sint: case RG8Uint: case RG8Sint: case RGBA8Uint: case RGBA8Sint:
+    case R16Uint: case R16Sint: case RG16Uint: case RG16Sint: case RGBA16Uint: case RGBA16Sint:
+    case R32Uint: case R32Sint: case RG32Uint: case RG32Sint: case RGBA32Uint: case RGBA32Sint:
+    case RGB10A2Uint: return true;
+    default: return false;
+    }
+}
+
+std::uint32_t PointSamplerMask(const ShaderRecompiler::DescriptorBinding& binding) {
+    if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages || binding.imageSamplers.size() < binding.count || ImageKindOf(binding.binding).storage) return 0;
+    const bool integerView = ImageKindOf(binding.binding).numeric != Numeric::Float;
+    std::uint32_t mask = 0;
+    for (std::uint32_t element = 0; element < binding.count; ++element) {
+        const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
+        bool integer = integerView;
+        if (!integer && !std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) && !Graphics::IsNullTextureResource(words)) {
+            const auto* format = Metal::FindFormat(Graphics::DecodeTextureResource(words).format);
+            integer = format != nullptr && IntegerFormat(format->pixelFormat);
+        }
+        if (integer) mask |= binding.imageSamplers[element];
+    }
+    return mask;
 }
 
 Metal::TextureKind ViewKindOf(ShaderRecompiler::DescriptorImageShape shape) {
@@ -776,11 +805,21 @@ struct VulkanDevice::State {
 
     std::uint64_t image(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
         if (!binding.imageShape) throw std::runtime_error("AGC graphics: Metal image binding has no image shape");
-        const auto viewKind = ViewKindOf(*binding.imageShape);
         const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
+        const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
+        return imageView(words, *binding.imageShape, written, ImageKindOf(binding.binding).numeric, true, snapshots, uses);
+    }
+
+    std::uint64_t tableImage(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
+        const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
+        const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
+        return imageView(words, binding.imageShapes.at(element), written, std::nullopt, false, snapshots, uses);
+    }
+
+    std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
+        const auto viewKind = ViewKindOf(shape);
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
         const auto resource = Graphics::DecodeTextureResource(words);
-        const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
         const auto [found, info, layers] = surfaceFor(resource);
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
         auto& surface = *found;
@@ -790,7 +829,7 @@ struct VulkanDevice::State {
         Metal::ViewInfo view;
         view.kind = viewKind;
         view.changeKind = true;
-        view.pixelFormat = NumericView(surface.texture.pixelFormat, ImageKindOf(binding.binding).numeric);
+        view.pixelFormat = numeric ? NumericView(surface.texture.pixelFormat, *numeric) : surface.texture.pixelFormat;
         view.baseLevel = std::min(resource.baseLevel, info.mipLevels - 1u);
         view.levelCount = std::min(std::max(resource.lastLevel, view.baseLevel), info.mipLevels - 1u) - view.baseLevel + 1u;
         if (viewKind == Metal::TextureKind::Tex3D || viewKind == Metal::TextureKind::Tex2DMsaa) {
@@ -800,7 +839,8 @@ struct VulkanDevice::State {
             view.baseSlice = std::min(resource.baseArray, layers - 1u);
             view.sliceCount = viewKind == Metal::TextureKind::Tex2D ? 1u : layers - view.baseSlice;
         }
-        if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
+        if (!written && descriptorSwizzle) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
+        else if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {4, 5, 6, 7});
         return viewOf(surface, view).resourceId;
     }
 
@@ -855,11 +895,12 @@ struct VulkanDevice::State {
         }
     }
 
-    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element) {
+    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, bool point) {
         const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u);
         const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
         const bool integerBorder = element < binding.samplerIntegerBorder.size() && binding.samplerIntegerBorder[element];
-        const SamplerKey key{words[0], words[1], words[2], words[3], (unnormalized ? 1u : 0u) | (integerBorder ? 2u : 0u)};
+        const bool compare = element < binding.samplerDepthCompare.size() && binding.samplerDepthCompare[element];
+        const SamplerKey key{words[0], words[1], words[2], words[3], (unnormalized ? 1u : 0u) | (integerBorder ? 2u : 0u) | (point ? 4u : 0u) | (compare ? 8u : 0u)};
         if (const auto found = samplers.find(key); found != samplers.end()) return found->second.gpuResourceID._impl;
         const auto decoded = Graphics::DecodeSamplerResource(words, unnormalized, false, integerBorder);
         MTLSamplerDescriptor* descriptor = [MTLSamplerDescriptor new];
@@ -876,7 +917,13 @@ struct VulkanDevice::State {
             descriptor.lodMinClamp = std::max(decoded.minLod, 0.0f);
             descriptor.lodMaxClamp = std::max(decoded.maxLod, descriptor.lodMinClamp);
         }
-        if (decoded.compareEnable) descriptor.compareFunction = static_cast<MTLCompareFunction>(decoded.compareOp);
+        if (point) {
+            descriptor.minFilter = MTLSamplerMinMagFilterNearest;
+            descriptor.magFilter = MTLSamplerMinMagFilterNearest;
+            if (descriptor.mipFilter == MTLSamplerMipFilterLinear) descriptor.mipFilter = MTLSamplerMipFilterNearest;
+            descriptor.maxAnisotropy = 1;
+        }
+        if (compare) descriptor.compareFunction = static_cast<MTLCompareFunction>(decoded.compareOp);
         descriptor.supportArgumentBuffers = YES;
         descriptor.label = @"AnyPS5 guest sampler";
         id<MTLSamplerState> state = [native newSamplerStateWithDescriptor:descriptor];
@@ -890,6 +937,10 @@ struct VulkanDevice::State {
         slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
         if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
         std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
+        std::uint32_t pointSamplers = 0;
+        std::optional<std::uint32_t> tableElements;
+        std::vector<std::uint32_t> map;
+        for (const auto& binding : shader.bindings) pointSamplers |= PointSamplerMask(binding);
         for (const auto& binding : shader.bindings) {
             switch (binding.role) {
             case ShaderRecompiler::DescriptorRole::ShaderData:
@@ -922,8 +973,33 @@ struct VulkanDevice::State {
             case ShaderRecompiler::DescriptorRole::GuestSamplers: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest sampler descriptor must contain four DWORDs per element");
                 std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
-                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element);
+                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, element < 32u && ((pointSamplers >> element) & 1u) != 0u);
                 slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::ImageTable:
+            case ShaderRecompiler::DescriptorRole::ImageStorageTable: {
+                if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8u || binding.imageShapes.size() != binding.count) throw std::runtime_error("AGC graphics: image table binding is malformed");
+                if (tableElements && *tableElements != binding.count) throw std::runtime_error("AGC graphics: a stage's image tables disagree on their elements");
+                tableElements = binding.count;
+                std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
+                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = tableImage(binding, element, snapshots, uses);
+                const auto role = binding.role == ShaderRecompiler::DescriptorRole::ImageTable ? BufferSlot::ImageTable : BufferSlot::ImageStorageTable;
+                slots[SlotIndex(role)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::SamplerTable: {
+                if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u || binding.samplerDepthCompare.size() != binding.count || binding.count % ShaderRecompiler::ImageTableAbi::SamplerEntryElements != 0u) throw std::runtime_error("AGC graphics: sampler table binding is malformed");
+                std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
+                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, false);
+                slots[SlotIndex(BufferSlot::SamplerTable)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::ImageTableMap: {
+                namespace TableAbi = ShaderRecompiler::ImageTableAbi;
+                if (binding.count != 1 || binding.guestDescriptor.size() < TableAbi::HeaderWords || binding.guestDescriptor[TableAbi::HeaderVersion] != TableAbi::Version) throw std::runtime_error("AGC graphics: image table map binding is malformed");
+                map = binding.guestDescriptor;
+                map[TableAbi::HeaderElementBase] = 0;
                 break;
             }
             case ShaderRecompiler::DescriptorRole::BdaPagetable:
@@ -934,6 +1010,12 @@ struct VulkanDevice::State {
             default:
                 throw std::runtime_error("AGC graphics: Metal does not bind descriptor role " + std::to_string(static_cast<int>(binding.role)) + " yet");
             }
+        }
+        if (!map.empty()) {
+            if (map[ShaderRecompiler::ImageTableAbi::HeaderElementCount] != tableElements.value_or(0u)) throw std::runtime_error("AGC graphics: image table map disagrees with its image binding");
+            slots[SlotIndex(BufferSlot::ImageTableMap)] = uploadBytes(map.data(), map.size() * sizeof(map[0]));
+        } else if (tableElements) {
+            throw std::runtime_error("AGC graphics: an image table stage has no map");
         }
         if (!imageEntries.empty()) {
             const auto [lowest, highest] = std::minmax_element(imageEntries.begin(), imageEntries.end());

@@ -131,6 +131,10 @@ inline uint agc_repack101111(uint word) {
     return ((word >> 21u) & 0x7ffu) | (((word >> 10u) & 0x7ffu) << 11u) | ((word & 0x3ffu) << 22u);
 }
 
+inline uint agc_unpack101111(uint word) {
+    return ((word & 0x7ffu) << 21u) | (((word >> 11u) & 0x7ffu) << 10u) | ((word >> 22u) & 0x3ffu);
+}
+
 inline int agc_sign_extend(uint value, uint bits) {
     return static_cast<int>(value << (32u - bits)) >> (32u - bits);
 }
@@ -165,6 +169,10 @@ inline uint4 agc_transform(uint4 value, uint transform) {
         default:
             return value;
     }
+}
+
+inline uint4 agc_untransform(uint4 value, uint transform) {
+    return transform == AGC_TRANSFORM_REPACK101111 ? AGC_UINT4(agc_unpack101111(value.x), 0u, 0u, 0u) : value;
 }
 
 #ifdef __METAL_VERSION__
