@@ -149,16 +149,28 @@ std::uint32_t OrderingRun(Probe& probe, bool producerBarrier, double* worst) {
         probe.sync.Submit(&recording, 1);
         while (Load(label) != mark) std::this_thread::yield();
         *worst = std::max(*worst, Microseconds(begin));
-        std::uint32_t pending = 0, wrong = 0, first = count;
-        for (std::uint32_t index = 0; index < count; index += 61) {
-            const auto value = Load(&data[index]);
-            if (value == Heavy(index ^ round)) continue;
-            ++(value == (index ^ round) ? pending : wrong);
-            first = std::min(first, index);
-        }
+        const auto scan = [&](std::uint32_t& pending, std::uint32_t& wrong, std::uint32_t& first) {
+            pending = wrong = 0;
+            first = count;
+            for (std::uint32_t index = 0; index < count; index += 61) {
+                const auto value = Load(&data[index]);
+                if (value == Heavy(index ^ round)) continue;
+                ++(value == (index ^ round) ? pending : wrong);
+                first = std::min(first, index);
+            }
+        };
+        std::uint32_t pending = 0, wrong = 0, first = count, later = 0, afterSleep = 0, afterIdle = 0, ignore = 0;
+        scan(pending, wrong, first);
+        const auto serialNow = probe.device.CompletedSerial(QueueKind::Compute);
+        const auto submittedNow = probe.device.SubmittedSerial(QueueKind::Compute);
+        scan(later, ignore, ignore);
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        scan(afterSleep, ignore, ignore);
+        probe.device.WaitIdle(10000);
+        scan(afterIdle, ignore, ignore);
         if (pending + wrong != 0) {
             ++violations;
-            std::printf("sync.ordering violation producer_barrier=%d round=%u unprocessed=%u wrong=%u first_index=%u\n", producerBarrier ? 1 : 0, round, pending, wrong, first);
+            std::printf("sync.ordering violation producer_barrier=%d round=%u unprocessed=%u wrong=%u first_index=%u rescan=%u after_2ms=%u after_idle=%u gpu_done=%d\n", producerBarrier ? 1 : 0, round, pending, wrong, first, later, afterSleep, afterIdle, serialNow >= submittedNow ? 1 : 0);
         }
         probe.device.WaitIdle(10000);
     }
