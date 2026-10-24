@@ -301,9 +301,10 @@ void TestCacheDirectory() {
     cache.Quarantine(shard);
     Check(!std::filesystem::exists(shard) && std::filesystem::exists(shard.string() + ".bad"), "a bad shard is quarantined");
 
+    const auto shardsBefore = cache.Shards().size();
     const auto stale = cache.NewShardPath();
     Touch(stale, 10);
-    Check(cache.Shards().size() == 3, "a staged file is not a shard");
+    Check(cache.Shards().size() == shardsBefore, "a staged file is not a shard");
     std::filesystem::last_write_time(stale, std::filesystem::file_time_type::clock::now() - std::chrono::minutes(5));
     cache.Prune();
     Check(!std::filesystem::exists(stale), "a stale partial is removed");
