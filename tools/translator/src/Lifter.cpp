@@ -4,8 +4,8 @@
 
 namespace Translator {
 
-Lifter::Impl::Impl(const Elf& elf, llvm::LLVMContext& context, Program& program)
-    : elf(elf), context(context), builder(context), imageBegin(elf.ImageBegin()), decoded(program.decoded), functions(program.functions), tableTargets(program.tableTargets),
+Lifter::Impl::Impl(const Elf& elf, llvm::LLVMContext& context, Program& program, bool lifting)
+    : elf(elf), context(context), builder(context), imageBegin(elf.ImageBegin()), decoded(lifting ? ownDecoded : program.decoded), functions(program.functions), tableTargets(program.tableTargets),
       jumpTables(program.jumpTables) {
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstone) != CS_ERR_OK) throw std::runtime_error("cannot open capstone");
     cs_option(capstone, CS_OPT_DETAIL, CS_OPT_ON);
@@ -980,12 +980,12 @@ void Lifter::Impl::Discard(llvm::BasicBlock* block, llvm::Instruction* last, std
     }
 }
 
-std::set<std::uint64_t> Lifter::Impl::Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses) const {
+std::set<std::uint64_t> Lifter::Impl::Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses) {
     std::set<std::uint64_t> leaders(branchTargets.begin(), branchTargets.end());
     leaders.insert(entry);
     std::map<std::uint64_t, unsigned> fallIns;
     for (const auto address : addresses) {
-        const auto& instruction = decoded.at(address);
+        const auto& instruction = Decode(address);
         if (instruction.size == 0 || EndsPath(instruction.id)) continue;
         if (addresses.count(instruction.Next()) != 0) ++fallIns[instruction.Next()];
     }
@@ -993,7 +993,7 @@ std::set<std::uint64_t> Lifter::Impl::Leaders(std::uint64_t entry, const std::se
     for (const auto address : addresses) {
         const bool fallsIn = previous != nullptr && previous->size != 0 && !EndsPath(previous->id) && previous->Next() == address;
         if (!fallsIn || fallIns[address] != 1) leaders.insert(address);
-        previous = &decoded.at(address);
+        previous = &Decode(address);
     }
     return leaders;
 }
@@ -1015,7 +1015,7 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
     }
     state = shadow != nullptr ? static_cast<llvm::Value*>(shadow) : guest;
     for (const auto address : addresses) {
-        const auto& instruction = decoded.at(address);
+        const auto& instruction = Decode(address);
         const auto target = instruction.DirectTarget();
         if (target && (instruction.id == X86_INS_JMP || IsConditionalJump(instruction.id)) && addresses.count(*target) != 0) branchTargets.insert(*target);
     }
@@ -1030,7 +1030,7 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
     builder.SetInsertPoint(prologue);
     builder.CreateBr(blocks.at(entry));
     for (const auto address : addresses) {
-        const auto& instruction = decoded.at(address);
+        const auto& instruction = Decode(address);
         if (const auto leader = blocks.find(address); leader != blocks.end()) {
             builder.SetInsertPoint(leader->second);
         } else if (builder.GetInsertBlock()->hasTerminator()) {
@@ -1232,7 +1232,7 @@ Lifter::~Lifter() = default;
 
 void Lifter::Discover() {
     llvm::LLVMContext scratch;
-    Impl lifter(elf, scratch, *program);
+    Impl lifter(elf, scratch, *program, false);
     std::deque<std::uint64_t> pending;
     auto seed = [&](std::uint64_t address) {
         if (elf.InExecutable(address)) pending.push_back(address);
@@ -1253,6 +1253,7 @@ void Lifter::Discover() {
         if (lifter.functions.count(address) == 0) lifter.Explore(address, pending);
     }
     stats.functions = lifter.functions.size();
+    program->decoded.clear();
 }
 
 std::size_t Lifter::FunctionSize(std::uint64_t entry) const {
@@ -1275,7 +1276,7 @@ std::vector<std::vector<std::uint64_t>> Lifter::Partitions(std::size_t instructi
 
 std::unique_ptr<llvm::Module> Lifter::Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, std::size_t promoteLimit,
                                            Statistics& partitionStats) const {
-    Impl lifter(elf, context, *program);
+    Impl lifter(elf, context, *program, true);
     lifter.promoteLimit = promoteLimit;
     auto module = std::make_unique<llvm::Module>("guest", context);
     lifter.module = module.get();

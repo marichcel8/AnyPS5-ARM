@@ -152,7 +152,7 @@ struct Lifter::Program {
 };
 
 struct Lifter::Impl {
-    Impl(const Elf& elf, llvm::LLVMContext& context, Program& program);
+    Impl(const Elf& elf, llvm::LLVMContext& context, Program& program, bool lifting);
     ~Impl() { cs_close(&capstone); }
 
     const Instruction& Decode(std::uint64_t address);
@@ -167,7 +167,7 @@ struct Lifter::Impl {
     void LiftFunction(std::uint64_t entry, const std::set<std::uint64_t>& addresses, Statistics& stats);
     void Emit(const Instruction& instruction);
     std::map<std::uint64_t, std::uint8_t> DeadFlags(std::uint64_t entry, const std::set<std::uint64_t>& addresses);
-    std::set<std::uint64_t> Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses) const;
+    std::set<std::uint64_t> Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses);
     void Discard(llvm::BasicBlock* block, llvm::Instruction* last, std::size_t keepBlocks);
     void PromoteState(llvm::AllocaInst* shadow, llvm::BasicBlock* prologue);
     llvm::BasicBlock* Dispatch();
@@ -249,6 +249,7 @@ struct Lifter::Impl {
     llvm::IRBuilder<> builder;
     csh capstone = 0;
     std::uint64_t imageBegin = 0;
+    std::map<std::uint64_t, Instruction> ownDecoded;
     std::map<std::uint64_t, Instruction>& decoded;
     std::map<std::uint64_t, std::set<std::uint64_t>>& functions;
     std::map<std::uint64_t, std::set<std::uint64_t>>& tableTargets;

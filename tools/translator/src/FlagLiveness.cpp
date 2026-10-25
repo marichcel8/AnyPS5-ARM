@@ -107,7 +107,7 @@ std::map<std::uint64_t, std::uint8_t> Lifter::Impl::DeadFlags(std::uint64_t entr
         return std::nullopt;
     };
     for (std::uint32_t i = 0; i < order.size(); ++i) {
-        const auto& instruction = decoded.at(order[i]);
+        const auto& instruction = Decode(order[i]);
         uses[i] = UseOf(instruction);
         if (instruction.size == 0) continue;
         const auto id = instruction.id;
