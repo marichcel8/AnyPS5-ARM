@@ -2,6 +2,9 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#if !defined(__x86_64__)
+#include <cfenv>
+#endif
 #include <type_traits>
 
 #include "prx/libc/include/General.hpp"
@@ -215,6 +218,7 @@ TFloat GeneratedNan(TFloat result, TFloat a, TFloat b) {
     return IsNan(result) && !IsNan(a) && !IsNan(b) ? QuietNan<TFloat>() : result;
 }
 
+#if defined(__x86_64__)
 double AddDouble(double a, double b) {
     std::uint32_t saved = 0;
     asm volatile("stmxcsr %[saved]\n\tldmxcsr %[standard]\n\taddsd %[b], %[a]\n\tldmxcsr %[saved]"
@@ -273,6 +277,88 @@ float DivideFloatTowardZero(float a, float b) {
     return a;
 }
 
+float TruncateDouble(double value) {
+    std::uint32_t saved = 0;
+    float result;
+    asm volatile("stmxcsr %[saved]\n\tldmxcsr %[standard]\n\tcvtsd2ss %[value], %[result]\n\tldmxcsr %[saved]"
+                 : [result] "=x"(result), [saved] "+m"(saved) : [value] "x"(value), [standard] "m"(DefaultMxcsr));
+    return result;
+}
+
+#else
+struct StandardFloatingPoint {
+    std::fenv_t saved;
+    explicit StandardFloatingPoint(int rounding = FE_TONEAREST) {
+        std::feholdexcept(&saved);
+        std::fesetround(rounding);
+    }
+    ~StandardFloatingPoint() { std::fesetenv(&saved); }
+};
+
+double AddDouble(double a, double b) {
+    StandardFloatingPoint standard;
+    volatile double left = a, right = b;
+    volatile double result = left + right;
+    return result;
+}
+
+double MultiplyDouble(double a, double b) {
+    StandardFloatingPoint standard;
+    volatile double left = a, right = b;
+    volatile double result = left * right;
+    return result;
+}
+
+double DivideDouble(double a, double b) {
+    StandardFloatingPoint standard;
+    volatile double left = a, right = b;
+    volatile double result = left / right;
+    return result;
+}
+
+float AddFloat(float a, float b) {
+    StandardFloatingPoint standard;
+    volatile float left = a, right = b;
+    volatile float result = left + right;
+    return result;
+}
+
+float MultiplyFloat(float a, float b) {
+    StandardFloatingPoint standard;
+    volatile float left = a, right = b;
+    volatile float result = left * right;
+    return result;
+}
+
+float DivideFloat(float a, float b) {
+    StandardFloatingPoint standard;
+    volatile float left = a, right = b;
+    volatile float result = left / right;
+    return result;
+}
+
+double DivideDoubleTowardZero(double a, double b) {
+    StandardFloatingPoint standard(FE_TOWARDZERO);
+    volatile double left = a, right = b;
+    volatile double result = left / right;
+    return result;
+}
+
+float DivideFloatTowardZero(float a, float b) {
+    StandardFloatingPoint standard(FE_TOWARDZERO);
+    volatile float left = a, right = b;
+    volatile float result = left / right;
+    return result;
+}
+
+float TruncateDouble(double value) {
+    StandardFloatingPoint standard;
+    volatile double input = value;
+    volatile float result = static_cast<float>(input);
+    return result;
+}
+#endif
+
 template<typename TFloat>
 TFloat FlushSubnormalQuotient(TFloat quotient, TFloat truncated) {
     using Format = FloatFormat<TFloat>;
@@ -281,14 +367,6 @@ TFloat FlushSubnormalQuotient(TFloat quotient, TFloat truncated) {
     const Rep magnitude = std::bit_cast<Rep>(truncated) & ~signBit;
     if (magnitude >= (static_cast<Rep>(1) << Format::SignificandBits)) return quotient;
     return std::bit_cast<TFloat>(static_cast<Rep>(std::bit_cast<Rep>(truncated) & signBit));
-}
-
-float TruncateDouble(double value) {
-    std::uint32_t saved = 0;
-    float result;
-    asm volatile("stmxcsr %[saved]\n\tldmxcsr %[standard]\n\tcvtsd2ss %[value], %[result]\n\tldmxcsr %[saved]"
-                 : [result] "=x"(result), [saved] "+m"(saved) : [value] "x"(value), [standard] "m"(DefaultMxcsr));
-    return result;
 }
 
 double ExtendFloat(float value) {

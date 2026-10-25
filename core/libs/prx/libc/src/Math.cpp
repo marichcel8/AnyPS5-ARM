@@ -14,6 +14,8 @@
 #include <stdexcept>
 #if defined(__x86_64__)
 #include <xmmintrin.h>
+#else
+#include "prx/libc/include/GuestFpState.hpp"
 #endif
 
 #include "prx/libc/include/General.hpp"
@@ -1381,6 +1383,14 @@ static_assert(sizeof(GuestFloatingPointEnvironment) == 32 && offsetof(GuestFloat
 int APS5_VABI feupdateenv_nid_postfix(const GuestFloatingPointEnvironment* environment) {
     if (environment == nullptr) throw std::invalid_argument("feupdateenv: null environment");
     const auto saved = *environment;
+#if !defined(__x86_64__)
+    auto& guest = LibcDetail::GuestFp();
+    const auto pending = (guest.status | guest.mxcsr) & 0x3fu;
+    guest.control = static_cast<std::uint16_t>(saved.control);
+    guest.mxcsr = saved.mxcsr | pending;
+    guest.status = static_cast<std::uint16_t>(saved.status | pending);
+    return 0;
+#else
     alignas(16) std::array<std::uint32_t, 128> state;
     asm volatile("fxsave %0" : "=m"(state));
     const auto supported = state[7] != 0 ? state[7] : 0xffbfu;
@@ -1398,6 +1408,7 @@ int APS5_VABI feupdateenv_nid_postfix(const GuestFloatingPointEnvironment* envir
     _mm_setcsr(mxcsr);
     asm volatile("fwait");
     return 0;
+#endif
 }
 
 int APS5_VABI fegetenv_nid_postfix(GuestFloatingPointEnvironment* environment) {
@@ -1406,11 +1417,12 @@ int APS5_VABI fegetenv_nid_postfix(GuestFloatingPointEnvironment* environment) {
     asm volatile("fnstenv %0\n\tfldcw %0" : "+m"(*environment));
     environment->mxcsr = _mm_getcsr();
 #else
-    // TODO(native-arm64): the translated guest's x87 and MXCSR state; the defaults for now.
+    const auto& guest = LibcDetail::GuestFp();
     *environment = {};
-    environment->control = 0x037f;
+    environment->control = guest.control;
+    environment->status = guest.status;
     environment->tag = 0xffff;
-    environment->mxcsr = 0x1f80;
+    environment->mxcsr = guest.mxcsr;
 #endif
     return 0;
 }

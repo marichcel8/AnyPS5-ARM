@@ -13,6 +13,7 @@ using Uint128 = unsigned __int128;
     throw std::runtime_error(std::string(function) + ": the console implementation traps (ud2)");
 }
 
+#if defined(__x86_64__)
 bool CompareExchange16(Uint128* target, Uint128& expected, Uint128 desired) {
     std::uint64_t low = static_cast<std::uint64_t>(expected);
     std::uint64_t high = static_cast<std::uint64_t>(expected >> 64);
@@ -24,6 +25,11 @@ bool CompareExchange16(Uint128* target, Uint128& expected, Uint128 desired) {
     expected = (static_cast<Uint128>(high) << 64) | low;
     return exchanged;
 }
+#else
+bool CompareExchange16(Uint128* target, Uint128& expected, Uint128 desired) {
+    return __atomic_compare_exchange_n(target, &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+#endif
 
 Uint128 ReadHalves(const Uint128* target) {
     const auto* halves = reinterpret_cast<const volatile std::uint64_t*>(target);

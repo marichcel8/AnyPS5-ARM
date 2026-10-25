@@ -182,7 +182,7 @@ int ScanGuest(const char* buffer, const char* format, bool secure, NextPointer n
             }
             continue;
         }
-#ifndef _WIN32
+#if !APS5_SYSV_GUEST_ARGS
         if (IsWideScan(length, conversion)) {
             const char kind = conversion == 'S' ? 's' : conversion == 'C' ? 'c' : conversion;
             const char* field = input;
@@ -645,7 +645,7 @@ extern FileStream* __stdinp_nid_postfix;
 int APS5_VABI vfscanf_nid_postfix(FileStream* stream, const char* format, VaList* args) {
     if (stream && !stream->IsOpen()) { errno = 9; return -1; }
     auto* native = GetNativeStream(stream);
-#ifdef _WIN32
+#if APS5_SYSV_GUEST_ARGS
     const int result = LibcDetail::ScanFileWindows_nid_no_patch(native, format, args);
 #else
     RejectGuestWideScan(format);
@@ -664,16 +664,15 @@ int APS5_VABI vscanf_nid_postfix(const char* format, VaList* args) {
 }
 
 int APS5_VABI scanf_nid_postfix(const char* format, ...) {
-#ifdef _WIN32
-    __builtin_sysv_va_list args;
-    __builtin_sysv_va_start(args, format);
+#if APS5_SYSV_GUEST_ARGS
+    APS5_GUEST_VA_START(args, format, 1, 0);
 #else
     std::va_list args;
     va_start(args, format);
 #endif
     const int result = vfscanf_nid_postfix(__stdinp_nid_postfix, format, reinterpret_cast<VaList*>(args));
-#ifdef _WIN32
-    __builtin_sysv_va_end(args);
+#if APS5_SYSV_GUEST_ARGS
+    APS5_GUEST_VA_END(args);
 #else
     va_end(args);
 #endif

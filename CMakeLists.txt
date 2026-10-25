@@ -114,7 +114,8 @@ if(BUILD_TESTING)
     set_tests_properties(shader_cache_file_read PROPERTIES TIMEOUT 20)
     add_test_executable(request_serializer_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/tests/RequestSerializerTests.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/src/RequestSerializer.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/src/RequestSerializer.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ShaderBackendDefaults.cpp)
     target_include_directories(request_serializer_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/core/libs
         ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler
