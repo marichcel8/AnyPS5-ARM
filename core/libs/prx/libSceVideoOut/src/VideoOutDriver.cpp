@@ -562,7 +562,11 @@ void VideoOutDriver::triggerEvents(VideoOutConfig& cfg, int eventKind, void* tri
 }
 
 bool VideoOutDriver::SupportsHighFrameRate() {
+#if defined(__APPLE__)
+    return true;
+#else
     return GetDisplayRefreshRate() >= 120;
+#endif
 }
 
 int VideoOutDriver::GetDisplayRefreshRate() {
