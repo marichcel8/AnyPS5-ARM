@@ -6,23 +6,102 @@
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include <algorithm>
 #include "prx/libSceAgcDriver/Execution/include/TracyZone.hpp"
+#include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 namespace AgcDriver::DriverDetail {
 
+namespace {
+
+// Frame generation: the game's frame that follows a generated one waits for the next vertical
+// blank before its swapchain image is free. This thread waits for it instead of the flip, so the
+// game goes on to its next frame meanwhile; the next flip waits for it before acquiring, as only
+// one swapchain image is held at a time.
+class FollowingFrame {
+public:
+    void Start(std::shared_ptr<VulkanDevice> device) {
+        std::lock_guard lock(mutex);
+        if (!thread.joinable()) thread = std::thread([this] { run(); });
+        job = std::move(device);
+        changed.notify_all();
+    }
+
+    void Wait() {
+        std::unique_lock lock(mutex);
+        changed.wait(lock, [this] { return job == nullptr; });
+    }
+
+private:
+    void run() {
+        std::unique_lock lock(mutex);
+        while (true) {
+            changed.wait(lock, [this] { return job != nullptr; });
+            auto device = job;
+            lock.unlock();
+            try {
+                if (device->AcquireRealImage()) {
+                    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Present);
+                    std::lock_guard gpu(GuestMemory::GpuMutex());
+                    device->QueueRealFrame();
+                }
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "[present] the game's frame after a generated one failed: %s\n", error.what());
+            }
+            device.reset();
+            lock.lock();
+            job.reset();
+            changed.notify_all();
+        }
+    }
+
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::shared_ptr<VulkanDevice> job;
+    std::thread thread;
+};
+
+FollowingFrame& followingFrame() {
+    static auto* frame = new FollowingFrame;
+    return *frame;
+}
+
+}
+
 std::uint32_t Driver::ReserveEopFlip(const FlipInfo& info) {
     std::lock_guard lock(mutex);
+    require(nextEopToken <= EopFlipTokenLimit, "EOP flip token space exhausted");
+    return reserveEopFlip(info, nextEopToken);
+}
+
+std::uint32_t Driver::ReserveEopFlipAt(const FlipInfo& info, std::uint32_t token) {
+    std::lock_guard lock(mutex);
+    return reserveEopFlip(info, token);
+}
+
+std::uint32_t Driver::reserveEopFlip(const FlipInfo& info, std::uint32_t token) {
     rethrowFailure();
     checkStopping();
-    require(nextEopToken <= EopFlipTokenLimit, "EOP flip token space exhausted");
+    require(token >= EopFlipTokenBase && token <= EopFlipTokenLimit && !eopFlips.contains(token), "EOP flip token is not free");
     const auto output = outputs.find(info.handle);
     require(output != outputs.end(), "EOP flip references an unregistered video output");
     auto request = output->second->TryReserve(info);
     if (!request) return 0;
-    const auto token = nextEopToken;
     eopFlips.emplace(token, EopFlip{info.handle, std::move(request)});
-    ++nextEopToken;
+    nextEopToken = std::max(nextEopToken, token + 1);
     return token;
+}
+
+std::vector<std::uint32_t> Driver::PendingEopFlipTokens() {
+    std::lock_guard lock(mutex);
+    std::vector<std::uint32_t> tokens;
+    for (const auto& [token, flip] : eopFlips) tokens.push_back(token);
+    return tokens;
 }
 
 void Driver::RegisterVideoOutput(std::uint32_t handle, const std::shared_ptr<IVideoOutput>& output) {
@@ -74,6 +153,15 @@ void Driver::Present(const PresentationWindow& window, const DisplayBuffer* buff
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr || std::getenv("APS5_PROFILE_PRESENT") != nullptr;
     std::shared_ptr<VulkanDevice> presenting;
     timing.Mark("validate");
+    {
+        const auto start = std::chrono::steady_clock::now();
+        followingFrame().Wait();
+        static const bool trace = std::getenv("APS5_FG_TRACE") != nullptr;
+        static int traced = 0;
+        const double waited = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        if (trace && waited > 25.0 && traced++ < 200) std::fprintf(stderr, "[fg] flip waited %.1f ms for the game's last frame\n", waited);
+    }
+    timing.Mark("following_frame_wait");
     try {
         bool submitted = false;
         bool presentable = false;
@@ -145,6 +233,7 @@ void Driver::Present(const PresentationWindow& window, const DisplayBuffer* buff
             presenting->QueuePresent();
             timing.Mark("queue_present");
         }
+        if (presenting != nullptr && presenting->RealFramePending()) followingFrame().Start(presenting);
         gpuReady(context);
         timing.Mark("release_and_callback");
         TracyZone::MarkFrame();

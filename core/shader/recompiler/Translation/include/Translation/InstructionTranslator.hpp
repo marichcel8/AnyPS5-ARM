@@ -36,7 +36,11 @@ struct TranslateOptions {
     // Neither barycentrics nor the geometry stage that emulates them: v_interp_mov reads the host's value.
     bool hostInterpolationOnly = false;
     bool relaxedFloat = false;
+    bool interpolationFunctions = false;
     bool nativeFloat16 = false;
+    bool float32FlushToZero = false;
+    bool float32DenormPreserve = false;
+    bool gcnLegacyVertexInputs = false;
     std::optional<ShaderFloatMode> floatMode;
     ShaderStageInputInfo inputInfo;
     const EmbeddedFetchPlan* embeddedFetch = nullptr;

@@ -11,11 +11,14 @@
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include <array>
 #include <chrono>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
+#include <utility>
 
 namespace AgcDriver {
 
@@ -30,8 +33,21 @@ struct ComputePipelineObjects;
 struct RecipeHit;
 // The record tail shared by an ordinary dispatch and a recipe hit (VulkanDevice::recordDispatch).
 struct RecordedDispatch;
+struct DispatchCompletion;
 // The module, layout and pipeline a compute dispatch binds (VulkanDevice::createComputePipeline).
 struct ComputePipelineObjects;
+
+struct DeviceQueuePlan {
+    std::uint32_t mainCount = 1;
+    bool settle = false;
+    std::uint32_t settleFamily = 0;
+    std::uint32_t settleIndex = 0;
+    bool sparseBinding = false;
+    std::uint32_t sparseFamily = VK_QUEUE_FAMILY_IGNORED;
+    std::uint32_t sparseIndex = 0;
+};
+
+DeviceQueuePlan PlanDeviceQueues(std::span<const VkQueueFamilyProperties> families, std::uint32_t family, bool settles, bool sparseBinding);
 
 class VulkanDevice {
 public:
@@ -45,6 +61,7 @@ public:
     // Starts the journal replay if the device has not (a headless device starts it at its first
     // draw or dispatch) and joins it (tests; the teardown joins it anyway).
     void WaitForPipelineJournalReplay();
+    void SavePipelineCache();
     // Compute pipelines this device built, by dispatches and by the journal replay (tests).
     std::uint64_t ComputePipelinesCreated() const;
     ~VulkanDevice();
@@ -52,8 +69,10 @@ public:
     VulkanDevice& operator=(const VulkanDevice&) = delete;
     std::string DeviceName() const;
     std::string DriverInfo() const;
+    bool SupportsImageFormat(VkFormat format, VkImageUsageFlags usage) const;
     bool CalibrateClock(double& gpuNs, std::chrono::steady_clock::time_point& cpu) const;
     ShaderRecompiler::SpirvTarget Target() const;
+    Graphics::SampleOrder HostSampleOrder(const Graphics::State& graphics) const;
     std::optional<ShaderRecompiler::GeometryStageLimits> GeometryLimits() const;
     std::uint32_t MaxFragmentInputComponents() const;
     const std::uint32_t* WorkGroupCountLimit() const;
@@ -89,16 +108,18 @@ public:
     bool CanWaitUnlocked() const;
     std::uint64_t SubmitAndEpoch();
     void WaitRecorded(std::uint64_t serial);
+    std::uint64_t SubmittedEpoch() const;
+    bool WaitRecordedFor(std::uint64_t serial, std::uint64_t timeoutNanos);
     void ReapRecorded(std::uint64_t serial);
     // Completes the batches that already finished (non-blocking); under the mutex.
     void ReapRecorded();
     // Records a store of `bytes` at a guest address behind the recorded work, so the value appears
     // once that work completed; the batch is submitted by the queue worker's flush rules (or at once
     // with APS5_LABEL_SUBMIT_NOW=1). `stamp` is the record-order stamp and `queue` the recording
-    // queue for the recorder's pending-label table. Returns 0 when recorded on the GPU, 5 when kept
-    // as a completion action behind pending write-backs, else why the CPU must write it:
-    // 1 nothing recorded (the write is already ordered), 2 write-backs pending and 3 memory not
-    // imported, 4 unsuitable size or alignment.
+    // queue for the recorder's pending-label table. Returns 0 when recorded on the GPU, 5 when stored
+    // by a completion behind pending CPU write-backs or completion stores, else why the CPU must
+    // write it: 1 nothing recorded (the write is already ordered), 2 write-backs pending (only with
+    // APS5_DRAIN_COMPLETION_LABELS=1) and 3 memory not imported, 4 unsuitable size or alignment.
     // `reapFirst` retires finished batches before the checks; a caller recording a group of labels
     // under one lock passes it for the first label only.
     int WriteLabelOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t stamp, std::uint32_t queue, bool reapFirst = true);
@@ -106,6 +127,7 @@ public:
     // Pending-label table lookup and open-batch overlap test for WAIT_REG_MEM (see Recorder).
     std::optional<Graphics::Recorder::LabelHit> PendingLabel(std::uint64_t address, std::size_t bytes, std::uint64_t afterStamp, Graphics::Recorder::LabelRefusal* refusal = nullptr) const;
     bool OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const;
+    void SealPassWriteOnly();
     bool RecordedWritesSettled(std::uint64_t address, std::size_t bytes) const;
     void SettleCompletions();
     bool StoresPendingOver(std::uint64_t address, std::size_t bytes) const;
@@ -171,6 +193,7 @@ public:
     };
     using CopyWriterNote = std::function<void(std::span<const std::byte> value, std::uint64_t generation)>;
     CopyOutcome CopyBuffer(std::uint64_t destination, std::uint64_t source, std::size_t bytes, std::size_t cpuMax, std::size_t gpuMax, std::size_t knownMax, std::uint64_t programAddress, std::uint32_t queue, const CopyWriterNote& noteWriter);
+    bool GpuCopyPossible(std::uint64_t destination, std::uint64_t source, std::size_t bytes) const;
     // APS5_COPY_VERIFY=1 totals: CPU copies verified, whose source bytes changed over the sync (a
     // producer the rule missed), whose destination bytes were overwritten (a store the rule
     // missed), and whose destination an unsignaled batch read in place (the rule's own answer
@@ -234,6 +257,12 @@ public:
     // mutex (the same wait under it is only the fallback when the answer changes in between).
     bool PresentWaitsForSlots(const DisplayBuffer* buffer) const;
     bool AcquireImage();
+    // Frame generation: after QueuePresent showed a generated frame, the game's own follows in the
+    // next swapchain image. Acquire it without GuestMemory::GpuMutex (it waits for the next
+    // vertical blank), then queue it under the mutex.
+    bool RealFramePending() const;
+    bool AcquireRealImage();
+    void QueueRealFrame();
     bool PresentClear(std::uint32_t width, std::uint32_t height, bool opaque);
     void PresentPixels(std::uint32_t width, std::uint32_t height, std::span<const std::byte> pixels);
     bool PresentDisplayBuffer(const DisplayBuffer& buffer);
@@ -249,7 +278,7 @@ public:
     // blit-submit times after the flip packet; noted in-place reads checked
     // (APS5_FLIP_READ_CHECK=1) and found overwritten before the blit's fence.
     struct PresentStatistics {
-        std::uint64_t presents, gpuUnread, batchesAheadOfBlit, batchesAfterFlip, readsChecked, readsOverwritten, acquireDrops;
+        std::uint64_t presents, gpuUnread, batchesAheadOfBlit, batchesAfterFlip, readsChecked, readsOverwritten, acquireDrops, generated;
         double gpuBusyMs, gpuGapMs, lastSubmitAfterFlipMs, blitSubmitAfterFlipMs;
     };
     static PresentStatistics PresentCounts();
@@ -271,12 +300,12 @@ public:
     // `recipe`, when given, receives the Recipe a successful call built for its dispatch-cache
     // variant (design_cpu_final M4): only when the resource cache served or took the object
     // (reusable, cacheable) and recipes are on (APS5_NO_DISPATCH_RECIPE=1 builds none); else null.
-    void Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::uint64_t programAddress = 0, std::shared_ptr<PreparedDispatch> prepared = nullptr, std::shared_ptr<const Recipe>* recipe = nullptr);
+    void Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::uint64_t programAddress = 0, std::shared_ptr<PreparedDispatch> prepared = nullptr, std::shared_ptr<const Recipe>* recipe = nullptr, std::optional<std::pair<std::uint64_t, std::size_t>> htileClear = std::nullopt);
     struct IndirectOutcome {
         int cpuReason;
         double argumentReadMs;
     };
-    IndirectOutcome DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::uint64_t programAddress = 0, std::shared_ptr<PreparedDispatch> prepared = nullptr, std::shared_ptr<const Recipe>* recipe = nullptr);
+    IndirectOutcome DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::uint64_t programAddress = 0, std::shared_ptr<PreparedDispatch> prepared = nullptr, std::shared_ptr<const Recipe>* recipe = nullptr, const std::array<std::uint32_t, 3>& threadGroup = {});
     // A value-equal dispatch-cache hit with a recipe (design_cpu_final M4), in two steps.
     // PrepareRecipe, WITHOUT GuestMemory::GpuMutex: the pre-checks (recipes on, the recipe's
     // device is this one, its template and pipeline objects still alive), the template's
@@ -298,7 +327,7 @@ public:
     // with the recipe's, else the process aborts. `refreshByWords`: the driver's data-only hit
     // (`shader` carries live flat-SRT words the recipe's hash does not name), so the template's
     // data refresh is decided by the per-word compare instead of the hash.
-    RecipeOutcome DispatchRecipe(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::uint64_t programAddress, const std::shared_ptr<RecipeHit>& hit, IndirectOutcome& outcome, const std::shared_ptr<PreparedDispatch>& verify = nullptr, bool refreshByWords = false);
+    RecipeOutcome DispatchRecipe(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::uint64_t programAddress, const std::shared_ptr<RecipeHit>& hit, IndirectOutcome& outcome, const std::shared_ptr<PreparedDispatch>& verify = nullptr, bool refreshByWords = false, const std::array<std::uint32_t, 3>& threadGroup = {});
     // Whether dispatch-cache hits use recipes (APS5_NO_DISPATCH_RECIPE unset) and whether every
     // hit is verified (APS5_VERIFY_RECIPE=1).
     static bool DispatchRecipes();
@@ -318,6 +347,7 @@ public:
     // `recipe`, when given, receives the DrawRecipe a recorded, cacheable, reusable, direct draw
     // built for its draw-cache entry (design_cpu_final M8); null otherwise.
     void Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {}, std::shared_ptr<const DrawRecipe>* recipe = nullptr);
+    bool DrawInputsInPlace() const;
     std::optional<std::string> KnownDrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) const;
     void ColorMetadataPass(const Graphics::ColorMetadataPass& pass);
     // A draw-cache hit recorded from its recipe (Graphics::DrawWithRecipe), under the mutex after
@@ -335,9 +365,7 @@ public:
     void EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots = {});
     bool PrebuildGraphicsLibraries(const Graphics::ShaderStages& stages, std::span<const Graphics::CompiledShader> shaders);
 
-private:
-    VulkanDevice(const PresentationWindow* window, bool compileOnly);
-    friend struct VulkanDeviceTestAccess;
+public:
     // The device's Graphics::Context: a copy of the one built at setup (its instance functions
     // resolved then, its function table filled then), or with APS5_NO_CONTEXT_CACHE=1 built anew.
     Graphics::Context graphicsContext() const;
@@ -345,10 +373,18 @@ private:
     std::uint32_t computeSubgroupSize(const ShaderRecompiler::RecompileResult& shader) const;
     VkPipelineShaderStageCreateFlags computeStageFlags(const ShaderRecompiler::RecompileResult& shader) const;
     std::shared_ptr<ComputePipelineObjects> createComputePipeline(const Graphics::Context& context, const ShaderRecompiler::RecompileResult& shader, VkDescriptorSetLayout setLayout, std::span<const std::uint32_t> layoutKey, VkShaderStageFlags pushStages, std::uint64_t programAddress);
+    bool completionStoresOver(std::uint64_t address, std::size_t bytes) const;
+    bool copyWaitsOnCompletions(std::uint64_t address, std::size_t bytes) const;
+
+private:
+    VulkanDevice(const PresentationWindow* window, bool compileOnly);
+    friend struct VulkanDeviceTestAccess;
+    VkPipeline splitComputePipeline(const Graphics::Context& context, const ShaderRecompiler::RecompileResult& shader, ComputePipelineObjects& objects, const std::array<std::uint32_t, 3>& base);
     ShaderRecompiler::SpirvTarget buildTarget() const;
     Graphics::Context buildContext() const;
     // Body of Dispatch and DispatchIndirect: `arguments` 0 dispatches x, y, z groups.
-    IndirectOutcome dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe);
+    IndirectOutcome dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t programAddress, std::shared_ptr<PreparedDispatch> prepared, std::shared_ptr<const Recipe>* recipe, const std::array<std::uint32_t, 3>& threadGroup = {}, std::optional<std::pair<std::uint64_t, std::size_t>> htileClear = std::nullopt);
+    IndirectOutcome recordCompletedDispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::uint64_t arguments, std::uint64_t programAddress, std::shared_ptr<const Recipe>* recipeOut, const std::array<std::uint32_t, 3>& threadGroup, std::optional<std::pair<std::uint64_t, std::size_t>> htileClear, DispatchCompletion& completion);
     // The stage-A pre-sync over `surfaces` (see PrepareDispatch): the serial waited for, 0 none.
     std::uint64_t presync(std::span<const Graphics::PresyncSurface> surfaces);
     std::shared_ptr<ComputePipelineObjects> computePipeline(const Graphics::Context& context, const ShaderRecompiler::RecompileResult& shader, VkDescriptorSetLayout setLayout, std::span<const std::uint32_t> layoutKey, VkShaderStageFlags pushStages, std::uint64_t programAddress);
@@ -359,6 +395,7 @@ private:
     // registration: keeps, the template data refresh, barriers, bind, push, dispatch, marks.
     void recordDispatch(RecordedDispatch& record);
     bool present(std::uint32_t width, std::uint32_t height, bool opaque, std::span<const std::byte> pixels, const DisplayBuffer* display = nullptr, const std::shared_ptr<Graphics::StorageTexture>& resident = nullptr, VkFilter residentFilter = VK_FILTER_LINEAR, bool dumpFrame = false, bool residentConvert = false, const VkClearColorValue* uniform = nullptr, std::uint32_t residentLayer = 0, bool passthrough = false);
+    bool takeScreenshot(bool dumpFrame);
     void recreateSwapchain(std::uint32_t width, std::uint32_t height, bool force);
     void refreshSurfaceFormats();
     void setHdrMetadata();
