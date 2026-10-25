@@ -193,11 +193,11 @@ static void memory_formats(void) {
     near(94, load80(bytes), -3.0);
     store80(1e-310, bytes);
     near(95, load80(bytes) * 1e300, 1e-10);
-    storebcd(123456789012345678ll, bytes);
-    same(96, bytes[0], 0x78);
-    same(97, bytes[8], 0x12);
+    storebcd(1234567890123456ll, bytes);
+    same(96, bytes[0], 0x56);
+    same(97, bytes[7] | bytes[8] << 8, 0x12);
     same(98, bytes[9], 0);
-    near(99, loadbcd(bytes), 123456789012345678.0);
+    near(99, loadbcd(bytes), 1234567890123456.0);
     storebcd(-42, bytes);
     same(100, bytes[0], 0x42);
     same(101, bytes[9], 0x80);
