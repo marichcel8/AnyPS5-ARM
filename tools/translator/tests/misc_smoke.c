@@ -115,6 +115,61 @@ static void environment(void) {
     __asm__ volatile("fldcw %0" : : "m"(word));
 }
 
+static void simd(void) {
+    static unsigned char bytes[32], threes[32];
+    for (int i = 0; i < 32; ++i) {
+        bytes[i] = (unsigned char)i;
+        threes[i] = 3;
+    }
+    u64 sums[4];
+    __asm__ volatile("movdqu %1, %%xmm0\n\tmovdqu %2, %%xmm1\n\tpsadbw %%xmm1, %%xmm0\n\tmovdqu %%xmm0, %0" : "=m"(*(u64(*)[2])sums) : "m"(*(u8(*)[16])bytes), "m"(*(u8(*)[16])threes) : "xmm0", "xmm1");
+    same(80, (i64)sums[0], 16);
+    same(81, (i64)sums[1], 68);
+    __asm__ volatile("vmovdqu %1, %%ymm0\n\tvmovdqu %2, %%ymm1\n\tvpsadbw %%ymm1, %%ymm0, %%ymm2\n\tvmovdqu %%ymm2, %0\n\tvzeroupper" : "=m"(sums) : "m"(bytes), "m"(threes) : "xmm0", "xmm1", "xmm2");
+    same(82, (i64)sums[0], 16);
+    same(83, (i64)sums[3], 196);
+    static const u8 unsignedBytes[16] = {200, 100, 255, 255};
+    static const signed char signedBytes[16] = {-128, 127, 127, 127};
+    short words[8];
+    __asm__ volatile("vmovdqu %1, %%xmm0\n\tvpmaddubsw %2, %%xmm0, %%xmm1\n\tvmovdqu %%xmm1, %0" : "=m"(words) : "m"(unsignedBytes), "m"(signedBytes) : "xmm0", "xmm1");
+    same(84, words[0], -12900);
+    same(85, words[1], 32767);
+    static const u16 candidates[8] = {9, 4, 7, 4, 10, 11, 12, 13};
+    u32 position[4];
+    __asm__ volatile("phminposuw %1, %%xmm0\n\tmovdqu %%xmm0, %0" : "=m"(position) : "m"(candidates) : "xmm0");
+    same(86, position[0], 0x10004);
+    same(87, position[1] | position[2] | position[3], 0);
+    static const float left[4] = {1, 2, 3, 4}, right[4] = {10, 20, 30, 40};
+    float out[4];
+    __asm__ volatile("vmovups %1, %%xmm0\n\tvhaddps %2, %%xmm0, %%xmm1\n\tvmovups %%xmm1, %0" : "=m"(out) : "m"(left), "m"(right) : "xmm0", "xmm1");
+    same(88, out[0] == 3 && out[1] == 7 && out[2] == 30 && out[3] == 70, 1);
+    __asm__ volatile("vmovups %1, %%xmm0\n\tvaddsubps %2, %%xmm0, %%xmm1\n\tvmovups %%xmm1, %0" : "=m"(out) : "m"(left), "m"(right) : "xmm0", "xmm1");
+    same(89, out[0] == -9 && out[1] == 22 && out[2] == -27 && out[3] == 44, 1);
+    static const double doubles[2] = {1.5, -2.25};
+    __asm__ volatile("vcvtpd2psx %1, %%xmm0\n\tvmovups %%xmm0, %0" : "=m"(out) : "m"(doubles) : "xmm0");
+    same(90, out[0] == 1.5f && out[1] == -2.25f && out[2] == 0 && out[3] == 0, 1);
+    static const float tenths[4] = {0.1f, -0.1f, 0.1f, -0.1f};
+    u16 halves[4];
+    __asm__ volatile("vmovups %1, %%xmm0\n\tvcvtps2ph $1, %%xmm0, %0" : "=m"(*(u64*)halves) : "m"(tenths) : "xmm0");
+    same(91, halves[0], 0x2e66);
+    same(92, halves[1], 0xae67);
+    __asm__ volatile("vmovups %1, %%xmm0\n\tvcvtps2ph $2, %%xmm0, %0" : "=m"(*(u64*)halves) : "m"(tenths) : "xmm0");
+    same(93, halves[0], 0x2e67);
+    same(94, halves[1], 0xae66);
+    __asm__ volatile("vmovups %1, %%xmm0\n\tvcvtps2ph $3, %%xmm0, %0" : "=m"(*(u64*)halves) : "m"(tenths) : "xmm0");
+    same(95, halves[0], 0x2e66);
+    same(96, halves[1], 0xae66);
+    u32 control = 0x9fc0, stored = 0;
+    __asm__ volatile("vldmxcsr %1\n\tvstmxcsr %0" : "=m"(stored) : "m"(control));
+    same(97, stored, 0x9fc0);
+    control = 0x1f80;
+    __asm__ volatile("ldmxcsr %1\n\tstmxcsr %0" : "=m"(stored) : "m"(control));
+    same(98, stored, 0x1f80);
+    static _Alignas(32) u64 target[4];
+    __asm__ volatile("vmovdqu %1, %%ymm0\n\tvmovntdq %%ymm0, %0\n\tsfence\n\tvzeroupper" : "=m"(target) : "m"(bytes) : "xmm0");
+    same(99, (i64)target[3], 0x1f1e1d1c1b1a1918ll);
+}
+
 void _start(void* block) {
     (void)block;
     loops();
@@ -124,6 +179,7 @@ void _start(void* block) {
     frames();
     halves();
     environment();
+    simd();
     if (first < 0) {
         puts("misc ok");
         exit(0);

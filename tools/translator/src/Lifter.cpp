@@ -920,8 +920,14 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
         return;
     }
     switch (id) {
-    case X86_INS_NOP: case X86_INS_ENDBR64: case X86_INS_PAUSE:
+    case X86_INS_NOP: case X86_INS_ENDBR64: case X86_INS_PAUSE: case X86_INS_EMMS:
     case X86_INS_PREFETCH: case X86_INS_PREFETCHW: case X86_INS_PREFETCHT0: case X86_INS_PREFETCHT1: case X86_INS_PREFETCHT2: case X86_INS_PREFETCHNTA:
+        return;
+    case X86_INS_LDMXCSR: case X86_INS_VLDMXCSR:
+        builder.CreateStore(Load(builder.getInt32Ty(), Address(instruction, x86.operands[0].mem)), Field(StateLayout::Mxcsr));
+        return;
+    case X86_INS_STMXCSR: case X86_INS_VSTMXCSR:
+        Store(builder.CreateLoad(builder.getInt32Ty(), Field(StateLayout::Mxcsr)), Address(instruction, x86.operands[0].mem));
         return;
     case X86_INS_LFENCE: case X86_INS_MFENCE: case X86_INS_SFENCE:
         builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent);
@@ -1066,7 +1072,7 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
     case X86_INS_MOVAPS: case X86_INS_MOVUPS: case X86_INS_MOVAPD: case X86_INS_MOVUPD: case X86_INS_MOVDQA: case X86_INS_MOVDQU:
     case X86_INS_LDDQU: case X86_INS_MOVNTDQ: case X86_INS_MOVNTPS: case X86_INS_MOVNTPD: case X86_INS_MOVD: case X86_INS_MOVQ:
     case X86_INS_VMOVAPS: case X86_INS_VMOVUPS: case X86_INS_VMOVAPD: case X86_INS_VMOVUPD: case X86_INS_VMOVDQA: case X86_INS_VMOVDQU:
-    case X86_INS_VMOVD: case X86_INS_VMOVQ:
+    case X86_INS_VMOVD: case X86_INS_VMOVQ: case X86_INS_VMOVNTDQ: case X86_INS_VMOVNTPS: case X86_INS_VMOVNTPD: case X86_INS_MOVNTDQA: case X86_INS_VMOVNTDQA:
         VectorMove(instruction);
         return;
     case X86_INS_PXOR: case X86_INS_XORPS: case X86_INS_XORPD: case X86_INS_PAND: case X86_INS_ANDPS: case X86_INS_ANDPD:

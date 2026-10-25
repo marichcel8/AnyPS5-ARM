@@ -115,6 +115,47 @@ bool Lifter::Impl::EmitVectorInteger(const Instruction& instruction) {
         });
         return true;
     }
+    if (op == "pmaddubsw") {
+        lanewise(8, [&](llvm::Value* a, llvm::Value* b) {
+            const unsigned count = llvm::cast<llvm::FixedVectorType>(a->getType())->getNumElements();
+            auto* wide = llvm::FixedVectorType::get(Int(16), count);
+            auto* product = builder.CreateMul(builder.CreateZExt(a, wide), builder.CreateSExt(b, wide));
+            std::vector<int> evens, odds;
+            for (unsigned i = 0; i < count / 2; ++i) {
+                evens.push_back(static_cast<int>(2 * i));
+                odds.push_back(static_cast<int>(2 * i + 1));
+            }
+            return builder.CreateBinaryIntrinsic(llvm::Intrinsic::sadd_sat, builder.CreateShuffleVector(product, evens), builder.CreateShuffleVector(product, odds));
+        });
+        return true;
+    }
+    if (op == "psadbw") {
+        auto* a = Lanes(first(), 8);
+        auto* b = Lanes(second(), 8);
+        const unsigned count = llvm::cast<llvm::FixedVectorType>(a->getType())->getNumElements();
+        auto* difference = builder.CreateSub(builder.CreateBinaryIntrinsic(llvm::Intrinsic::umax, a, b), builder.CreateBinaryIntrinsic(llvm::Intrinsic::umin, a, b));
+        auto* wide = builder.CreateZExt(difference, llvm::FixedVectorType::get(Int(16), count));
+        llvm::Value* result = llvm::Constant::getNullValue(llvm::FixedVectorType::get(Int(64), count / 8));
+        for (unsigned group = 0; group < count / 8; ++group) {
+            std::vector<int> slice;
+            for (unsigned i = 0; i < 8; ++i) slice.push_back(static_cast<int>(group * 8 + i));
+            auto* sum = builder.CreateAddReduce(builder.CreateShuffleVector(wide, slice));
+            result = builder.CreateInsertElement(result, builder.CreateZExt(sum, Int(64)), static_cast<std::uint64_t>(group));
+        }
+        write(Flat(result));
+        return true;
+    }
+    if (op == "phminposuw") {
+        auto* a = Lanes(Read(instruction, 1), 16);
+        auto* minimum = builder.CreateUnaryIntrinsic(llvm::Intrinsic::vector_reduce_umin, a);
+        std::vector<std::uint16_t> indices;
+        for (std::uint16_t i = 0; i < 8; ++i) indices.push_back(i);
+        auto* matching = builder.CreateICmpEQ(a, builder.CreateVectorSplat(8, minimum));
+        auto* candidates = builder.CreateSelect(matching, llvm::ConstantDataVector::get(context, indices), llvm::ConstantInt::get(a->getType(), 8));
+        auto* index = builder.CreateUnaryIntrinsic(llvm::Intrinsic::vector_reduce_umin, candidates);
+        write(builder.CreateOr(builder.CreateZExt(minimum, Int(128)), builder.CreateShl(builder.CreateZExt(index, Int(128)), 16)));
+        return true;
+    }
     if (op == "pmuldq" || op == "pmuludq") {
         const bool isSigned = op == "pmuldq";
         lanewise(64, [&](llvm::Value* a, llvm::Value* b) {

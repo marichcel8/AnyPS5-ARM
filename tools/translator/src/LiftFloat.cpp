@@ -51,8 +51,9 @@ int PredicateFromName(const std::string& name) {
 bool Lifter::Impl::EmitVectorFloat(const Instruction& instruction) {
     const auto& mnemonic = instruction.mnemonic;
     const bool vex = mnemonic.front() == 'v';
-    const std::string op = vex ? mnemonic.substr(1) : mnemonic;
+    std::string op = vex ? mnemonic.substr(1) : mnemonic;
     if (op.size() < 4) return false;
+    if (op.find("pd2") != std::string::npos && (op.back() == 'x' || op.back() == 'y')) op.pop_back();
     if (instruction.x86.op_count == 2 && instruction.Memory(0) && instruction.Memory(1)) return false;
     const std::string suffix = op.substr(op.size() - 2);
     const bool scalar = suffix == "ss" || suffix == "sd";
@@ -119,6 +120,29 @@ bool Lifter::Impl::EmitVectorFloat(const Instruction& instruction) {
         auto* result = builder.CreateIntrinsic(llvm::Intrinsic::fma, {x->getType()}, {x, y, z});
         if (scalar) write(replaceLow(Read(instruction, 0), result));
         else write(Flat(result));
+        return true;
+    }
+    if (packed && (stem == "hadd" || stem == "hsub")) {
+        auto* a = first();
+        auto* b = Read(instruction, secondIndex());
+        auto pairs = [&](int offset) {
+            return Lanes(LaneShuffle(a, b, elementBits, [offset](unsigned j, unsigned perLane) {
+                const unsigned half = perLane / 2;
+                return static_cast<int>(j < half ? 2 * j : perLane + 2 * (j - half)) + offset;
+            }), element);
+        };
+        auto* even = pairs(0);
+        auto* odd = pairs(1);
+        write(Flat(stem == "hadd" ? builder.CreateFAdd(even, odd) : builder.CreateFSub(even, odd)));
+        return true;
+    }
+    if (packed && stem == "addsub") {
+        auto* a = Lanes(first(), element);
+        auto* b = Lanes(Read(instruction, secondIndex()), element);
+        const unsigned count = llvm::cast<llvm::FixedVectorType>(a->getType())->getNumElements();
+        std::vector<int> mask;
+        for (unsigned i = 0; i < count; ++i) mask.push_back(static_cast<int>(i % 2 == 0 ? i : count + i));
+        write(Flat(builder.CreateShuffleVector(builder.CreateFSub(a, b), builder.CreateFAdd(a, b), mask)));
         return true;
     }
     if ((scalar || packed) && (stem == "rcp" || stem == "rsqrt")) {
@@ -292,10 +316,31 @@ void Lifter::Impl::HalfFloat(const Instruction& instruction) {
         return;
     }
     const auto control = static_cast<unsigned>(instruction.Op(2).imm);
-    if ((control & 4) == 0 && (control & 3) != 0) throw Unsupported{"vcvtps2ph rounding"};
+    const unsigned mode = (control & 4) != 0 ? 0 : control & 3;
     const unsigned lanes = instruction.Bits(1) / 32;
     auto* source = Lanes(Read(instruction, 1), builder.getFloatTy());
-    auto* result = Flat(builder.CreateFPTrunc(source, llvm::FixedVectorType::get(half, lanes)));
+    auto* nearest = builder.CreateFPTrunc(source, llvm::FixedVectorType::get(half, lanes));
+    llvm::Value* result = Flat(nearest);
+    if (mode != 0) {
+        auto* bits = Lanes(result, 16);
+        auto* back = builder.CreateFPExt(nearest, source->getType());
+        llvm::Value* away = nullptr;
+        llvm::Value* step = nullptr;
+        auto* negative = builder.CreateICmpSLT(bits, llvm::Constant::getNullValue(bits->getType()));
+        auto* one = llvm::ConstantInt::get(bits->getType(), 1);
+        auto* minusOne = llvm::ConstantInt::getSigned(bits->getType(), -1);
+        if (mode == 1) {
+            away = builder.CreateFCmpOGT(back, source);
+            step = builder.CreateSelect(negative, one, minusOne);
+        } else if (mode == 2) {
+            away = builder.CreateFCmpOLT(back, source);
+            step = builder.CreateSelect(negative, minusOne, one);
+        } else {
+            away = builder.CreateFCmpOGT(builder.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, back), builder.CreateUnaryIntrinsic(llvm::Intrinsic::fabs, source));
+            step = minusOne;
+        }
+        result = Flat(builder.CreateSelect(away, builder.CreateAdd(bits, step), bits));
+    }
     if (instruction.Memory(0)) Write(instruction, 0, result);
     else Write(instruction, 0, Resize(result, 128), true);
 }
