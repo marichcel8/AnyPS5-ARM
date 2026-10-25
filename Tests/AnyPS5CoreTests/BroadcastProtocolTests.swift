@@ -36,6 +36,18 @@ final class BroadcastProtocolTests: XCTestCase {
         XCTAssertThrowsError(try AMF0.decodeAll(Data([0x0D])))
     }
 
+    func testAMF0RefusesValuesNestedTooDeep() {
+        // A strict array of one inside another, 200 000 deep: read without a limit, this runs
+        // out of stack long before it runs out of bytes.
+        var bytes = Data()
+        for _ in 0 ..< 200_000 { bytes.append(contentsOf: [0x0A, 0, 0, 0, 1]) }
+        bytes.append(0x05)
+        XCTAssertThrowsError(try AMF0.decodeAll(bytes))
+        var shallow = AMF0.null
+        for _ in 0 ..< 30 { shallow = .strictArray([shallow]) }
+        XCTAssertEqual(try AMF0.decodeAll(AMF0.encode([shallow])), [shallow])
+    }
+
     // MARK: Chunks
 
     /// The first message on a chunk stream has a full header (type 0); a message longer than the
@@ -108,6 +120,23 @@ final class BroadcastProtocolTests: XCTestCase {
         XCTAssertEqual(got, sent)
         XCTAssertEqual(reader.chunkSize, 64)
         XCTAssertEqual(reader.received, UInt64(stream.count))
+    }
+
+    /// A server whose type 1 header makes a message shorter than what already came of it, or
+    /// that sets a chunk size of 0 through the top bit, is refused, not a crash.
+    func testTheReaderRefusesAMessageShorterThanWhatCame() {
+        var bytes: [UInt8] = [0x03, 0, 0, 0, 0, 0, 200, 20, 0, 0, 0, 0]
+        bytes += [UInt8](repeating: 0x05, count: 128)
+        // Type 1 on the same chunk stream, mid-message: length 50, fewer than the 128 read.
+        bytes += [0x43, 0, 0, 0, 0, 0, 50, 20]
+        bytes += [UInt8](repeating: 0x05, count: 50)
+        var reader = RTMPChunkReader()
+        reader.append(Data(bytes))
+        XCTAssertThrowsError(try reader.messages())
+
+        var zero = RTMPChunkReader()
+        zero.append(Data([0x02, 0, 0, 0, 0, 0, 4, 1, 0, 0, 0, 0, 0x80, 0, 0, 0]))
+        XCTAssertThrowsError(try zero.messages())
     }
 
     // MARK: Handshake

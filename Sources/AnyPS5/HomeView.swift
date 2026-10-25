@@ -576,6 +576,10 @@ extension AppModel {
             if command == .back { cancelStart() }
             return true
         }
+        if fontWait != nil {
+            if command == .back { cancelFontWait() }
+            return true
+        }
         if command == .home {
             togglePlaying()
             return true
@@ -644,6 +648,21 @@ extension AppModel {
                 return true
             }
             return panelCommand(command)
+        case .cloudStorage:
+            if command == .back || command == .options {
+                if cloud.armed != nil || cloud.expanded != nil {
+                    withAnimation(Motion.focus) {
+                        cloud.armed = nil
+                        cloud.expanded = nil
+                    }
+                    Sounds.shared.play(.back)
+                } else {
+                    backFromCloudStorage()
+                }
+                return true
+            }
+            if command == .up || command == .down { cloud.armed = nil }
+            return panelCommand(command)
         case .log:
             if command == .back || command == .select { closeOverlay() }
             return true
@@ -657,7 +676,9 @@ extension AppModel {
             case .up: moveTrophy(-1)
             case .down: moveTrophy(1)
             case .select: if togetherUser != nil { openLeaderboard(selectedGame) }
-            case .back, .options: closeOverlay()
+            // △ shows (or hides again) the focused hidden trophy; on any other it closes the list.
+            case .options: if !toggleFocusedHiddenTrophy() { closeOverlay() }
+            case .back: closeOverlay()
             default: break
             }
             return true
@@ -705,6 +726,7 @@ extension AppModel {
     }
 
     private func galleryCommand(_ command: Command) {
+        if cloud.sharing { return shareCommand(command) }
         let count = galleryShots.count
         func move(_ delta: Int) {
             let next = min(count - 1, max(0, galleryIndex + delta))
@@ -729,7 +751,8 @@ extension AppModel {
                 closeOverlay()
             }
         case .options:
-            if galleryShots.indices.contains(galleryIndex) { NSWorkspace.shared.activateFileViewerSelecting([galleryShots[galleryIndex]]) }
+            // Share (a chat, the user's gallery, Finder) where AnyTogether keeps files; else Finder.
+            openShareMenu()
         case .previousGame, .nextGame, .home, .capture:
             break
         }
@@ -748,6 +771,7 @@ extension AppModel {
         guard selected != before else { return }
         if overlay == .gallery { loadGallery() }
         if overlay == .trophies {
+            revealedTrophies = []
             if let game = selectedGame, trophies[game.id] != nil {
                 trophyIndex = 0
             } else {

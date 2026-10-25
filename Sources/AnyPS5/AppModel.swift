@@ -35,6 +35,8 @@ struct Preferences: Codable, Equatable {
     var togetherServer: String?
     /// The running game on the user's Discord profile; nil means on.
     var discordPresence: Bool?
+    /// A Join button with it, opening the party's or share play's join code page; nil means on.
+    var discordJoin: Bool?
     /// Keeping the last seconds of the game playing, to save as a clip (Create, ⌥F12 or the
     /// phone); nil means off. clipLength is in seconds, nil for 30.
     var clips: Bool?
@@ -43,12 +45,20 @@ struct Preferences: Codable, Equatable {
     /// off. syncFolder nil is iCloud Drive.
     var saveSync: Bool?
     var syncFolder: String?
+    /// Save Sync through the AnyTogether cloud ("together") instead of the folder; nil is the folder.
+    var syncThrough: String?
     var profileName = NSFullUserName().components(separatedBy: " ").first ?? "Player"
     var gamesFolder: String?
     /// Where F12 saves screenshots, nil for ~/Pictures/AnyPS5.
     var screenshotsFolder: String?
-    /// Console system font files for the games (ANYPS5_SYSTEM_FONTS), nil for none.
+    /// The user's own system font files for the games, before the launcher's (SystemFonts); nil
+    /// for none.
     var fontsFolder: String?
+    /// The games (title IDs) that opened a font set with Japanese, Chinese or Korean in it: their
+    /// start waits for those fonts to be downloaded.
+    var cjkGames: [String]?
+    /// Hidden trophies show what they are before they are earned; nil means off.
+    var alwaysShowHiddenTrophies: Bool?
     /// The engine toolkit that unlocks games without one of their own (EngineChoice: nil is
     /// the built-in one, "custom" the folder below, else a downloaded version).
     var engine: String?
@@ -130,6 +140,8 @@ enum Overlay: Equatable {
     case gameHub
     /// The profile picture being cut square.
     case cropPicture
+    /// Settings → Cloud Storage: the usage, the cloud saves and the media on AnyTogether.
+    case cloudStorage
 }
 
 struct Toast: Identifiable, Equatable {
@@ -180,6 +192,9 @@ final class AppModel: ObservableObject {
     @Published var libraryIndex = 0
     /// The focused row of the trophy list.
     @Published var trophyIndex = 0
+    /// The hidden trophies shown in the list this time (Show), by game and trophy; forgotten
+    /// when the list closes.
+    @Published var revealedTrophies: Set<String> = []
     @Published var galleryIndex = 0
     /// One screenshot over the whole screen, instead of the grid.
     @Published var galleryViewing = false
@@ -249,12 +264,27 @@ final class AppModel: ObservableObject {
     @Published var engineDownloads: [String: Double] = [:]
     /// The custom toolkit folder, when it holds a toolkit.
     @Published var customToolkit: Toolkit?
+    /// The Noto fonts inside the app (SystemFontsPanel.swift).
+    let builtInFonts = SystemFonts.locateBuiltIn()
+    /// The Japanese, Chinese and Korean fonts, downloaded the first time a game needs them.
+    let fontDownloads: FontDownloads
+    /// The folder of links to the fonts a game gets (ANYPS5_SYSTEM_FONTS).
+    let gameFonts: URL
+    /// How far the Japanese, Chinese and Korean fonts' download is, while it runs.
+    @Published var cjkProgress: Double?
+    @Published var cjkInstalled = false
+    /// The game waiting for those fonts before it starts.
+    @Published var fontWait: Game?
+    var cjkWaiters: [@MainActor (Bool) -> Void] = []
+    /// Where each start's lines begin in the game's log, until the fonts it opened are known.
+    var fontLogOffsets: [String: UInt64] = [:]
+    var fontWatch: Task<Void, Never>?
     private var installer: Installer?
     private var installLog: [String: [String]] = [:]
     private var watcher: DispatchSourceFileSystemObject?
     private var lastScan = Date.distantPast
     private var trophiesRead: Set<String> = []
-    private let discord = DiscordPresence(applicationID: DiscordPresence.applicationID)
+    let discord = DiscordPresence(applicationID: DiscordPresence.applicationID)
     private var starts: [String: Date] = [:]
     private(set) var remote: RemoteServer?
     /// iPhones on a cable reach the phone server through it, with no Wi-Fi.
@@ -283,6 +313,10 @@ final class AppModel: ObservableObject {
         self.preferences = preferences ?? Preferences.load()
         toolkitStore = preferences == nil ? ToolkitStore() : ToolkitStore(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-toolkits-\(UUID().uuidString)"))
         themes = preferences == nil ? ThemeLibrary() : ThemeLibrary(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-themes"))
+        let fonts = preferences == nil ? FontDownloads.root : FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-fonts-\(UUID().uuidString)")
+        fontDownloads = FontDownloads(folder: fonts.appendingPathComponent("CJK"))
+        gameFonts = fonts.appendingPathComponent("Games")
+        cjkInstalled = fontDownloads.installed
         designs = themes.all
         if persists {
             togetherUser = together.user
@@ -488,6 +522,8 @@ final class AppModel: ObservableObject {
     var togetherFlush: Task<Void, Never>?
     /// The social screens' state: activity, leaderboards, notifications.
     lazy var social = SocialState(owner: self)
+    /// Cloud saves and media: whether the server keeps files, Settings → Cloud Storage.
+    lazy var cloud = CloudState(owner: self)
     lazy var togetherSync = TogetherSync(client: together, deviceName: Host.current().localizedName ?? "Mac", model: AppModel.machineModel)
     /// When the running game started, for the play session AnyTogether keeps.
     var sessionStart: Date?
@@ -529,9 +565,30 @@ final class AppModel: ObservableObject {
     @Published var groupName = ""
     @Published var groupFocus = 0
     /// The party the user is in, the invites waiting, and whether a new party is open to friends.
-    @Published var party: TogetherParty?
+    @Published var party: TogetherParty? {
+        didSet { partyChanged() }
+    }
     @Published var partyInvites: [TogetherPartyInvite] = []
     @Published var partyStartsOpen = false
+    /// "Join with a code": what was typed, what it opens, and asking with it.
+    @Published var joinEntry = JoinEntry()
+    var joinLookup: Task<Void, Never>?
+    /// Parties and share plays (by ID) whose code the user stopped this session, or for which one
+    /// was made for Discord already: no code is made for the Join button again.
+    var codeStopped: Set<String> = []
+    var codeMakingForDiscord: Set<String> = []
+    /// Who asked with the code (party.request / share_play.request said so), by user ID.
+    @Published var codeAskers: Set<String> = []
+    /// The Discord link typed for the party, sent once it reads as one.
+    var discordLinkSend: Task<Void, Never>?
+    /// What Discord was shown last, and since when the user is in the party.
+    var discordShown: DiscordActivity?
+    var discordCleared = true
+    /// When the running game's window showed: its time on Discord.
+    var discordSince: Date?
+    var partySince: (id: String, at: Date)?
+    /// Discord looked at again when the code its Join button opens runs out, and when.
+    var discordRefresh: (task: Task<Void, Never>, at: Date)?
     /// The game session the user hosts or joined, and invitations to friends' games.
     @Published var gameSession: TogetherGameSession?
     @Published var gameInvites: [TogetherGameInvite] = []
@@ -539,19 +596,28 @@ final class AppModel: ObservableObject {
     /// Find players, Live now, public parties, discovery and game hubs.
     @Published var discover = DiscoverState()
     /// Share play: what the friends panel shows, and the running share play's pieces.
-    @Published var share = ShareState()
+    @Published var share = ShareState() {
+        didSet {
+            // Discord's Join button follows the share play hosted and its code.
+            if oldValue.hosting?.id != share.hosting?.id || oldValue.hosting?.joinCode != share.hosting?.joinCode { updateDiscord() }
+        }
+    }
     var shareSession: ShareSession?
     var shareWatch: ShareWatchSession?
     /// The party's voice: the call joined, the mesh, the microphone, ⌥V held, who speaks.
     @Published var voiceCall: String?
     var partyVoice: PartyVoice?
-    @Published var micOn = true
+    /// The microphone's switch and deafening.
+    @Published var mic = TogetherVoiceMic()
+    var micOn: Bool { mic.on }
+    var deafened: Bool { mic.deafened }
     @Published var talkHeld = false
     @Published var voiceSpeaking: Set<String> = []
-    /// Who in the call muted themselves, as the server says.
+    /// Who in the call muted or deafened themselves, as the server says.
     @Published var voiceMuted: Set<String> = []
-    /// Whether the server was last told the user is muted.
-    var voiceSentMuted = false
+    @Published var voiceDeafened: Set<String> = []
+    /// What the server was last told about the user (nil: nothing yet in this call).
+    var voiceSent: TogetherVoiceMic.State?
     /// The friend in a direct call (nil in the party's voice), and whether they have not answered yet.
     @Published var callFriend: TogetherPerson?
     @Published var callWaiting = false
@@ -839,8 +905,8 @@ final class AppModel: ObservableObject {
     /// Plays the game, its saves brought in step first where save sync is on; `trace` turns
     /// detailed logging on for this start only.
     func play(_ game: Game, trace: Bool = false) {
-        guard root != nil, starting == nil, running == nil, syncing == nil else { return }
-        familyGate(game) { self.syncSaves(game) { self.start(game, trace: trace) } }
+        guard root != nil, starting == nil, running == nil, syncing == nil, fontWait == nil else { return }
+        familyGate(game) { self.syncSaves(game) { self.ensureFonts(game) { self.start(game, trace: trace) } } }
     }
 
     private func start(_ game: Game, trace: Bool = false) {
@@ -855,7 +921,7 @@ final class AppModel: ObservableObject {
         let written = (try? settings.writeInputFile(to: inputFile)) != nil
         let screenshots = screenshotsFolder
         try? FileManager.default.createDirectory(at: screenshots, withIntermediateDirectories: true)
-        configuration.environment = settings.environment(launcherLanguage: preferences.language.consoleLanguage, inputFile: written ? inputFile : nil, screenshots: screenshots, fonts: fontsFolder, trace: trace)
+        configuration.environment = settings.environment(launcherLanguage: preferences.language.consoleLanguage, inputFile: written ? inputFile : nil, screenshots: screenshots, fonts: gameFontsFolder(), trace: trace)
             .merging(remote?.bridgeEnvironment ?? [:]) { _, phone in phone }
             // Where the engine's online bridge finds the AnyTogether game session, once there is one.
             .merging(togetherUser == nil ? [:] : ["ANYPS5_TOGETHER_SESSION": TogetherGameSession.bridgeFile.path]) { own, _ in own }
@@ -877,6 +943,7 @@ final class AppModel: ObservableObject {
                     self.sessionStart = Date()
                     self.familyGameStarted()
                     self.watchTrophies(game)
+                    self.watchFonts(game)
                     self.watchForExit(of: app.processIdentifier)
                     self.watchForWindow(of: app)
                 } else {
@@ -960,7 +1027,7 @@ final class AppModel: ObservableObject {
     // MARK: Save sync
 
     /// The game whose saves are being synced, so it does not start twice meanwhile.
-    @Published private(set) var syncing: String?
+    @Published var syncing: String?
 
     var syncRoot: URL? { preferences.syncFolder.map { URL(fileURLWithPath: $0) } ?? SaveSync.iCloudDrive }
 
@@ -971,6 +1038,11 @@ final class AppModel: ObservableObject {
 
     /// Syncs the game's saves off the main thread, says what came from another Mac, then goes on.
     private func syncSaves(_ game: Game, then: @escaping @MainActor () -> Void) {
+        if preferences.syncThrough == AppModel.syncThroughTogether, preferences.saveSync == true {
+            // Through AnyTogether's cloud; signed out or a server without files, nothing syncs.
+            guard let cloudSync = cloudSave(for: game) else { return then() }
+            return syncThroughCloud(cloudSync, game: game, then: then)
+        }
         guard let sync = saveSync(for: game) else { return then() }
         syncing = game.id
         Task.detached {
@@ -1127,10 +1199,11 @@ final class AppModel: ObservableObject {
             }
             NSApp.yieldActivation(to: app)
             app.activate()
-            if let game = running?.game, preferences.discordPresence ?? true { discord.playing(game.name, since: Date()) }
+            discordSince = Date()
             if let game = running?.game { tellLowPower(about: game) }
             startClips(for: app)
             gameWindowShown = true
+            updateDiscord()
             updateRemotePlay()
             updateTogetherPresence()
             withAnimation(Motion.overlay) { starting = nil }
@@ -1184,13 +1257,15 @@ final class AppModel: ObservableObject {
         followSharePlay()
         updateTogetherPresence()
         syncSaves(running.game) {}
-        discord.clear()
+        discordSince = nil
+        updateDiscord()
         loadTrophies(running.game, again: true)
         lastSessions[running.game.id]?.ended = Date()
         lastSessions[running.game.id]?.withoutWindow = starting != nil
         traceTrim?.cancel()
         traceTrim = nil
         diagnose(running.game, pid: running.app.processIdentifier)
+        checkFontsAfterEnd(running.game)
         trophyWatch?.cancel()
         trophyWatch = nil
         exitWatch?.cancel()
@@ -1320,12 +1395,97 @@ final class AppModel: ObservableObject {
         updateProgress = progress
     }
 
-    func discordOff() { discord.clear() }
+    func discordOff() { updateDiscord() }
 
     /// Turned on again with a game in front: Discord shows it at once, from when it started.
-    func discordOn() {
-        guard let game = running?.game else { return }
-        discord.playing(game.name, since: sessionStart ?? Date())
+    func discordOn() { updateDiscord() }
+
+    /// Since when the user is in the party, for Discord; a party left forgets who asked with its code.
+    func partyChanged() {
+        guard party?.id != partySince?.id else { return updateDiscord() }
+        partySince = party.map { ($0.id, Date()) }
+        codeAskers = []
+        updateDiscord()
+    }
+
+    /// What the user's Discord profile shows, when the presence setting is on: the game once its
+    /// window is up, the party they are in ("In a party", with its size, even with no game), and
+    /// the Join button with the share play's or party's code. The party's leader or the share
+    /// play's host gets a code made for the button when none works, but not where they stopped
+    /// it themselves; a code running out is such a time, with nothing else changing. Discord is
+    /// told only when something changed.
+    func updateDiscord() {
+        guard persists else { return }
+        let game = gameWindowShown ? running?.game : nil
+        var refresh: Date?
+        defer { refreshDiscord(at: refresh) }
+        guard preferences.discordPresence ?? true, game != nil || party != nil else {
+            discordShown = nil
+            if !discordCleared {
+                discordCleared = true
+                discord.clear()
+            }
+            return
+        }
+        var button: DiscordActivity.Button?
+        if preferences.discordJoin ?? true, let me = togetherUser?.id {
+            let allowed = familyAllows(.publicMatchmaking)
+            let hosting = share.hosting.map {
+                DiscordJoin.Source(id: $0.id, code: $0.joinCode, mine: true, mayMake: allowed && !codeStopped.contains($0.id) && !codeMakingForDiscord.contains($0.id))
+            }
+            let partySource = party.map {
+                DiscordJoin.Source(id: $0.id, code: $0.joinCode, mine: $0.isLeader(me), mayMake: allowed && !codeStopped.contains($0.id) && !codeMakingForDiscord.contains($0.id))
+            }
+            refresh = DiscordJoin.refresh(share: hosting, party: partySource)
+            switch DiscordJoin.plan(share: hosting, party: partySource) {
+            case .button(let url): button = DiscordActivity.Button(label: JS.text(.discordJoinLabel), url: url)
+            case .makeShare(let id): makeCodeForDiscord(id, sharePlay: true)
+            case .makeParty(let id): makeCodeForDiscord(id, sharePlay: false)
+            case .none: break
+            }
+        }
+        let activity = DiscordActivity(game: game?.name, since: game != nil ? discordSince ?? sessionStart : partySince?.at,
+                                       party: party.map { DiscordActivity.Party(id: $0.id, size: $0.members.count, max: TogetherParty.maxSize) },
+                                       button: button, partyText: JS.text(.inParty))
+        guard activity != discordShown else { return }
+        discordShown = activity
+        discordCleared = false
+        discord.show(activity)
+    }
+
+    /// Discord again once `date` passes (the code its button opens ran out): the button opens the
+    /// other code, a new one made for it, or goes; the panels stop showing the old code too.
+    private func refreshDiscord(at date: Date?) {
+        guard date != discordRefresh?.at else { return }
+        discordRefresh?.task.cancel()
+        discordRefresh = date.map { date in
+            (Task { [weak self] in
+                try? await Task.sleep(for: .seconds(max(0, date.timeIntervalSinceNow) + 1))
+                guard let self, !Task.isCancelled else { return }
+                self.discordRefresh = nil
+                self.objectWillChange.send()
+                self.updateDiscord()
+            }, date)
+        }
+    }
+
+    /// A code for the Join button, made once; one that fails is not tried again this session.
+    private func makeCodeForDiscord(_ id: String, sharePlay: Bool) {
+        codeMakingForDiscord.insert(id)
+        let client = together
+        Task {
+            do {
+                let code = sharePlay ? try await client.makeJoinCode(sharePlay: id) : try await client.makeJoinCode(party: id)
+                codeMakingForDiscord.remove(id)
+                if sharePlay, let hosting = share.hosting, hosting.id == id {
+                    share.hosting = hosting.with(joinCode: code)
+                } else if !sharePlay, let current = party, current.id == id {
+                    party = current.with(joinCode: code)
+                }
+            } catch {
+                // Refused (family settings, a muted account, too many): no button for it.
+            }
+        }
     }
 
     /// A trophy just earned shows on the phone too, with its icon made small.
@@ -1573,6 +1733,7 @@ final class AppModel: ObservableObject {
         } else {
             try? Data(line.utf8).write(to: file)
         }
+        markFontLog(of: game, at: UInt64(max(0, GameLog.size(of: file))))
     }
 
     /// The log of the game's last start, read from the end of its log file.
@@ -1775,7 +1936,10 @@ final class AppModel: ObservableObject {
             panelRow = 1
             if let game = selectedGame { readControls(game) }
         }
-        if next == .trophies { trophyIndex = 0 }
+        if next == .trophies {
+            trophyIndex = 0
+            revealedTrophies = []
+        }
         if next == .gallery { loadGallery() }
         if next == .advanced { panelRow = 1 }
         panelInRows = panelInRows || next == .advanced || next == .themes || next == .studio || next == .friends || next == .party

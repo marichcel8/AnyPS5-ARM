@@ -65,6 +65,7 @@ extension AppModel {
         case .friends: return [PanelCategory(id: "friends", title: T.text(.friendsTitle), symbol: "person.2", rows: friendRows())]
         case .party: return [PanelCategory(id: "party", title: T.text(.partyTitle), symbol: "person.3", rows: partyRows())]
         case .notifications: return [PanelCategory(id: "notifications", title: TS.text(.notifTitle), symbol: "bell", rows: notificationRows())]
+        case .cloudStorage: return [PanelCategory(id: "cloud", title: TCloud.text(.storageTitle), symbol: "externaldrive.badge.icloud", rows: cloudStorageRows())]
         case .compat: return [PanelCategory(id: "compat", title: compatTitle, symbol: "person.3.sequence", rows: compatRows())]
         case .crashReport: return [PanelCategory(id: "report", title: TC.text(.reportKicker), symbol: "stethoscope", rows: crashReportRows())]
         case .findPlayers: return findPlayersCategories()
@@ -169,10 +170,17 @@ extension AppModel {
                          self?.preferences.musicVolume = value
                      }),
             PanelRow(id: "hide", title: T.text(.hideWhilePlaying), symbol: "eye.slash", kind: .toggle(preferences.hideWhilePlaying) { [weak self] value in self?.preferences.hideWhilePlaying = value }),
+            PanelRow(id: "hiddenTrophies", title: T.text(.alwaysShowHiddenTrophies), detail: T.text(.alwaysShowHiddenTrophiesDetail), symbol: "trophy",
+                     kind: .toggle(preferences.alwaysShowHiddenTrophies == true) { [weak self] value in self?.preferences.alwaysShowHiddenTrophies = value ? true : nil }),
             PanelRow(id: "discord", title: T.text(.discordPresence), detail: T.text(.discordPresenceDetail), symbol: "person.2.wave.2", kind: .toggle(preferences.discordPresence ?? true) { [weak self] value in
                 self?.preferences.discordPresence = value
                 if value { self?.discordOn() } else { self?.discordOff() }
             }),
+            PanelRow(id: "discordJoin", title: JS.text(.discordJoin), detail: JS.text(.discordJoinDetail), symbol: "person.badge.plus",
+                     kind: .toggle(preferences.discordJoin ?? true) { [weak self] value in
+                         self?.preferences.discordJoin = value ? nil : false
+                         self?.updateDiscord()
+                     }),
             PanelRow(id: "clips", title: T.text(.clips), detail: T.format(.clipsDetail, clipSeconds), symbol: "record.circle", kind: .toggle(preferences.clips == true) { [weak self] value in
                 self?.clipsChanged(value)
             }),
@@ -180,14 +188,7 @@ extension AppModel {
                      kind: .stepper(value: clipSeconds, range: 15...120, step: 15, format: { T.format(.seconds, $0) }) { [weak self] value in
                          self?.preferences.clipLength = value
                      }),
-            PanelRow(id: "saveSync", title: T.text(.saveSync), detail: syncRoot.map { T.format(.saveSyncDetail, $0.abbreviatedPath) } ?? T.text(.saveSyncNoFolder), symbol: "arrow.triangle.2.circlepath.icloud",
-                     kind: .toggle(preferences.saveSync == true && syncRoot != nil) { [weak self] value in
-                         guard let self else { return }
-                         if value && self.syncRoot == nil { return self.chooseSyncFolder() }
-                         self.preferences.saveSync = value
-                     }),
-            PanelRow(id: "syncFolder", title: T.text(.syncFolder), detail: preferences.syncFolder.map { URL(fileURLWithPath: $0).abbreviatedPath } ?? T.text(SaveSync.iCloudDrive != nil ? .syncFolderICloud : .syncFolderNone),
-                     symbol: "folder.badge.gearshape", kind: .action(destructive: false) { [weak self] in self?.chooseSyncFolder() }),
+        ] + saveSyncRows() + [
             PanelRow(id: "checkUpdates", title: T.text(.checkUpdates), detail: T.text(.checkUpdatesDetail), symbol: "arrow.down.circle", kind: .toggle(preferences.checkUpdates ?? true) { [weak self] value in
                 self?.preferences.checkUpdates = value
                 if value { self?.checkForUpdate() }
@@ -239,12 +240,8 @@ extension AppModel {
         var advanced: [PanelRow] = [
             PanelRow(id: "screenshots", title: T.text(.screenshotsFolder), detail: screenshotsFolder.abbreviatedPath, symbol: "camera", kind: .action(destructive: false) { [weak self] in self?.chooseScreenshotsFolder() }),
             PanelRow(id: "showScreenshots", title: T.text(.showScreenshots), symbol: "photo.on.rectangle.angled", kind: .action(destructive: false) { [weak self] in self?.showScreenshots() }),
-            PanelRow(id: "fonts", title: T.text(.fontsFolder), detail: fontsFolder?.abbreviatedPath ?? T.text(.fontsNone), symbol: "textformat", kind: .action(destructive: false) { [weak self] in self?.chooseFontsFolder() }),
+            PanelRow(id: "screenshotsHint", title: T.text(.screenshotsHint), kind: .info("")),
         ]
-        if preferences.fontsFolder != nil {
-            advanced.append(PanelRow(id: "fontsReset", title: T.text(.fontsReset), symbol: "xmark.circle", kind: .action(destructive: false) { [weak self] in self?.preferences.fontsFolder = nil }))
-        }
-        advanced.append(PanelRow(id: "fontsHint", title: T.text(.fontsHint), kind: .info("")))
         advanced.append(PanelRow(id: "phones", title: T.text(.phones), kind: .info(phones.isEmpty ? T.text(.phonesNone)
             : connectedPhones.isEmpty ? "" : T.format(.phonesConnectedCount, connectedPhones.count))))
         for device in phones {
@@ -263,6 +260,7 @@ extension AppModel {
             PanelCategory(id: "together", title: "AnyTogether", symbol: "person.2.circle", rows: togetherRows()),
             PanelCategory(id: "broadcast", title: TB.text(.title), symbol: "dot.radiowaves.left.and.right", rows: broadcastSettingsRows()),
             PanelCategory(id: "engine", title: TE.text(.engineTitle), symbol: "gearshape.2", rows: engineRows()),
+            PanelCategory(id: "fonts", title: TF.text(.title), symbol: "textformat", rows: fontRows()),
             PanelCategory(id: "advanced", title: T.text(.advanced), symbol: "wrench.and.screwdriver", rows: advanced),
             PanelCategory(id: "about", title: T.text(.about), symbol: "info.circle", rows: about),
         ]
