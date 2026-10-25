@@ -154,6 +154,7 @@ struct Completion {
     std::vector<LabelStore> labels;
     std::vector<std::function<void()>> actions;
     bool waking = false;
+    std::chrono::steady_clock::time_point submitted;
 };
 
 struct Waker {
@@ -240,6 +241,11 @@ struct IdentityHash {
 bool Verbose() {
     static const bool verbose = std::getenv("APS5_METAL_VERBOSE") != nullptr;
     return verbose;
+}
+
+bool LazyWriteback() {
+    static const bool lazy = std::getenv("APS5_METAL_LAZY_WRITEBACK") != nullptr;
+    return lazy;
 }
 
 bool Trace() {
@@ -550,6 +556,11 @@ struct VulkanDevice::State {
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
     std::array<double, 5> presentMs{};
+    std::uint64_t writebackSurfaces = 0;
+    std::uint64_t flushes = 0;
+    std::uint64_t completedFlushes = 0;
+    double completionMsTotal = 0.0;
+    double completionMsMax = 0.0;
     std::uint64_t reportDraws = 0;
     std::uint64_t reportDispatches = 0;
     Metal::PresenterStats reportStats{};
@@ -758,6 +769,7 @@ struct VulkanDevice::State {
         if (dirtySurfaces.empty()) return;
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        writebackSurfaces += dirtySurfaces.size();
         for (auto* surface : dirtySurfaces) {
             textures->EncodeWriteback((__bridge void*)compute, surface->texture, surface->resource, surface->address);
             surface->dirty = false;
@@ -769,7 +781,7 @@ struct VulkanDevice::State {
     void flush() {
         if (!open) return;
         @autoreleasepool {
-            writebackDirty();
+            if (!LazyWriteback()) writebackDirty();
             endRender();
             endCompute();
             sync->EncodeLabels(open);
@@ -783,6 +795,8 @@ struct VulkanDevice::State {
             }
             sealing.clear();
             auto& completion = completions[serial];
+            completion.submitted = std::chrono::steady_clock::now();
+            ++flushes;
             completion.writeBacks = std::move(writeBacks);
             completion.staged = std::move(staged);
             writeBacks.clear();
@@ -801,6 +815,10 @@ struct VulkanDevice::State {
         while (!completions.empty() && completions.begin()->first <= through) {
             auto entry = std::move(completions.begin()->second);
             completions.erase(completions.begin());
+            const auto latency = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.submitted).count();
+            completionMsTotal += latency;
+            completionMsMax = std::max(completionMsMax, latency);
+            ++completedFlushes;
             for (const auto& item : entry.writeBacks) std::memcpy(item.host, item.staged, item.bytes);
             for (const auto& buffer : entry.staged) device->ReleaseBuffer(buffer);
             for (const auto& label : entry.labels) storeLabel(label);
@@ -1133,6 +1151,12 @@ struct VulkanDevice::State {
                      static_cast<unsigned long long>(labels[0] - reportLabels[0]), static_cast<unsigned long long>(labels[1] - reportLabels[1]), static_cast<unsigned long long>(labels[2] - reportLabels[2]),
                      static_cast<unsigned long long>((snapshotBytes - reportSnapshotBytes) / 1024));
         if (reportFrames != 0u) std::fprintf(stderr, "[metal] present per flip: %.2f ms Present call (paced %.2f ms, drawable wait %.2f ms), %.2f ms wait for scanout serial\n", presentMs[0] / static_cast<double>(reportFrames), presentMs[2] / static_cast<double>(reportFrames), presentMs[3] / static_cast<double>(reportFrames), presentMs[1] / static_cast<double>(reportFrames));
+        std::fprintf(stderr, "[metal] flushes %llu, writeback surfaces %llu, submit-to-completion %.2f ms avg, %.2f ms max over %llu completions%s\n", static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(writebackSurfaces), completedFlushes != 0u ? completionMsTotal / static_cast<double>(completedFlushes) : 0.0, completionMsMax, static_cast<unsigned long long>(completedFlushes), LazyWriteback() ? " (lazy writeback)" : "");
+        flushes = 0;
+        writebackSurfaces = 0;
+        completedFlushes = 0;
+        completionMsTotal = 0.0;
+        completionMsMax = 0.0;
         presentMs = {};
         reportSnapshotBytes = snapshotBytes;
         reportLabels = labels;
