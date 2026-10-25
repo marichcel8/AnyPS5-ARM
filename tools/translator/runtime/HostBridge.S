@@ -1,6 +1,6 @@
 // aps5_host_bridge(GuestState* state, uint64_t target): calls a host (AAPCS64) function with the
 // guest's SysV argument registers. rdi, rsi, rdx, rcx, r8, r9 become x0-x5, the guest stack
-// arguments 7 and 8 become x6 and x7, and xmm0-7 become q0-q7. x0/x1 return into rax/rdx and
+// arguments 7 and 8 become x6 and x7, arguments 9 to 16 are copied to the native stack, and xmm0-7 become q0-q7. x0/x1 return into rax/rdx and
 // q0/q1 into xmm0/xmm1. The guest return address is at [rsp], so stack arguments start at rsp + 8.
     .text
     .p2align 2
@@ -23,6 +23,15 @@ _aps5_host_bridge:
     ldr x10, [x19, #32]
     ldr x6, [x10, #8]
     ldr x7, [x10, #16]
+    sub sp, sp, #64
+    ldp x9, x11, [x10, #24]
+    stp x9, x11, [sp, #0]
+    ldp x9, x11, [x10, #40]
+    stp x9, x11, [sp, #16]
+    ldp x9, x11, [x10, #56]
+    stp x9, x11, [sp, #32]
+    ldp x9, x11, [x10, #72]
+    stp x9, x11, [sp, #48]
     ldr x0, [x19, #56]
     ldr x1, [x19, #48]
     ldr x2, [x19, #16]
@@ -35,6 +44,7 @@ _aps5_host_bridge:
     add x9, x19, #160
     str q0, [x9, #0]
     str q1, [x9, #32]
+    mov sp, x29
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #32
     ret

@@ -26,7 +26,7 @@ std::uint32_t* APS5_VABI sceAgcDcbWriteData(CommandBuffer*, std::uint8_t, std::u
 std::uint32_t* APS5_VABI sceAgcAcbWriteData(CommandBuffer*, std::uint8_t, std::uint8_t, std::uint64_t, const void*, std::uint32_t, std::uint8_t, std::uint8_t);
 std::uint32_t* APS5_VABI sceAgcDcbWaitRegMem(CommandBuffer*, std::uint8_t, std::uint8_t, std::uint8_t, std::uint8_t, const volatile void*, std::uint64_t, std::uint64_t, std::uint32_t);
 std::uint32_t* APS5_VABI sceAgcAcbWaitRegMem(CommandBuffer*, std::uint8_t, std::uint8_t, std::uint8_t, const volatile void*, std::uint64_t, std::uint64_t, std::uint32_t);
-std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer*, std::uint8_t, std::uint16_t, std::uint8_t, std::uint8_t, const volatile Label*, std::uint8_t, std::uint64_t, std::uint16_t, std::uint16_t, std::uint8_t, std::uint32_t);
+std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer*, std::uint8_t, std::uint16_t, std::uint8_t, std::uint8_t, const volatile Label*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
 std::uint32_t* APS5_VABI sceAgcDcbDmaData(CommandBuffer*, std::uint8_t, std::uint8_t, std::uint8_t, std::uint64_t, std::uint8_t, std::uint8_t, std::uint64_t, std::uint32_t, std::uint8_t, std::uint8_t, std::uint8_t);
 std::uint32_t* APS5_VABI sceAgcDcbCondExec(CommandBuffer*, const volatile std::uint32_t*, std::uint32_t);
 std::uint32_t* APS5_VABI sceAgcAcbRewind(CommandBuffer*, std::uint32_t);

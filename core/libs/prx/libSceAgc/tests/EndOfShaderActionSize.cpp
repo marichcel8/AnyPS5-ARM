@@ -11,7 +11,7 @@
 extern "C" {
 std::uint32_t APS5_VABI sceAgcDcbQueueEndOfShaderActionGetSize();
 std::uint32_t APS5_VABI sceAgcAcbQueueEndOfShaderActionGetSize();
-std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer*, std::uint8_t, std::uint16_t, std::uint8_t, std::uint8_t, const volatile Label*, std::uint8_t, std::uint64_t, std::uint16_t, std::uint16_t, std::uint8_t, std::uint32_t);
+std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer*, std::uint8_t, std::uint16_t, std::uint8_t, std::uint8_t, const volatile Label*, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
 std::uint32_t APS5_VABI sceAgcDcbAtomicGdsGetSize();
 std::uint32_t* APS5_VABI sceAgcDcbAtomicGds_0900(CommandBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint16_t, std::uint16_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint64_t);
 std::uint32_t* APS5_VABI sceAgcDcbAtomicGds(CommandBuffer*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint16_t, std::uint16_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint64_t);
