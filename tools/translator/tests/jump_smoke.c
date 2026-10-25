@@ -26,7 +26,8 @@ __attribute__((noinline)) static void jump_if(int condition, u64* buffer, int va
     if (condition) longjmp(buffer, value);
 }
 
-int main(void) {
+void _start(void* block) {
+    (void)block;
     volatile int marker = 0;
     int result = setjmp(outer);
     if (result == 0) {

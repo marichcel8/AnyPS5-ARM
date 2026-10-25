@@ -67,7 +67,11 @@ def main():
         cases.append(("lifter-smoke", compiled("lifter_smoke.c"), 28, "3b0c6e4bf8726a1c"))
         cases.append(("x87-smoke", compiled("x87_smoke.c"), 0, "x87 ok"))
         cases.append(("string-smoke", compiled("string_smoke.c"), 0, "strings ok"))
+<<<<<<< HEAD
         cases.append(("jump-smoke", compiled("jump_smoke.c"), 0, "jumps ok"))
+=======
+        cases.append(("misc-smoke", compiled("misc_smoke.c"), 0, "misc ok"))
+>>>>>>> origin/native-arm64
         expected = host_reference("vector_smoke.c", VECTOR_FLAGS, work)
         if expected is not None:
             cases.append(("vector-smoke", compiled("vector_smoke.c", VECTOR_FLAGS), *expected))

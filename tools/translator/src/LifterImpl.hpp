@@ -34,7 +34,7 @@ constexpr std::uint8_t SymbolTypeFunction = 2, SymbolBindingWeak = 2;
 
 enum Flag : unsigned { Cf, Pf, Af, Zf, Sf, Of, Df };
 
-enum class Condition { O, No, B, Ae, E, Ne, Be, A, S, Ns, P, Np, L, Ge, Le, G, RcxZero, EcxZero, None };
+enum class Condition { O, No, B, Ae, E, Ne, Be, A, S, Ns, P, Np, L, Ge, Le, G, RcxZero, EcxZero, Loop, LoopE, LoopNe, None };
 
 // An instruction the lifter cannot express. The guest instruction is replaced by a call to aps5_unsupported.
 struct Unsupported {
@@ -117,6 +117,9 @@ inline Condition ConditionOf(unsigned id) {
     case X86_INS_JG: case X86_INS_SETG: case X86_INS_CMOVG: return Condition::G;
     case X86_INS_JRCXZ: return Condition::RcxZero;
     case X86_INS_JECXZ: return Condition::EcxZero;
+    case X86_INS_LOOP: return Condition::Loop;
+    case X86_INS_LOOPE: return Condition::LoopE;
+    case X86_INS_LOOPNE: return Condition::LoopNe;
     default: return Condition::None;
     }
 }
@@ -125,7 +128,7 @@ inline bool IsConditionalJump(unsigned id) {
     switch (id) {
     case X86_INS_JO: case X86_INS_JNO: case X86_INS_JB: case X86_INS_JAE: case X86_INS_JE: case X86_INS_JNE: case X86_INS_JBE: case X86_INS_JA:
     case X86_INS_JS: case X86_INS_JNS: case X86_INS_JP: case X86_INS_JNP: case X86_INS_JL: case X86_INS_JGE: case X86_INS_JLE: case X86_INS_JG:
-    case X86_INS_JRCXZ: case X86_INS_JECXZ:
+    case X86_INS_JRCXZ: case X86_INS_JECXZ: case X86_INS_LOOP: case X86_INS_LOOPE: case X86_INS_LOOPNE:
         return true;
     default:
         return false;
@@ -207,6 +210,11 @@ struct Lifter::Impl {
 
     // Control flow
     void Push(llvm::Value* value);
+    llvm::Value* PackFlags();
+    void UnpackFlags(llvm::Value* flags);
+    void RotateCarry(const Instruction& instruction);
+    void Enter(const Instruction& instruction);
+    void HalfFloat(const Instruction& instruction);
     llvm::Value* Pop();
     void CallGuest(std::uint64_t target, std::uint64_t returnAddress);
     void CallIndirect(llvm::Value* target, std::uint64_t returnAddress);
