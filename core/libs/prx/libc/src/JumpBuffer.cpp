@@ -50,11 +50,15 @@ asm(".text\n"
 // Translated guest code reaches these two through aps5_call, which the translator runtime
 // (tools/translator/runtime/Runtime.cpp) recognizes by address: setjmp has to run in its own frame
 // and longjmp has to unwind the native frames. Any other caller has no guest state to save.
+extern "C" {
+
 int APS5_VABI setjmp_nid_postfix(void*) {
     NotImplemented_nid_no_patch("setjmp outside translated guest code");
 }
 
 void APS5_VABI longjmp_nid_postfix(void*, int) {
     NotImplemented_nid_no_patch("longjmp outside translated guest code");
+}
+
 }
 #endif
