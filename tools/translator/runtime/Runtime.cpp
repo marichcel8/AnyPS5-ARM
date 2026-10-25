@@ -1,6 +1,7 @@
 #include "GuestState.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cmath>
 #include <csignal>
@@ -8,6 +9,12 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
+#include <mach-o/getsect.h>
+#include <mach-o/ldsyms.h>
+#include <map>
+#include <mutex>
+#include <string>
+#include <thread>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
 
@@ -40,6 +47,7 @@ extern const TranslatedFunction aps5_guest_functions[];
 extern const std::uint64_t aps5_guest_function_count;
 extern const std::uint64_t aps5_guest_entry;
 extern const std::uint64_t aps5_guest_tls[4]; // image offset, file size, block size, alignment
+extern const char* const aps5_profile_path;
 
 void aps5_host_bridge(GuestState* state, std::uint64_t target);
 void aps5_enter();
@@ -146,6 +154,50 @@ void Redirect(int signal, siginfo_t* info, void* context) {
     sigaction(signal, &fallback, nullptr);
 }
 
+struct ProfileRow {
+    std::uint64_t offset;
+    std::uint64_t count;
+};
+
+struct Profile {
+    std::mutex lock;
+    std::map<std::uint64_t, std::uint64_t> earlier;
+};
+
+Profile* profile = nullptr;
+
+void WriteProfile() {
+    unsigned long bytes = 0;
+    const auto* rows = reinterpret_cast<const ProfileRow*>(getsectiondata(&_mh_execute_header, "__DATA", "__aps5_prof", &bytes));
+    const std::lock_guard<std::mutex> guard(profile->lock);
+    auto counts = profile->earlier;
+    for (std::size_t i = 0; rows != nullptr && i < bytes / sizeof(ProfileRow); ++i) {
+        if (rows[i].count != 0) counts[rows[i].offset] += rows[i].count;
+    }
+    const std::string partial = std::string(aps5_profile_path) + ".part";
+    FILE* file = std::fopen(partial.c_str(), "w");
+    if (file == nullptr) return;
+    for (const auto& [offset, count] : counts) std::fprintf(file, "%" PRIx64 " %" PRIu64 "\n", offset, count);
+    if (std::fclose(file) == 0) std::rename(partial.c_str(), aps5_profile_path);
+}
+
+void StartProfile() {
+    if (aps5_profile_path == nullptr) return;
+    profile = new Profile;
+    if (FILE* file = std::fopen(aps5_profile_path, "r")) {
+        std::uint64_t offset = 0, count = 0;
+        while (std::fscanf(file, "%" SCNx64 " %" SCNu64, &offset, &count) == 2) profile->earlier[offset] += count;
+        std::fclose(file);
+    }
+    std::atexit(WriteProfile);
+    std::thread([] {
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(30));
+            WriteProfile();
+        }
+    }).detach();
+}
+
 void InstallRedirect() {
     tracing = std::getenv("APS5_NATIVE_TRACE") != nullptr;
     struct sigaction action {};
@@ -238,6 +290,7 @@ int aps5_guest_va_start(GuestVaList* list, void* saveArea, unsigned fixedGp, uns
 
 int main(int argc, char** argv, char** envp) {
     InstallRedirect();
+    StartProfile();
     // The FreeBSD start block the guest entry receives: argc, argv[], NULL, envp[], NULL.
     int envc = 0;
     while (envp != nullptr && envp[envc] != nullptr) ++envc;
