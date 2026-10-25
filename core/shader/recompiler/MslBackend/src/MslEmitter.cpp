@@ -372,7 +372,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     const bool mesh = stage == IrShaderStage::Mesh;
     if (mesh && inputInfo.vertex == nullptr) throw MslUnsupported("MSL backend: the mesh program has no mesh input info");
     const ShaderWorkgroupInputInfo* workgroup = mesh ? static_cast<const ShaderWorkgroupInputInfo*>(&inputInfo.vertex->mesh) : inputInfo.compute;
-    state.lanes = program.WaveSize() == 64u && !geometry ? 2u : 1u;
+    state.lanes = program.WaveSize() == 64u && !geometry && (compute || mesh) ? 2u : 1u;
     if (state.lanes == 2u && workgroup == nullptr) throw MslUnsupported("MSL backend: a wave64 program needs its workgroup size");
     state.ldsDwords = workgroup != nullptr ? workgroup->ldsSizeDwords : 0u;
     state.scratchDwords = program.Info().scratchDwords;
@@ -382,7 +382,6 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if (geometry) {
         PrepareGeometry(state);
     } else if (!compute) {
-        if (state.lanes == 2u) throw MslUnsupported("MSL backend: wave64 vertex and pixel programs need two guest lanes per thread (graphics threads are not laid out that way)");
         PrepareStage(state);
     }
     Hoister{state}.Run();
@@ -390,6 +389,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     EmitFlow(state);
     if (geometry) CheckGeometry(state);
     if (!compute && !geometry && (state.features & (Lds | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
+    if (!compute && !geometry && program.WaveSize() == 64u && (state.features & (Lane | Wave | Permute)) != 0u) throw MslUnsupported("MSL backend: a wave64 vertex or pixel program uses SIMD-group operations, which need two guest lanes per thread");
     if (stage == IrShaderStage::Vertex && (state.features & (Lane | Wave)) != 0u) throw MslUnsupported("MSL backend: SIMD-group operations in vertex functions are not emitted");
 
     std::string declarations;
