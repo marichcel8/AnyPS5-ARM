@@ -85,7 +85,7 @@ Three things keep very large guest functions from stalling LLVM:
 - **A small graph.** Only branch targets and instructions control reaches from elsewhere start a basic block. A jump through a bounded jump table switches over that table's targets only; every other indirect jump goes to one shared dispatch per function.
 - **Guest registers in SSA.** In functions up to 2500 guest instructions, the lifter works on a copy of `GuestState` on the native stack and copies the fields the function uses back before each call, runtime call and return, and in again after a call returns. SROA turns the copy into SSA values, so alias analysis no longer sees one memory access per register use.
 - **Optimization tiers.** Functions above 2000 guest instructions are not inlined. Above 2500 they keep `GuestState` in memory, skip the O2 pipeline for a few linear passes (SROA, EarlyCSE, SimplifyCFG, ADCE), and are compiled with fast instruction selection and register allocation, because the greedy allocator's live range splitting grows too fast on them.
-- **Bounded memory.** Partitions run on threads with 256 MB stacks, because alias analysis recurses deeply on large phi webs. The threads together hold at most 2048 guest instructions per GB of RAM in flight (16384 on 8 GB), taken in order from the largest partition down. A function compiled with fast codegen counts an eighth of its size, because it needs far less memory than an optimized one, and a partition above the budget runs alone. On macOS the workers run at user-initiated QoS and freed heap pages go back to the system after each partition.
+- **Bounded memory.** Partitions run on threads with 256 MB stacks, because alias analysis recurses deeply on large phi webs. The threads together hold at most 3072 guest instructions per GB of RAM in flight (24576 on 8 GB), taken in order from the largest partition down. A function compiled with fast codegen counts an eighth of its size, because it needs far less memory than an optimized one, and a partition above the budget runs alone. On macOS the workers run at user-initiated QoS and freed heap pages go back to the system after each partition.
 
 ### Quick tier
 
@@ -99,7 +99,7 @@ Three things keep very large guest functions from stalling LLVM:
 | `APS5_TRANSLATOR_JOBS` | all CPU cores | threads; `max` also lifts the memory budget |
 | `APS5_TRANSLATOR_PARTITION` | 4096 | guest instructions per partition |
 | `APS5_TRANSLATOR_LARGE` / `_HUGE` / `_GIANT` | 2000 / 2500 / 2500 | no inlining / light pipeline and no register promotion / fast codegen, in guest instructions |
-| `APS5_TRANSLATOR_BUDGET` | 2048 per GB of RAM | guest instructions compiled at once over all threads |
+| `APS5_TRANSLATOR_BUDGET` | 3072 per GB of RAM | guest instructions compiled at once over all threads |
 | `APS5_TRANSLATOR_CACHE` | `~/Library/Caches/AnyPS5/translator` | cache directory, `off` disables it |
 | `APS5_TRANSLATOR_LD` | `ld` | linker that joins the partitions |
 | `APS5_TRANSLATOR_VERIFY` | unset | verify each lifted partition, as the fixtures do |

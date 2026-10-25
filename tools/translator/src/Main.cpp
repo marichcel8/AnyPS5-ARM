@@ -66,7 +66,7 @@ std::size_t MemoryBudget() {
     const auto pages = sysconf(_SC_PHYS_PAGES), pageSize = sysconf(_SC_PAGESIZE);
     if (pages <= 0 || pageSize <= 0) return 16384;
     const auto gigabytes = static_cast<std::size_t>(pages) * static_cast<std::size_t>(pageSize) >> 30;
-    return std::max<std::size_t>(4096, gigabytes * 2048);
+    return std::max<std::size_t>(4096, gigabytes * 3072);
 }
 
 bool Unlimited() {
