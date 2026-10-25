@@ -195,6 +195,20 @@ static void simd(void) {
     static _Alignas(32) u64 target[4];
     __asm__ volatile("vmovdqu %1, %%ymm0\n\tvmovntdq %%ymm0, %0\n\tsfence\n\tvzeroupper" : "=m"(target) : "m"(bytes) : "xmm0");
     same(99, (i64)target[3], 0x1f1e1d1c1b1a1918ll);
+    u64 lanes[2] = {0x1234567890abcdefull, 0x1111111111111111ull}, fields[2], result[2];
+    __asm__ volatile("movdqu %1, %%xmm0\n\textrq $8, $16, %%xmm0\n\tmovdqu %%xmm0, %0" : "=m"(result) : "m"(lanes) : "xmm0");
+    same(34, (i64)result[0], 0xabcd);
+    fields[0] = 4 | 4 << 8;
+    __asm__ volatile("movdqu %1, %%xmm0\n\tmovdqu %2, %%xmm1\n\textrq %%xmm1, %%xmm0\n\tmovdqu %%xmm0, %0" : "=m"(result) : "m"(lanes), "m"(fields) : "xmm0", "xmm1");
+    same(35, (i64)result[0], 0xe);
+    u64 ones[2] = {~0ull, 0}, byte[2] = {0x5a, 0};
+    __asm__ volatile("movdqu %1, %%xmm0\n\tmovdqu %2, %%xmm1\n\tinsertq $16, $8, %%xmm1, %%xmm0\n\tmovdqu %%xmm0, %0" : "=m"(result) : "m"(ones), "m"(byte) : "xmm0", "xmm1");
+    same(36, (i64)result[0], (i64)0xffffffffff5affffull);
+    u64 zero[2] = {0, 0};
+    fields[0] = 3;
+    fields[1] = 4 | 60 << 8;
+    __asm__ volatile("movdqu %1, %%xmm0\n\tmovdqu %2, %%xmm1\n\tinsertq %%xmm1, %%xmm0\n\tmovdqu %%xmm0, %0" : "=m"(result) : "m"(zero), "m"(fields) : "xmm0", "xmm1");
+    same(37, (i64)result[0], 0x3000000000000000ll);
 }
 
 void _start(void* block) {

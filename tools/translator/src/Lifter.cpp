@@ -950,6 +950,34 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
     case X86_INS_NOP: case X86_INS_ENDBR64: case X86_INS_PAUSE: case X86_INS_EMMS:
     case X86_INS_PREFETCH: case X86_INS_PREFETCHW: case X86_INS_PREFETCHT0: case X86_INS_PREFETCHT1: case X86_INS_PREFETCHT2: case X86_INS_PREFETCHNTA:
         return;
+    case X86_INS_EXTRQ: case X86_INS_INSERTQ: {
+        const bool insert = id == X86_INS_INSERTQ;
+        auto* destination = Read(instruction, 0);
+        const unsigned control = insert ? 2 : 1;
+        llvm::Value* length = nullptr;
+        llvm::Value* index = nullptr;
+        if (x86.op_count > control + 1 && instruction.Op(control).type == X86_OP_IMM) {
+            length = builder.getInt64(static_cast<std::uint64_t>(instruction.Op(control).imm) & 63);
+            index = builder.getInt64(static_cast<std::uint64_t>(instruction.Op(control + 1).imm) & 63);
+        } else {
+            auto* field = Resize(insert ? builder.CreateLShr(Read(instruction, 1), 64) : Read(instruction, 1), 64);
+            length = builder.CreateAnd(field, 63);
+            index = builder.CreateAnd(builder.CreateLShr(field, 8), 63);
+        }
+        auto* mask = builder.CreateSelect(builder.CreateICmpEQ(length, builder.getInt64(0)), builder.getInt64(~std::uint64_t{0}),
+                                          builder.CreateSub(builder.CreateShl(builder.getInt64(1), length), builder.getInt64(1)));
+        auto* low = Resize(destination, 64);
+        llvm::Value* result = nullptr;
+        if (insert) {
+            auto* source = Resize(Read(instruction, 1), 64);
+            result = builder.CreateOr(builder.CreateAnd(low, builder.CreateNot(builder.CreateShl(mask, index))), builder.CreateShl(builder.CreateAnd(source, mask), index));
+        } else {
+            result = builder.CreateAnd(builder.CreateLShr(low, index), mask);
+        }
+        auto* upper = builder.CreateShl(builder.CreateLShr(destination, 64), 64);
+        Write(instruction, 0, builder.CreateOr(upper, Resize(result, 128)));
+        return;
+    }
     case X86_INS_LDMXCSR: case X86_INS_VLDMXCSR:
         builder.CreateStore(Load(builder.getInt32Ty(), Address(instruction, x86.operands[0].mem)), Field(StateLayout::Mxcsr));
         return;

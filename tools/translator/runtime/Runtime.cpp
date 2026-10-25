@@ -426,7 +426,7 @@ void aps5_cpuid(GuestState* state) {
         c = 0x444d4163;
         break;
     case 0x80000001:
-        c = (1u << 0) | (1u << 5);
+        c = (1u << 0) | (1u << 5) | (1u << 6);
         d = (1u << 11) | (1u << 20) | (1u << 29);
         break;
     case 0x80000002: case 0x80000003: case 0x80000004: {
