@@ -3,13 +3,17 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/Device.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalCompiler.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/PipelineCache.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Presenter.hpp"
+#include "prx/libSceAgcDriver/Graphics/Metal/RenderStateTranslate.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Sync.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/TextureJobs.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Textures.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "BdaAbi.hpp"
+#include "ImageTableAbi.hpp"
 #include "MetalAbi.hpp"
 #include "RuntimeAbi.hpp"
 #include "MslBackend/MslEmitter.hpp"
@@ -51,6 +55,8 @@ constexpr std::uint32_t PipelineTimeoutMs = 120000;
 constexpr Metal::QueueKind Queue = Metal::QueueKind::Graphics;
 constexpr std::uint32_t ArgumentSlots = static_cast<std::uint32_t>(BufferSlot::Count);
 constexpr std::size_t PresentSlots = 3;
+constexpr std::uint32_t RenderSlots = ShaderRecompiler::MetalAbi::MaxBufferSlots;
+constexpr std::uint32_t FirstVertexBuffer = ShaderRecompiler::MetalAbi::FirstVertexBufferSlot;
 
 struct UploadChunk {
     Metal::NativeBuffer buffer;
@@ -89,6 +95,35 @@ using SamplerKey = std::array<std::uint32_t, 5>;
 struct CachedSurface {
     Metal::TextureHandle texture;
     std::map<ViewKey, Metal::TextureHandle> views;
+    Graphics::GuestTextureResource resource{};
+    std::uint64_t address = 0;
+    std::uint64_t validEpoch = 0;
+    bool dirty = false;
+};
+
+struct SurfaceRef {
+    CachedSurface* surface = nullptr;
+    Metal::TextureCreateInfo info;
+    std::uint32_t layers = 1;
+};
+
+struct StageSource {
+    std::shared_ptr<const std::string> source;
+    Metal::CompileKey key;
+    std::vector<Metal::FunctionConstant> constants;
+};
+
+struct DepthSurface {
+    id<MTLTexture> texture = nil;
+    bool initialized = false;
+};
+
+using DepthKey = std::array<std::uint64_t, 3>;
+
+struct ColorAttachment {
+    id<MTLTexture> texture = nil;
+    std::uint32_t level = 0;
+    std::uint32_t depthPlane = 0;
 };
 
 struct ImageUse {
@@ -156,6 +191,7 @@ Metal::PixelFormat NumericView(Metal::PixelFormat format, Numeric numeric) {
         {RGB10A2Unorm, Invalid, Invalid, RGB10A2Uint, Invalid, Invalid},
         {Invalid, Invalid, Invalid, Invalid, Invalid, Invalid},
     }};
+    if ((format == RG11B10Float || format == RGB9E5Float) && numeric != Numeric::Float) return numeric == Numeric::Uint ? R32Uint : R32Sint;
     for (const auto& family : families) {
         const auto found = std::find(family.begin(), family.end(), format);
         if (found == family.end() || format == Invalid) continue;
@@ -169,6 +205,33 @@ Metal::PixelFormat NumericView(Metal::PixelFormat format, Numeric numeric) {
         return wanted != Invalid ? wanted : format;
     }
     return format;
+}
+
+bool IntegerFormat(Metal::PixelFormat format) {
+    using enum Metal::PixelFormat;
+    switch (format) {
+    case R8Uint: case R8Sint: case RG8Uint: case RG8Sint: case RGBA8Uint: case RGBA8Sint:
+    case R16Uint: case R16Sint: case RG16Uint: case RG16Sint: case RGBA16Uint: case RGBA16Sint:
+    case R32Uint: case R32Sint: case RG32Uint: case RG32Sint: case RGBA32Uint: case RGBA32Sint:
+    case RGB10A2Uint: return true;
+    default: return false;
+    }
+}
+
+std::uint32_t PointSamplerMask(const ShaderRecompiler::DescriptorBinding& binding) {
+    if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages || binding.imageSamplers.size() < binding.count || ImageKindOf(binding.binding).storage) return 0;
+    const bool integerView = ImageKindOf(binding.binding).numeric != Numeric::Float;
+    std::uint32_t mask = 0;
+    for (std::uint32_t element = 0; element < binding.count; ++element) {
+        const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
+        bool integer = integerView;
+        if (!integer && !std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) && !Graphics::IsNullTextureResource(words)) {
+            const auto* format = Metal::FindFormat(Graphics::DecodeTextureResource(words).format);
+            integer = format != nullptr && IntegerFormat(format->pixelFormat);
+        }
+        if (integer) mask |= binding.imageSamplers[element];
+    }
+    return mask;
 }
 
 Metal::TextureKind ViewKindOf(ShaderRecompiler::DescriptorImageShape shape) {
@@ -209,6 +272,78 @@ MTLSamplerBorderColor NativeBorder(VkBorderColor color) {
     }
 }
 
+MTLVertexFormat NativeVertexFormat(VkFormat format) {
+    switch (format) {
+    case VK_FORMAT_R8_UNORM: return MTLVertexFormatUCharNormalized;
+    case VK_FORMAT_R8G8_UNORM: return MTLVertexFormatUChar2Normalized;
+    case VK_FORMAT_R8G8B8_UNORM: return MTLVertexFormatUChar3Normalized;
+    case VK_FORMAT_R8G8B8A8_UNORM: return MTLVertexFormatUChar4Normalized;
+    case VK_FORMAT_R8_SNORM: return MTLVertexFormatCharNormalized;
+    case VK_FORMAT_R8G8_SNORM: return MTLVertexFormatChar2Normalized;
+    case VK_FORMAT_R8G8B8_SNORM: return MTLVertexFormatChar3Normalized;
+    case VK_FORMAT_R8G8B8A8_SNORM: return MTLVertexFormatChar4Normalized;
+    case VK_FORMAT_R8_UINT: return MTLVertexFormatUChar;
+    case VK_FORMAT_R8G8_UINT: return MTLVertexFormatUChar2;
+    case VK_FORMAT_R8G8B8_UINT: return MTLVertexFormatUChar3;
+    case VK_FORMAT_R8G8B8A8_UINT: return MTLVertexFormatUChar4;
+    case VK_FORMAT_R8_SINT: return MTLVertexFormatChar;
+    case VK_FORMAT_R8G8_SINT: return MTLVertexFormatChar2;
+    case VK_FORMAT_R8G8B8_SINT: return MTLVertexFormatChar3;
+    case VK_FORMAT_R8G8B8A8_SINT: return MTLVertexFormatChar4;
+    case VK_FORMAT_R16_UNORM: return MTLVertexFormatUShortNormalized;
+    case VK_FORMAT_R16G16_UNORM: return MTLVertexFormatUShort2Normalized;
+    case VK_FORMAT_R16G16B16_UNORM: return MTLVertexFormatUShort3Normalized;
+    case VK_FORMAT_R16G16B16A16_UNORM: return MTLVertexFormatUShort4Normalized;
+    case VK_FORMAT_R16_SNORM: return MTLVertexFormatShortNormalized;
+    case VK_FORMAT_R16G16_SNORM: return MTLVertexFormatShort2Normalized;
+    case VK_FORMAT_R16G16B16_SNORM: return MTLVertexFormatShort3Normalized;
+    case VK_FORMAT_R16G16B16A16_SNORM: return MTLVertexFormatShort4Normalized;
+    case VK_FORMAT_R16_UINT: return MTLVertexFormatUShort;
+    case VK_FORMAT_R16G16_UINT: return MTLVertexFormatUShort2;
+    case VK_FORMAT_R16G16B16_UINT: return MTLVertexFormatUShort3;
+    case VK_FORMAT_R16G16B16A16_UINT: return MTLVertexFormatUShort4;
+    case VK_FORMAT_R16_SINT: return MTLVertexFormatShort;
+    case VK_FORMAT_R16G16_SINT: return MTLVertexFormatShort2;
+    case VK_FORMAT_R16G16B16_SINT: return MTLVertexFormatShort3;
+    case VK_FORMAT_R16G16B16A16_SINT: return MTLVertexFormatShort4;
+    case VK_FORMAT_R16_SFLOAT: return MTLVertexFormatHalf;
+    case VK_FORMAT_R16G16_SFLOAT: return MTLVertexFormatHalf2;
+    case VK_FORMAT_R16G16B16_SFLOAT: return MTLVertexFormatHalf3;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: return MTLVertexFormatHalf4;
+    case VK_FORMAT_R32_UINT: return MTLVertexFormatUInt;
+    case VK_FORMAT_R32G32_UINT: return MTLVertexFormatUInt2;
+    case VK_FORMAT_R32G32B32_UINT: return MTLVertexFormatUInt3;
+    case VK_FORMAT_R32G32B32A32_UINT: return MTLVertexFormatUInt4;
+    case VK_FORMAT_R32_SINT: return MTLVertexFormatInt;
+    case VK_FORMAT_R32G32_SINT: return MTLVertexFormatInt2;
+    case VK_FORMAT_R32G32B32_SINT: return MTLVertexFormatInt3;
+    case VK_FORMAT_R32G32B32A32_SINT: return MTLVertexFormatInt4;
+    case VK_FORMAT_R32_SFLOAT: return MTLVertexFormatFloat;
+    case VK_FORMAT_R32G32_SFLOAT: return MTLVertexFormatFloat2;
+    case VK_FORMAT_R32G32B32_SFLOAT: return MTLVertexFormatFloat3;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: return MTLVertexFormatFloat4;
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: return MTLVertexFormatFloatRG11B10;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return MTLVertexFormatUInt1010102Normalized;
+    case VK_FORMAT_A2B10G10R10_SNORM_PACK32: return MTLVertexFormatInt1010102Normalized;
+    default: return MTLVertexFormatInvalid;
+    }
+}
+
+std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
+    for (const auto& shader : shaders) {
+        if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex and pixel stages");
+        if (shader.stage != ShaderRecompiler::ShaderStage::Vertex) continue;
+        for (const auto& attribute : shader.program->vertexAttributes) {
+            const auto format = Graphics::DecodeVertexFormat(attribute).format;
+            if (NativeVertexFormat(format) == MTLVertexFormatInvalid) return "vertex format " + std::to_string(static_cast<int>(format)) + " has no Metal vertex format";
+        }
+    }
+    const auto translated = Metal::TranslateState(graphics);
+    if (translated.rejection != nullptr) return std::string(translated.rejection);
+    if (graphics.samples > 1 || std::any_of(graphics.colors.begin(), graphics.colors.end(), [](const Graphics::ColorTarget& color) { return color.samples > 1; }) || (graphics.depth && graphics.depth->samples > 1)) return std::string("multisampled Metal draws are not wired yet");
+    return std::nullopt;
+}
+
 ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device, bool presenting) {
     ShaderRecompiler::MslTarget target;
     target.metalVersion = 320;
@@ -233,6 +368,8 @@ struct VulkanDevice::State {
     std::unique_ptr<Metal::GuestRegistrySync> registry;
     id<MTLDevice> native = nil;
     id<MTL4ArgumentTable> table = nil;
+    id<MTL4ArgumentTable> vertexTable = nil;
+    id<MTL4ArgumentTable> fragmentTable = nil;
     ShaderRecompiler::MslTarget msl;
     ShaderRecompiler::SpirvTarget target{};
     std::array<std::uint32_t, 3> groupLimit{};
@@ -241,6 +378,15 @@ struct VulkanDevice::State {
     std::recursive_mutex mutex;
     Metal::Recording open;
     id<MTL4ComputeCommandEncoder> encoder = nil;
+    id<MTL4RenderCommandEncoder> render = nil;
+    std::vector<std::uint64_t> passKey;
+    std::uint32_t passWidth = 0;
+    std::uint32_t passHeight = 0;
+    void* boundPipeline = nullptr;
+    void* boundDepthStencil = nullptr;
+    Metal::DynamicState boundDynamic;
+    bool dynamicValid = false;
+    std::uint64_t epoch = 1;
     std::uint32_t encodedDispatches = 0;
     std::uint64_t recordedSinceSubmit = 0;
     std::uint64_t lastSerial = 0;
@@ -260,6 +406,11 @@ struct VulkanDevice::State {
     std::map<SurfaceKey, CachedSurface> surfaces;
     std::map<SamplerKey, id<MTLSamplerState>> samplers;
     std::array<id<MTLTexture>, 4> nullTextures{};
+    std::vector<CachedSurface*> dirtySurfaces;
+    std::map<DepthKey, DepthSurface> depthSurfaces;
+    std::unique_ptr<Metal::PipelineCache> renderPipelines;
+    std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> stageSources;
+    std::unordered_map<Metal::CompileKey, std::shared_ptr<Metal::RenderPipeline>, Metal::CompileKeyHash> drawPipelines;
 
     void* window = nullptr;
     SDL_MetalView view = nullptr;
@@ -275,6 +426,7 @@ struct VulkanDevice::State {
     std::unordered_map<ShaderRecompiler::PipelineIdentity, PipelineEntry, IdentityHash> pipelines;
     std::atomic<std::uint64_t> pipelinesCreated{0};
     std::atomic<std::uint64_t> dispatches{0};
+    std::atomic<std::uint64_t> draws{0};
 
     ~State() {
         if (device == nullptr) return;
@@ -283,6 +435,14 @@ struct VulkanDevice::State {
             drain(lastSerial);
         } catch (...) {
         }
+        drawPipelines.clear();
+        renderPipelines.reset();
+        for (auto& [key, depth] : depthSurfaces) {
+            id<MTLTexture> retired = depth.texture;
+            depth.texture = nil;
+            device->RetireAllocation((__bridge void*)retired, {});
+        }
+        depthSurfaces.clear();
         for (auto& [key, surface] : surfaces) {
             for (auto& [view, handle] : surface.views) textures->Release(handle);
             textures->Release(surface.texture);
@@ -413,18 +573,52 @@ struct VulkanDevice::State {
 
     void begin() {
         if (open) return;
-        open = sync->Begin(Queue, "AnyPS5 compute");
+        open = sync->Begin(Queue, "AnyPS5 commands");
+    }
+
+    void endRender() {
+        if (render == nil) return;
+        [render endEncoding];
+        render = nil;
+        passKey.clear();
+    }
+
+    void endCompute() {
+        if (encoder == nil) return;
+        [encoder endEncoding];
+        encoder = nil;
+    }
+
+    id<MTL4ComputeCommandEncoder> computeEncoder() {
+        begin();
+        endRender();
+        if (encoder != nil) return encoder;
         id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)open.commands;
         encoder = [commands computeCommandEncoder];
         if (encoder == nil) throw std::runtime_error("AGC graphics: Metal compute encoder could not be created");
+        [encoder barrierAfterQueueStages:MTLStageDispatch | MTLStageBlit | MTLStageVertex | MTLStageFragment beforeStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
         encodedDispatches = 0;
+        return encoder;
+    }
+
+    void writebackDirty() {
+        if (dirtySurfaces.empty()) return;
+        auto compute = computeEncoder();
+        [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        for (auto* surface : dirtySurfaces) {
+            textures->EncodeWriteback((__bridge void*)compute, surface->texture, surface->resource, surface->address);
+            surface->dirty = false;
+        }
+        dirtySurfaces.clear();
+        [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     }
 
     void flush() {
         if (!open) return;
         @autoreleasepool {
-            [encoder endEncoding];
-            encoder = nil;
+            writebackDirty();
+            endRender();
+            endCompute();
             sync->EncodeLabels(open);
             const auto serial = sync->Submit(&open, 1);
             open = {};
@@ -443,6 +637,7 @@ struct VulkanDevice::State {
             if (textures != nullptr) textures->Seal(Queue, serial);
             lastSerial = serial;
             recordedSinceSubmit = 0;
+            ++epoch;
         }
     }
 
@@ -610,43 +805,43 @@ struct VulkanDevice::State {
 
     std::uint64_t image(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
         if (!binding.imageShape) throw std::runtime_error("AGC graphics: Metal image binding has no image shape");
-        const auto viewKind = ViewKindOf(*binding.imageShape);
         const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
+        const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
+        const auto kind = ImageKindOf(binding.binding);
+        std::optional<std::uint32_t> storageMip;
+        if (kind.storage) {
+            storageMip = 0u;
+            for (auto previous = element; previous > 0u && std::equal(words.begin(), words.end(), binding.guestDescriptor.begin() + static_cast<std::ptrdiff_t>(previous - 1u) * 8); --previous) ++*storageMip;
+        }
+        return imageView(words, *binding.imageShape, written, kind.numeric, true, snapshots, uses, storageMip);
+    }
+
+    std::uint64_t tableImage(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
+        const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
+        const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
+        return imageView(words, binding.imageShapes.at(element), written, std::nullopt, false, snapshots, uses);
+    }
+
+    std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses, std::optional<std::uint32_t> storageMip = std::nullopt) {
+        const auto viewKind = ViewKindOf(shape);
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
         const auto resource = Graphics::DecodeTextureResource(words);
-        const bool written = element < binding.imageWritten.size() && binding.imageWritten[element];
-        const auto layers = resource.depthOrLastArray + 1u;
-        auto info = Metal::DescribeTexture(resource);
-        if (info.kind != Metal::TextureKind::Tex3D && info.kind != Metal::TextureKind::Tex2DMsaa) {
-            info.kind = Metal::TextureKind::Tex2DArray;
-            info.arrayLength = layers;
-        }
+        const auto [found, info, layers] = surfaceFor(resource);
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
-        info.shaderWrite = true;
-        info.label = "AnyPS5 guest texture";
-        const SurfaceKey key{resource.baseAddress,
-                             static_cast<std::uint64_t>(resource.format) | static_cast<std::uint64_t>(info.kind) << 32u | static_cast<std::uint64_t>(resource.tileMode) << 40u,
-                             static_cast<std::uint64_t>(info.width) | static_cast<std::uint64_t>(info.height) << 32u,
-                             static_cast<std::uint64_t>(layers) | static_cast<std::uint64_t>(info.mipLevels) << 32u,
-                             static_cast<std::uint64_t>(resource.pipeBankXor) | static_cast<std::uint64_t>(info.samples) << 32u};
-        auto& manager = textureManager();
-        auto found = surfaces.find(key);
-        if (found == surfaces.end()) {
-            std::string failure;
-            auto created = manager.Create(info, &failure);
-            if (!created) throw std::runtime_error("AGC graphics: Metal texture could not be created: " + failure);
-            found = surfaces.emplace(key, CachedSurface{created, {}}).first;
-        }
-        auto& surface = found->second;
+        auto& surface = *found;
         const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
         const auto address = resolve(resource.baseAddress, bytes, written, snapshots);
         uses.push_back({&surface, resource, address, written});
         Metal::ViewInfo view;
         view.kind = viewKind;
         view.changeKind = true;
-        view.pixelFormat = NumericView(surface.texture.pixelFormat, ImageKindOf(binding.binding).numeric);
+        view.pixelFormat = numeric ? NumericView(surface.texture.pixelFormat, *numeric) : surface.texture.pixelFormat;
         view.baseLevel = std::min(resource.baseLevel, info.mipLevels - 1u);
         view.levelCount = std::min(std::max(resource.lastLevel, view.baseLevel), info.mipLevels - 1u) - view.baseLevel + 1u;
+        if (storageMip) {
+            view.baseLevel = std::min(view.baseLevel + *storageMip, info.mipLevels - 1u);
+            view.levelCount = 1;
+        }
         if (viewKind == Metal::TextureKind::Tex3D || viewKind == Metal::TextureKind::Tex2DMsaa) {
             view.baseSlice = 0;
             view.sliceCount = 1;
@@ -654,23 +849,68 @@ struct VulkanDevice::State {
             view.baseSlice = std::min(resource.baseArray, layers - 1u);
             view.sliceCount = viewKind == Metal::TextureKind::Tex2D ? 1u : layers - view.baseSlice;
         }
-        if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
+        if (!written && descriptorSwizzle) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
+        else if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {4, 5, 6, 7});
+        return viewOf(surface, view).resourceId;
+    }
+
+    SurfaceRef surfaceFor(const Graphics::GuestTextureResource& resource) {
+        const auto layers = resource.depthOrLastArray + 1u;
+        auto info = Metal::DescribeTexture(resource);
+        if (info.kind != Metal::TextureKind::Tex3D && info.kind != Metal::TextureKind::Tex2DMsaa) {
+            info.kind = Metal::TextureKind::Tex2DArray;
+            info.arrayLength = layers;
+        }
+        const auto* format = Metal::FindFormat(resource.format);
+        info.shaderWrite = true;
+        info.renderTarget = format != nullptr && !format->blockCompressed;
+        info.label = "AnyPS5 guest texture";
+        const SurfaceKey key{resource.baseAddress,
+                             static_cast<std::uint64_t>(resource.format) | static_cast<std::uint64_t>(info.kind) << 32u | static_cast<std::uint64_t>(resource.tileMode) << 40u,
+                             static_cast<std::uint64_t>(info.width) | static_cast<std::uint64_t>(info.height) << 32u,
+                             static_cast<std::uint64_t>(layers) | static_cast<std::uint64_t>(info.mipLevels) << 32u,
+                             static_cast<std::uint64_t>(resource.pipeBankXor) | static_cast<std::uint64_t>(info.samples) << 32u};
+        auto found = surfaces.find(key);
+        if (found == surfaces.end()) {
+            std::string failure;
+            auto created = textureManager().Create(info, &failure);
+            if (!created) throw std::runtime_error("AGC graphics: Metal texture could not be created: " + failure);
+            found = surfaces.emplace(key, CachedSurface{created, {}}).first;
+        }
+        return {&found->second, info, layers};
+    }
+
+    Metal::TextureHandle viewOf(CachedSurface& surface, const Metal::ViewInfo& view) {
         const ViewKey viewKey{static_cast<std::uint32_t>(view.kind), static_cast<std::uint32_t>(view.pixelFormat), view.baseLevel, view.levelCount, view.baseSlice, view.sliceCount,
                               static_cast<std::uint32_t>(view.swizzle[0]) | static_cast<std::uint32_t>(view.swizzle[1]) << 8u | static_cast<std::uint32_t>(view.swizzle[2]) << 16u | static_cast<std::uint32_t>(view.swizzle[3]) << 24u};
         auto existing = surface.views.find(viewKey);
         if (existing == surface.views.end()) {
-            auto created = manager.View(surface.texture, view);
+            auto created = textureManager().View(surface.texture, view);
             if (!created) throw std::runtime_error("AGC graphics: Metal texture view could not be created");
             existing = surface.views.emplace(viewKey, created).first;
         }
-        return existing->second.resourceId;
+        return existing->second;
     }
 
-    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element) {
+    bool needsUpload(const std::vector<ImageUse>& uses) const {
+        return std::any_of(uses.begin(), uses.end(), [&](const ImageUse& use) { return !use.surface->dirty && use.surface->validEpoch != epoch; });
+    }
+
+    void encodeUploads(id<MTL4ComputeCommandEncoder> compute, const std::vector<ImageUse>& uses) {
+        for (const auto& use : uses) {
+            auto& surface = *use.surface;
+            if (surface.dirty || surface.validEpoch == epoch) continue;
+            surface.validEpoch = epoch;
+            textures->EncodeUpload((__bridge void*)compute, surface.texture, use.resource, use.address, textures->DefaultUploadPath());
+        }
+    }
+
+    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, bool point) {
         const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u);
         const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
         const bool integerBorder = element < binding.samplerIntegerBorder.size() && binding.samplerIntegerBorder[element];
-        const SamplerKey key{words[0], words[1], words[2], words[3], (unnormalized ? 1u : 0u) | (integerBorder ? 2u : 0u)};
+        const bool compare = element < binding.samplerDepthCompare.size() && binding.samplerDepthCompare[element];
+        const SamplerKey key{words[0], words[1], words[2], words[3], (unnormalized ? 1u : 0u) | (integerBorder ? 2u : 0u) | (point ? 4u : 0u) | (compare ? 8u : 0u)};
         if (const auto found = samplers.find(key); found != samplers.end()) return found->second.gpuResourceID._impl;
         const auto decoded = Graphics::DecodeSamplerResource(words, unnormalized, false, integerBorder);
         MTLSamplerDescriptor* descriptor = [MTLSamplerDescriptor new];
@@ -687,13 +927,114 @@ struct VulkanDevice::State {
             descriptor.lodMinClamp = std::max(decoded.minLod, 0.0f);
             descriptor.lodMaxClamp = std::max(decoded.maxLod, descriptor.lodMinClamp);
         }
-        if (decoded.compareEnable) descriptor.compareFunction = static_cast<MTLCompareFunction>(decoded.compareOp);
+        if (descriptor.minFilter == MTLSamplerMinMagFilterNearest && descriptor.magFilter == MTLSamplerMinMagFilterNearest) descriptor.maxAnisotropy = 1;
+        if (point) {
+            descriptor.minFilter = MTLSamplerMinMagFilterNearest;
+            descriptor.magFilter = MTLSamplerMinMagFilterNearest;
+            if (descriptor.mipFilter == MTLSamplerMipFilterLinear) descriptor.mipFilter = MTLSamplerMipFilterNearest;
+            descriptor.maxAnisotropy = 1;
+        }
+        if (compare) descriptor.compareFunction = static_cast<MTLCompareFunction>(decoded.compareOp);
         descriptor.supportArgumentBuffers = YES;
         descriptor.label = @"AnyPS5 guest sampler";
         id<MTLSamplerState> state = [native newSamplerStateWithDescriptor:descriptor];
         if (state == nil) throw std::runtime_error("AGC graphics: Metal sampler state could not be created");
         samplers.emplace(key, state);
         return state.gpuResourceID._impl;
+    }
+
+    void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses) {
+        slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
+        slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
+        if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
+        std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
+        std::uint32_t pointSamplers = 0;
+        std::optional<std::uint32_t> tableElements;
+        std::vector<std::uint32_t> map;
+        for (const auto& binding : shader.bindings) pointSamplers |= PointSamplerMask(binding);
+        for (const auto& binding : shader.bindings) {
+            switch (binding.role) {
+            case ShaderRecompiler::DescriptorRole::ShaderData:
+                slots[SlotIndex(BufferSlot::ShaderData)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
+                break;
+            case ShaderRecompiler::DescriptorRole::FlattenedSrt:
+                slots[SlotIndex(BufferSlot::FlattenedSrt)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
+                break;
+            case ShaderRecompiler::DescriptorRole::GuestBuffers: {
+                if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest buffer descriptor must contain four DWORDs per element");
+                std::vector<ShaderRecompiler::MetalAbi::GuestBufferEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0, 0, 0});
+                for (std::uint32_t element = 0; element < binding.count; ++element) {
+                    const ShaderRecompiler::ShaderBufferResource descriptor{{binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u]}};
+                    const auto base = descriptor.Base48();
+                    const auto bytes = std::min<std::uint64_t>(descriptor.GetSize(), 0xffffffffull);
+                    if (base == 0 || bytes == 0) continue;
+                    const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
+                    entries[element] = {resolve(base, bytes, written, snapshots), static_cast<std::uint32_t>(bytes), 0};
+                }
+                slots[SlotIndex(BufferSlot::GuestBuffers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::GuestImages: {
+                if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8u) throw std::runtime_error("AGC graphics: guest image descriptor must contain eight DWORDs per element");
+                for (std::uint32_t element = 0; element < binding.count; ++element) {
+                    imageEntries.emplace_back(ShaderRecompiler::MetalAbi::GuestImageIndex(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), element), image(binding, element, snapshots, uses));
+                }
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::GuestSamplers: {
+                if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest sampler descriptor must contain four DWORDs per element");
+                std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
+                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, element < 32u && ((pointSamplers >> element) & 1u) != 0u);
+                slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::ImageTable:
+            case ShaderRecompiler::DescriptorRole::ImageStorageTable: {
+                if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8u || binding.imageShapes.size() != binding.count) throw std::runtime_error("AGC graphics: image table binding is malformed");
+                if (tableElements && *tableElements != binding.count) throw std::runtime_error("AGC graphics: a stage's image tables disagree on their elements");
+                tableElements = binding.count;
+                std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
+                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = tableImage(binding, element, snapshots, uses);
+                const auto role = binding.role == ShaderRecompiler::DescriptorRole::ImageTable ? BufferSlot::ImageTable : BufferSlot::ImageStorageTable;
+                slots[SlotIndex(role)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::SamplerTable: {
+                if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u || binding.samplerDepthCompare.size() != binding.count || binding.count % ShaderRecompiler::ImageTableAbi::SamplerEntryElements != 0u) throw std::runtime_error("AGC graphics: sampler table binding is malformed");
+                std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
+                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, false);
+                slots[SlotIndex(BufferSlot::SamplerTable)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::ImageTableMap: {
+                namespace TableAbi = ShaderRecompiler::ImageTableAbi;
+                if (binding.count != 1 || binding.guestDescriptor.size() < TableAbi::HeaderWords || binding.guestDescriptor[TableAbi::HeaderVersion] != TableAbi::Version) throw std::runtime_error("AGC graphics: image table map binding is malformed");
+                map = binding.guestDescriptor;
+                map[TableAbi::HeaderElementBase] = 0;
+                break;
+            }
+            case ShaderRecompiler::DescriptorRole::BdaPagetable:
+                if (slots[SlotIndex(BufferSlot::BdaPagetable)] == 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
+                break;
+            case ShaderRecompiler::DescriptorRole::FaultBuffer:
+                break;
+            default:
+                throw std::runtime_error("AGC graphics: Metal does not bind descriptor role " + std::to_string(static_cast<int>(binding.role)) + " yet");
+            }
+        }
+        if (!map.empty()) {
+            if (map[ShaderRecompiler::ImageTableAbi::HeaderElementCount] != tableElements.value_or(0u)) throw std::runtime_error("AGC graphics: image table map disagrees with its image binding");
+            slots[SlotIndex(BufferSlot::ImageTableMap)] = uploadBytes(map.data(), map.size() * sizeof(map[0]));
+        } else if (tableElements) {
+            throw std::runtime_error("AGC graphics: an image table stage has no map");
+        }
+        if (!imageEntries.empty()) {
+            const auto [lowest, highest] = std::minmax_element(imageEntries.begin(), imageEntries.end());
+            const auto first = lowest->first;
+            std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(highest->first - first + 1u, {0});
+            for (const auto& [index, resourceId] : imageEntries) entries[index - first].resourceId = resourceId;
+            slots[SlotIndex(BufferSlot::GuestImages)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0])) - static_cast<std::uint64_t>(first) * sizeof(entries[0]);
+        }
     }
 
     void dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
@@ -703,98 +1044,343 @@ struct VulkanDevice::State {
         if (x == 0 || y == 0 || z == 0) return;
         const auto threads = shader.hostThreadgroup;
         if (threads[0] == 0 || threads[1] == 0 || threads[2] == 0) throw std::runtime_error("AGC graphics: the MSL result has no threadgroup size");
+        if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error("AGC graphics: Metal dispatch exceeds the threadgroup count limit");
         id<MTLComputePipelineState> state = pipeline(shader);
         @autoreleasepool {
             std::lock_guard lock(mutex);
             registry->Refresh();
             begin();
             std::array<std::uint64_t, ArgumentSlots> slots{};
-            slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
-            slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
-            if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
-            std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
             std::vector<ImageUse> uses;
-            for (const auto& binding : shader.bindings) {
-                switch (binding.role) {
-                case ShaderRecompiler::DescriptorRole::ShaderData:
-                    slots[SlotIndex(BufferSlot::ShaderData)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
-                    break;
-                case ShaderRecompiler::DescriptorRole::FlattenedSrt:
-                    slots[SlotIndex(BufferSlot::FlattenedSrt)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
-                    break;
-                case ShaderRecompiler::DescriptorRole::GuestBuffers: {
-                    if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest buffer descriptor must contain four DWORDs per element");
-                    std::vector<ShaderRecompiler::MetalAbi::GuestBufferEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0, 0, 0});
-                    for (std::uint32_t element = 0; element < binding.count; ++element) {
-                        const ShaderRecompiler::ShaderBufferResource descriptor{{binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u]}};
-                        const auto base = descriptor.Base48();
-                        const auto bytes = std::min<std::uint64_t>(descriptor.GetSize(), 0xffffffffull);
-                        if (base == 0 || bytes == 0) continue;
-                        const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
-                        entries[element] = {resolve(base, bytes, written, snapshots), static_cast<std::uint32_t>(bytes), 0};
-                    }
-                    slots[SlotIndex(BufferSlot::GuestBuffers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
-                    break;
-                }
-                case ShaderRecompiler::DescriptorRole::GuestImages: {
-                    if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8u) throw std::runtime_error("AGC graphics: guest image descriptor must contain eight DWORDs per element");
-                    for (std::uint32_t element = 0; element < binding.count; ++element) {
-                        imageEntries.emplace_back(ShaderRecompiler::MetalAbi::GuestImageIndex(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), element), image(binding, element, snapshots, uses));
-                    }
-                    break;
-                }
-                case ShaderRecompiler::DescriptorRole::GuestSamplers: {
-                    if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest sampler descriptor must contain four DWORDs per element");
-                    std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
-                    for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element);
-                    slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
-                    break;
-                }
-                case ShaderRecompiler::DescriptorRole::BdaPagetable:
-                    if (slots[SlotIndex(BufferSlot::BdaPagetable)] == 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
-                    break;
-                case ShaderRecompiler::DescriptorRole::FaultBuffer:
-                    break;
-                default:
-                    throw std::runtime_error("AGC graphics: Metal dispatch does not bind descriptor role " + std::to_string(static_cast<int>(binding.role)) + " yet");
-                }
-            }
-            if (!imageEntries.empty()) {
-                const auto [lowest, highest] = std::minmax_element(imageEntries.begin(), imageEntries.end());
-                const auto first = lowest->first;
-                std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(highest->first - first + 1u, {0});
-                for (const auto& [index, resourceId] : imageEntries) entries[index - first].resourceId = resourceId;
-                slots[SlotIndex(BufferSlot::GuestImages)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0])) - static_cast<std::uint64_t>(first) * sizeof(entries[0]);
-            }
-            if (encodedDispatches != 0) [encoder barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
-            if (!uses.empty()) {
-                std::vector<const CachedSurface*> uploaded;
-                for (const auto& use : uses) {
-                    if (std::find(uploaded.begin(), uploaded.end(), use.surface) != uploaded.end()) continue;
-                    uploaded.push_back(use.surface);
-                    textures->EncodeUpload((__bridge void*)encoder, use.surface->texture, use.resource, use.address, textures->DefaultUploadPath());
-                }
-                [encoder barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            bindStage(shader, snapshots, slots, uses);
+            writebackDirty();
+            auto compute = computeEncoder();
+            if (encodedDispatches != 0) [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+            if (needsUpload(uses)) {
+                encodeUploads(compute, uses);
+                [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
             }
             for (std::uint32_t slot = 0; slot < ArgumentSlots; ++slot) {
                 if (slots[slot] != 0) [table setAddress:slots[slot] atIndex:slot];
             }
-            [encoder setComputePipelineState:state];
-            [encoder setArgumentTable:table];
-            if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error("AGC graphics: Metal dispatch exceeds the threadgroup count limit");
-            [encoder dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+            [compute setComputePipelineState:state];
+            [compute setArgumentTable:table];
+            [compute dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
             if (std::any_of(uses.begin(), uses.end(), [](const ImageUse& use) { return use.written; })) {
-                [encoder barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+                [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
                 std::vector<const CachedSurface*> stored;
                 for (const auto& use : uses) {
                     if (!use.written || std::find(stored.begin(), stored.end(), use.surface) != stored.end()) continue;
                     stored.push_back(use.surface);
-                    textures->EncodeWriteback((__bridge void*)encoder, use.surface->texture, use.resource, use.address);
+                    textures->EncodeWriteback((__bridge void*)compute, use.surface->texture, use.resource, use.address);
                 }
             }
+            ++epoch;
             ++encodedDispatches;
             ++recordedSinceSubmit;
             dispatches.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+
+    Metal::PipelineCache& pipelineCache() {
+        if (renderPipelines != nullptr) return *renderPipelines;
+        std::string failure;
+        renderPipelines = Metal::PipelineCache::Create(*device, *compiler, &failure);
+        if (renderPipelines == nullptr) throw std::runtime_error("AGC graphics: Metal pipeline cache could not be created: " + failure);
+        return *renderPipelines;
+    }
+
+    const StageSource& stageSource(const ShaderRecompiler::RecompileResult& shader) {
+        if (shader.backend != ShaderRecompiler::ShaderBackendKind::Msl || shader.msl.empty()) throw std::runtime_error("AGC graphics: Metal draws need MSL stage results");
+        const auto identity = shader.Identity();
+        if (const auto found = stageSources.find(identity); found != stageSources.end()) return found->second;
+        StageSource entry;
+        entry.source = std::make_shared<const std::string>(shader.msl.Source());
+        const auto hash = shader.msl.ContentHash();
+        entry.key = Metal::CompileKeyBuilder(0x4d534c47ull).Add(hash.low).Add(hash.high).Finish();
+        const auto declared = DeclaredConstants(*entry.source);
+        for (const auto& constant : shader.specialization) {
+            if (declared.contains(constant.id)) entry.constants.push_back({constant.id, constant.value, false});
+        }
+        return stageSources.emplace(identity, std::move(entry)).first->second;
+    }
+
+    static Metal::LibrarySource librarySource(const StageSource& stage, const char* name) {
+        Metal::LibrarySource library;
+        library.key = stage.key;
+        library.owner = stage.source;
+        library.text = *stage.source;
+        library.name = name;
+        library.fastMath = true;
+        return library;
+    }
+
+    void* renderPipeline(const Metal::RenderPipelineRequest& request) {
+        const auto key = Metal::PipelineCache::RenderKey(request);
+        auto found = drawPipelines.find(key);
+        if (found == drawPipelines.end()) {
+            found = drawPipelines.emplace(key, pipelineCache().Render(request)).first;
+            pipelinesCreated.fetch_add(1, std::memory_order_relaxed);
+        }
+        const auto& handle = *found->second;
+        if (auto* native = handle.Native()) return native;
+        pipelineCache().Promote(handle, Metal::CompilePriority::Urgent);
+        handle.Wait(PipelineTimeoutMs);
+        if (auto* native = handle.Native()) return native;
+        if (Verbose()) {
+            std::fprintf(stderr, "%.*s\n", static_cast<int>(request.vertexLibrary.text.size()), request.vertexLibrary.text.data());
+            if (!request.fragmentFunction.empty()) std::fprintf(stderr, "%.*s\n", static_cast<int>(request.fragmentLibrary.text.size()), request.fragmentLibrary.text.data());
+        }
+        throw std::runtime_error("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
+    }
+
+    DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
+        const DepthKey key{target.address, static_cast<std::uint64_t>(target.extent.width) | static_cast<std::uint64_t>(target.extent.height) << 32u, static_cast<std::uint64_t>(format)};
+        if (const auto found = depthSurfaces.find(key); found != depthSurfaces.end()) return found->second;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:static_cast<MTLPixelFormat>(format) width:target.extent.width height:target.extent.height mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
+        descriptor.usage = MTLTextureUsageRenderTarget;
+        id<MTLTexture> texture = [native newTextureWithDescriptor:descriptor];
+        if (texture == nil) throw std::runtime_error("AGC graphics: Metal depth target could not be created");
+        texture.label = @"AnyPS5 depth target";
+        device->AddResidentAllocation((__bridge void*)texture);
+        return depthSurfaces.emplace(key, DepthSurface{texture, false}).first->second;
+    }
+
+    void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key) {
+        begin();
+        endRender();
+        endCompute();
+        MTL4RenderPassDescriptor* descriptor = [MTL4RenderPassDescriptor new];
+        for (std::uint32_t index = 0; index < Metal::MaxColorAttachments; ++index) {
+            if (colors[index].texture == nil) continue;
+            MTLRenderPassColorAttachmentDescriptor* attachment = descriptor.colorAttachments[index];
+            attachment.texture = colors[index].texture;
+            attachment.level = colors[index].level;
+            attachment.depthPlane = colors[index].depthPlane;
+            attachment.loadAction = MTLLoadActionLoad;
+            attachment.storeAction = MTLStoreActionStore;
+        }
+        if (depth != nullptr) {
+            const auto load = depth->initialized ? MTLLoadActionLoad : MTLLoadActionClear;
+            MTLRenderPassDepthAttachmentDescriptor* attachment = descriptor.depthAttachment;
+            attachment.texture = depth->texture;
+            attachment.loadAction = load;
+            attachment.storeAction = MTLStoreActionStore;
+            attachment.clearDepth = target->clearDepth;
+            if (stencil) {
+                MTLRenderPassStencilAttachmentDescriptor* stencilAttachment = descriptor.stencilAttachment;
+                stencilAttachment.texture = depth->texture;
+                stencilAttachment.loadAction = load;
+                stencilAttachment.storeAction = MTLStoreActionStore;
+                stencilAttachment.clearStencil = target->clearStencil;
+            }
+            depth->initialized = true;
+        }
+        descriptor.renderTargetWidth = width;
+        descriptor.renderTargetHeight = height;
+        if (depth == nullptr && std::all_of(colors.begin(), colors.end(), [](const ColorAttachment& color) { return color.texture == nil; })) descriptor.defaultRasterSampleCount = 1;
+        id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)open.commands;
+        render = [commands renderCommandEncoderWithDescriptor:descriptor];
+        if (render == nil) throw std::runtime_error("AGC graphics: Metal render encoder could not be created");
+        [render barrierAfterQueueStages:MTLStageVertex | MTLStageFragment | MTLStageDispatch | MTLStageBlit beforeStages:MTLStageVertex | MTLStageFragment visibilityOptions:MTL4VisibilityOptionDevice];
+        [render setArgumentTable:vertexTable atStages:MTLRenderStageVertex];
+        [render setArgumentTable:fragmentTable atStages:MTLRenderStageFragment];
+        boundPipeline = nullptr;
+        boundDepthStencil = nullptr;
+        dynamicValid = false;
+        passKey = std::move(key);
+        passWidth = width;
+        passHeight = height;
+    }
+
+    void applyDynamic(const Metal::DynamicState& dynamic) {
+        const auto changed = dynamicValid ? Metal::DiffDynamic(boundDynamic, dynamic) : Metal::DynamicAll;
+        if (changed == 0) return;
+        if ((changed & Metal::DynamicViewport) != 0) {
+            const auto& v = dynamic.viewport;
+            [render setViewport:MTLViewport{v.originX, v.originY, v.width, v.height, v.znear, v.zfar}];
+        }
+        if ((changed & Metal::DynamicScissor) != 0) {
+            const auto& r = dynamic.scissor;
+            [render setScissorRect:MTLScissorRect{r.x, r.y, r.width, r.height}];
+        }
+        if ((changed & Metal::DynamicDepthBias) != 0) [render setDepthBias:dynamic.depthBias.constant slopeScale:dynamic.depthBias.slope clamp:dynamic.depthBias.clamp];
+        if ((changed & Metal::DynamicBlendColor) != 0) [render setBlendColorRed:dynamic.blendColor[0] green:dynamic.blendColor[1] blue:dynamic.blendColor[2] alpha:dynamic.blendColor[3]];
+        if ((changed & Metal::DynamicStencilReference) != 0) [render setStencilFrontReferenceValue:dynamic.stencilFrontReference backReferenceValue:dynamic.stencilBackReference];
+        if ((changed & Metal::DynamicCull) != 0) [render setCullMode:static_cast<MTLCullMode>(dynamic.cull)];
+        if ((changed & Metal::DynamicWinding) != 0) [render setFrontFacingWinding:static_cast<MTLWinding>(dynamic.winding)];
+        if ((changed & Metal::DynamicDepthClip) != 0) [render setDepthClipMode:static_cast<MTLDepthClipMode>(dynamic.depthClip)];
+        boundDynamic = dynamic;
+        dynamicValid = true;
+    }
+
+    void draw(const Graphics::State& graphics, const Pm4::DrawParameters& params, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+        if (params.indirect) throw std::runtime_error("AGC graphics: Metal indirect draws are not wired yet");
+        if (params.indexCount == 0 || params.instanceCount == 0) return;
+        if (params.indexed && params.indexSize != 2u && params.indexSize != 4u) throw std::runtime_error("AGC graphics: only uint16 and uint32 index buffers are supported");
+        const Graphics::CompiledShader* vertex = nullptr;
+        const Graphics::CompiledShader* fragment = nullptr;
+        for (const auto& shader : shaders) {
+            if (shader.stage == ShaderRecompiler::ShaderStage::Vertex) vertex = &shader;
+            else if (shader.stage == ShaderRecompiler::ShaderStage::Fragment) fragment = &shader;
+            else throw std::runtime_error("AGC graphics: Metal draws support only vertex and pixel stages");
+        }
+        if (vertex == nullptr) throw std::runtime_error("AGC graphics: Metal draw has no vertex stage");
+        const auto translated = Metal::TranslateState(graphics);
+        if (translated.rejection != nullptr) throw std::runtime_error(std::string("AGC graphics: ") + translated.rejection);
+        if (translated.cullsEverything) return;
+        if (translated.pipeline.sampleCount > 1) throw std::runtime_error("AGC graphics: multisampled Metal draws are not wired yet");
+        @autoreleasepool {
+            std::lock_guard lock(mutex);
+            registry->Refresh();
+            begin();
+            Metal::RenderPipelineRequest request;
+            request.state = translated.pipeline;
+            const auto& vertexSource = stageSource(*vertex->program);
+            request.vertexLibrary = librarySource(vertexSource, "AnyPS5 guest vertex");
+            request.vertexFunction = std::string(ShaderRecompiler::MslEntryPoint);
+            request.vertexConstants = vertexSource.constants;
+            if (fragment != nullptr) {
+                const auto& fragmentSource = stageSource(*fragment->program);
+                request.fragmentLibrary = librarySource(fragmentSource, "AnyPS5 guest pixel");
+                request.fragmentFunction = std::string(ShaderRecompiler::MslEntryPoint);
+                request.fragmentConstants = fragmentSource.constants;
+            }
+            request.label = "AnyPS5 guest draw";
+            request.priority = Metal::CompilePriority::Urgent;
+            std::vector<std::uint64_t> vertexBuffers;
+            for (const auto& attribute : vertex->program->vertexAttributes) {
+                const auto decoded = Graphics::DecodeVertexFormat(attribute);
+                const auto format = NativeVertexFormat(decoded.format);
+                if (format == MTLVertexFormatInvalid) throw std::runtime_error("AGC graphics: vertex format " + std::to_string(static_cast<int>(decoded.format)) + " has no Metal vertex format");
+                const auto buffer = FirstVertexBuffer + static_cast<std::uint32_t>(vertexBuffers.size());
+                if (buffer >= RenderSlots) throw std::runtime_error("AGC graphics: Metal draw has more vertex streams than buffer slots");
+                request.vertexAttributes.push_back({attribute.location, static_cast<std::uint32_t>(format), buffer, 0});
+                const auto packed = (decoded.bytes + 3u) & ~3u;
+                if (Graphics::NullVertexDescriptor(attribute)) {
+                    request.vertexBuffers.push_back({buffer, packed, Metal::VertexStep::Constant});
+                    vertexBuffers.push_back(uploadBytes(nullptr, 0, 16));
+                    continue;
+                }
+                const auto& fields = attribute.resource.fields;
+                const auto stride = (fields[1] >> 16u) & 0x3fffu;
+                const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
+                if (stride % 4u != 0u) throw std::runtime_error("AGC graphics: Metal vertex stride " + std::to_string(stride) + " is not a multiple of four");
+                const auto step = stride == 0u ? Metal::VertexStep::Constant : attribute.fetchIndex == 0u ? Metal::VertexStep::Vertex : Metal::VertexStep::Instance;
+                request.vertexBuffers.push_back({buffer, stride == 0u ? packed : stride, step});
+                const auto resolved = resolve(address, Graphics::VertexBufferExtent(attribute), false, snapshots);
+                if (resolved % 4u != 0u) throw std::runtime_error("AGC graphics: Metal vertex buffer address is not four-byte aligned");
+                vertexBuffers.push_back(resolved);
+            }
+            void* pipelineState = renderPipeline(request);
+
+            std::array<std::uint64_t, ArgumentSlots> vertexSlots{};
+            std::array<std::uint64_t, ArgumentSlots> fragmentSlots{};
+            std::vector<ImageUse> uses;
+            bindStage(*vertex->program, snapshots, vertexSlots, uses);
+            if (fragment != nullptr) bindStage(*fragment->program, snapshots, fragmentSlots, uses);
+
+            std::array<ColorAttachment, Metal::MaxColorAttachments> colors{};
+            std::vector<std::pair<CachedSurface*, Graphics::GuestTextureResource>> targets;
+            std::vector<std::uint64_t> key;
+            std::uint32_t width = graphics.renderExtent.width;
+            std::uint32_t height = graphics.renderExtent.height;
+            for (const auto& color : graphics.colors) {
+                if (color.exportIndex >= request.state.colorCount) continue;
+                const auto format = request.state.colors[color.exportIndex].format;
+                if (format == Metal::PixelFormat::Invalid) continue;
+                const auto resource = Graphics::SurfaceForTarget(color);
+                const auto [surface, info, layers] = surfaceFor(resource);
+                Metal::TextureHandle handle = surface->texture;
+                if (handle.pixelFormat != format) {
+                    Metal::ViewInfo view;
+                    view.pixelFormat = format;
+                    view.kind = info.kind;
+                    view.levelCount = info.mipLevels;
+                    view.sliceCount = info.kind == Metal::TextureKind::Tex3D ? 1u : layers;
+                    handle = viewOf(*surface, view);
+                }
+                id<MTLTexture> texture = (__bridge id<MTLTexture>)handle.texture;
+                const auto level = std::min(color.mip, info.mipLevels - 1u);
+                const auto plane = info.kind == Metal::TextureKind::Tex3D ? color.depthSlice : 0u;
+                colors[color.exportIndex] = {texture, level, plane};
+                width = std::min<std::uint32_t>(width, std::max<std::uint32_t>(static_cast<std::uint32_t>(texture.width) >> level, 1u));
+                height = std::min<std::uint32_t>(height, std::max<std::uint32_t>(static_cast<std::uint32_t>(texture.height) >> level, 1u));
+                targets.emplace_back(surface, resource);
+                key.push_back(reinterpret_cast<std::uintptr_t>(handle.texture));
+                key.push_back(static_cast<std::uint64_t>(color.exportIndex) | static_cast<std::uint64_t>(level) << 8u | static_cast<std::uint64_t>(plane) << 16u);
+            }
+            DepthSurface* depth = nullptr;
+            const bool stencil = request.state.stencilFormat != Metal::PixelFormat::Invalid;
+            if (graphics.depth && request.state.depthFormat != Metal::PixelFormat::Invalid) {
+                depth = &depthSurface(*graphics.depth, request.state.depthFormat);
+                width = std::min<std::uint32_t>(width, static_cast<std::uint32_t>(depth->texture.width));
+                height = std::min<std::uint32_t>(height, static_cast<std::uint32_t>(depth->texture.height));
+                key.push_back(reinterpret_cast<std::uintptr_t>((__bridge void*)depth->texture));
+            }
+            if (width == 0 || height == 0) return;
+            key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
+
+            const bool reuse = render != nil && key == passKey;
+            std::vector<ImageUse> loads = uses;
+            if (!reuse) {
+                for (auto& [surface, resource] : targets) {
+                    if (surface->dirty) continue;
+                    surface->resource = resource;
+                    surface->address = resolve(resource.baseAddress, Graphics::DescribeSurface(resource).guestBytes, true, {});
+                    loads.push_back({surface, resource, surface->address, false});
+                }
+            }
+            if (!reuse || needsUpload(uses)) {
+                if (needsUpload(loads)) {
+                    auto compute = computeEncoder();
+                    [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+                    encodeUploads(compute, loads);
+                }
+                openPass(colors, depth, graphics.depth ? &*graphics.depth : nullptr, stencil, width, height, std::move(key));
+            }
+
+            auto dynamic = translated.dynamic;
+            dynamic.scissor.x = std::min(dynamic.scissor.x, passWidth);
+            dynamic.scissor.y = std::min(dynamic.scissor.y, passHeight);
+            dynamic.scissor.width = std::min(dynamic.scissor.width, passWidth - dynamic.scissor.x);
+            dynamic.scissor.height = std::min(dynamic.scissor.height, passHeight - dynamic.scissor.y);
+            if (dynamic.scissor.width == 0 || dynamic.scissor.height == 0) return;
+            if (pipelineState != boundPipeline) {
+                [render setRenderPipelineState:(__bridge id<MTLRenderPipelineState>)pipelineState];
+                boundPipeline = pipelineState;
+            }
+            if (depth != nullptr) {
+                void* depthStencil = pipelineCache().DepthStencil(translated.depthStencil);
+                if (depthStencil != boundDepthStencil) {
+                    [render setDepthStencilState:(__bridge id<MTLDepthStencilState>)depthStencil];
+                    boundDepthStencil = depthStencil;
+                }
+            }
+            applyDynamic(dynamic);
+            for (std::uint32_t slot = 0; slot < ArgumentSlots; ++slot) {
+                if (vertexSlots[slot] != 0) [vertexTable setAddress:vertexSlots[slot] atIndex:slot];
+                if (fragmentSlots[slot] != 0) [fragmentTable setAddress:fragmentSlots[slot] atIndex:slot];
+            }
+            for (std::size_t index = 0; index < vertexBuffers.size(); ++index) [vertexTable setAddress:vertexBuffers[index] atIndex:FirstVertexBuffer + index];
+            const auto primitive = static_cast<MTLPrimitiveType>(translated.primitive);
+            if (params.indexed) {
+                const auto bytes = static_cast<std::uint64_t>(params.indexCount) * params.indexSize;
+                const auto indices = resolve(params.indexAddress, bytes, false, snapshots);
+                [render drawIndexedPrimitives:primitive indexCount:params.indexCount indexType:params.indexSize == 2u ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferLength:bytes instanceCount:params.instanceCount baseVertex:static_cast<NSInteger>(params.firstVertex) baseInstance:params.firstInstance];
+            } else {
+                [render drawPrimitives:primitive vertexStart:params.firstVertex vertexCount:params.indexCount instanceCount:params.instanceCount baseInstance:params.firstInstance];
+            }
+            for (auto& [surface, resource] : targets) {
+                surface->validEpoch = epoch;
+                if (surface->dirty) continue;
+                surface->dirty = true;
+                dirtySurfaces.push_back(surface);
+            }
+            ++recordedSinceSubmit;
+            draws.fetch_add(1, std::memory_order_relaxed);
         }
     }
 };
@@ -831,6 +1417,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         descriptor.maxBufferBindCount = ArgumentSlots;
         s.table = [s.native newArgumentTableWithDescriptor:descriptor error:&error];
         if (s.table == nil) throw std::runtime_error("AGC graphics: Metal argument table could not be created");
+        descriptor.maxBufferBindCount = RenderSlots;
+        s.vertexTable = [s.native newArgumentTableWithDescriptor:descriptor error:&error];
+        s.fragmentTable = [s.native newArgumentTableWithDescriptor:descriptor error:&error];
+        if (s.vertexTable == nil || s.fragmentTable == nil) throw std::runtime_error("AGC graphics: Metal render argument tables could not be created");
         s.fault = s.device->NewSharedBuffer(ShaderRecompiler::BdaAbi::FaultBufferBytes, "AnyPS5 fault buffer");
         if (!s.fault) throw std::runtime_error("AGC graphics: Metal fault buffer could not be allocated");
         std::memset(s.fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
@@ -1082,9 +1672,11 @@ auto VulkanDevice::NoteRecipe(RecipeEvent, RecipeKind) -> void {}
 
 auto VulkanDevice::NoteDrawRecipeMiss(DrawRecipePrecheck) -> void {}
 
-auto VulkanDevice::Draw(const Graphics::State&, const Pm4::DrawParameters&, std::span<const Graphics::CompiledShader>, std::span<const Graphics::GuestMemorySnapshot>, std::shared_ptr<const DrawRecipe>*) -> void {}
+auto VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>*) -> void {
+    state->draw(graphics, draw, shaders, snapshots);
+}
 
-auto VulkanDevice::KnownDrawRejection(const Graphics::State&, std::span<const Graphics::CompiledShader>) const -> std::optional<std::string> { return std::string("Metal draws are not wired yet"); }
+auto VulkanDevice::KnownDrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) const -> std::optional<std::string> { return DrawRejection(graphics, shaders); }
 
 auto VulkanDevice::ColorMetadataPass(const Graphics::ColorMetadataPass&) -> void {}
 
@@ -1092,7 +1684,9 @@ auto VulkanDevice::DrawFromRecipe(const Graphics::State&, const Pm4::DrawParamet
 
 auto VulkanDevice::DrawIndirectSupport() const -> IndirectDrawSupport { return {false, false, false}; }
 
-auto VulkanDevice::EnqueueDraw(const Graphics::State&, const Pm4::DrawParameters&, std::span<const Graphics::CompiledShader>, std::span<const Graphics::GuestMemorySnapshot>) -> void {}
+auto VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) -> void {
+    state->draw(graphics, draw, shaders, snapshots);
+}
 
 auto VulkanDevice::PrebuildGraphicsLibraries(const Graphics::ShaderStages&, std::span<const Graphics::CompiledShader>) -> bool { return false; }
 

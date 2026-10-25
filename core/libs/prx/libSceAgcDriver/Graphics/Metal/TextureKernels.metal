@@ -34,13 +34,13 @@ kernel void aps5_tiled_to_volume(constant AgcDetileParams& p [[buffer(0)]], text
 kernel void aps5_array2d_to_tiled(constant AgcDetileParams& p [[buffer(0)]], texture2d_array<uint, access::read> source [[texture(0)]], uint2 gid [[thread_position_in_grid]]) {
     uint x, y, offset;
     if (!agc_locate(p, gid, x, y, offset)) return;
-    agc_store_element(p.tiled, offset, ELEMENT_BYTES, source.read(uint2(x, y), p.destinationSlice));
+    agc_store_element(p.tiled, offset, ELEMENT_BYTES, agc_untransform(source.read(uint2(x, y), p.destinationSlice), TRANSFORM));
 }
 
 kernel void aps5_volume_to_tiled(constant AgcDetileParams& p [[buffer(0)]], texture3d<uint, access::read> source [[texture(0)]], uint2 gid [[thread_position_in_grid]]) {
     uint x, y, offset;
     if (!agc_locate(p, gid, x, y, offset)) return;
-    agc_store_element(p.tiled, offset, ELEMENT_BYTES, source.read(uint3(x, y, p.destinationSlice)));
+    agc_store_element(p.tiled, offset, ELEMENT_BYTES, agc_untransform(source.read(uint3(x, y, p.destinationSlice)), TRANSFORM));
 }
 
 kernel void aps5_tiled_to_linear(constant AgcDetileParams& p [[buffer(0)]], uint2 gid [[thread_position_in_grid]]) {

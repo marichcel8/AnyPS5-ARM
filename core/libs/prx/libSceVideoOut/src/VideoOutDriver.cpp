@@ -13,6 +13,9 @@
 
 #include "SDL.h"
 #include "SDL_vulkan.h"
+#ifdef ANYPS5_GPU_BACKEND_METAL
+#include "SDL_metal.h"
+#endif
 #ifdef __APPLE__
 #include "SDL_syswm.h"
 #include <objc/message.h>
@@ -50,12 +53,17 @@ void require(bool condition, const char* reason) {
 }
 
 std::vector<const char*> windowExtensions(SDL_Window* window) {
+#ifdef ANYPS5_GPU_BACKEND_METAL
+    (void)window;
+    return {};
+#else
     unsigned extensionCount = 0;
     if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
     std::vector<const char*> extensions(extensionCount);
     if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, extensions.data())) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
     extensions.resize(extensionCount);
     return extensions;
+#endif
 }
 
 // The window's surface and size are taken on the main thread, which macOS requires of window calls.
@@ -96,7 +104,11 @@ void windowDrawableSize(void* context, std::uint32_t* width, std::uint32_t* heig
         }
         int drawableWidth = 0;
         int drawableHeight = 0;
+#ifdef ANYPS5_GPU_BACKEND_METAL
+        SDL_Metal_GetDrawableSize(static_cast<SDL_Window*>(context), &drawableWidth, &drawableHeight);
+#else
         SDL_Vulkan_GetDrawableSize(static_cast<SDL_Window*>(context), &drawableWidth, &drawableHeight);
+#endif
         *width = drawableWidth > 0 ? static_cast<std::uint32_t>(drawableWidth) : 0;
         *height = drawableHeight > 0 ? static_cast<std::uint32_t>(drawableHeight) : 0;
     });

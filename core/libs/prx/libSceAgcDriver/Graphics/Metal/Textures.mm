@@ -420,7 +420,7 @@ void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& 
     auto* object = static_cast<Object*>(handle.object);
     if (object == nullptr) throw std::runtime_error("AGC graphics: texture writeback needs a texture");
     const auto& format = *object->format;
-    if (format.transform != TextureTransform::None || format.blockCompressed) throw std::runtime_error("AGC graphics: this texture format cannot be written back to guest memory on Metal");
+    if ((format.transform != TextureTransform::None && format.transform != TextureTransform::Repack101111) || format.blockCompressed) throw std::runtime_error("AGC graphics: this texture format cannot be written back to guest memory on Metal");
     if (object->info.kind == TextureKind::Tex1D || object->info.kind == TextureKind::Tex1DArray) throw std::runtime_error("AGC graphics: 1D texture writeback is not modeled on Metal");
     const auto plan = PlanSurface(descriptor, surfaceDeviceAddress);
     const bool volume = object->info.kind == TextureKind::Tex3D;
@@ -431,7 +431,7 @@ void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& 
             std::lock_guard lock(s.mutex);
             view = s.writeView(*object, job.level);
         }
-        s.detiler->Encode(computeEncoder, kernel, plan.elementBytes, TextureTransform::None, format.texelBytes, job.params, (__bridge void*)view, job.columns, job.rows);
+        s.detiler->Encode(computeEncoder, kernel, plan.elementBytes, format.transform, format.texelBytes, job.params, (__bridge void*)view, job.columns, job.rows);
     }
     s.writebacks.fetch_add(1, std::memory_order_relaxed);
 }
