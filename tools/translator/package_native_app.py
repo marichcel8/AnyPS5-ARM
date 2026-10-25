@@ -1,7 +1,7 @@
 """Translates a title's eboot to arm64 and packages it as a macOS application that runs without Rosetta.
 
     python3 tools/translator/package_native_app.py --eboot <eboot.bin|eboot.elf> --game <dir> \\
-        --libs <build-arm64/core/libs/libs> --vulkan <Vulkan SDK macOS dir> [--translator <build-translator>] [--tier quick|full] <Title.app>
+        --libs <build-arm64/core/libs/libs> --vulkan <Vulkan SDK macOS dir> [--translator <build-translator>] [--tier quick|full] [--jobs N|max] <Title.app>
 
 --eboot is the title's executable, a decrypted SELF (unwrapped here) or a plain ELF. --game is the title's
 folder (sce_sys and its data), copied as app0. --libs is the arm64 prx directory and --vulkan the macOS
@@ -11,7 +11,8 @@ as tools/package_macos_app.py makes for the Rosetta mode, without the x86 game a
 
 --tier quick (the default) translates in minutes: code the title has not run yet is compiled quickly and
 counts how often it runs, and packaging the title again after playing optimizes what the profile shows
-hot. --tier full optimizes everything up front.
+hot. --tier full optimizes everything up front. --jobs sets the translator threads, all cores by default;
+max also lifts the memory budget that otherwise keeps a translation within the machine's RAM.
 
 Guest prx modules the title bundles (sce_module) are not translated yet."""
 import argparse
@@ -66,10 +67,10 @@ def write_stubs(missing, path):
             out.write(f'void stub{index}(void) {{ fprintf(stderr, "[native] missing import {name[1:]}\\n"); abort(); }}\n')
 
 
-def build_executable(elf, libs, translator, work, tier):
+def build_executable(elf, libs, translator, work, tier, jobs):
     guest = work / "guest.o"
     translated = subprocess.run([str(translator / "aps5-translator"), str(elf), str(guest)], capture_output=True, text=True,
-                                env=dict(os.environ, APS5_TRANSLATOR_TIER=tier))
+                                env=dict(os.environ, APS5_TRANSLATOR_TIER=tier, **({"APS5_TRANSLATOR_JOBS": jobs} if jobs else {})))
     print(translated.stderr.strip())
     if translated.returncode != 0:
         raise RuntimeError("translation failed")
@@ -96,11 +97,12 @@ def main():
     parser.add_argument("--vulkan", required=True, type=Path)
     parser.add_argument("--translator", type=Path, default=Path("build-translator"))
     parser.add_argument("--tier", choices=["quick", "full"], default="quick")
+    parser.add_argument("--jobs")
     parser.add_argument("bundle", type=Path)
     arguments = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="anyps5-native-") as directory:
         work = Path(directory)
-        relinked = build_executable(elf_of(arguments.eboot, work), arguments.libs, arguments.translator, work, arguments.tier)
+        relinked = build_executable(elf_of(arguments.eboot, work), arguments.libs, arguments.translator, work, arguments.tier, arguments.jobs)
         name, identifier = package_macos_app.package(relinked, arguments.game, arguments.libs, arguments.vulkan, None, arguments.bundle, patch=False)
     print(f"{arguments.bundle}: {name} ({identifier}), arm64")
 

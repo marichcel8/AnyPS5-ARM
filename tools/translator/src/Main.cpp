@@ -40,6 +40,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #if defined(__APPLE__)
@@ -57,13 +58,30 @@ std::size_t Setting(const char* name, std::size_t fallback) {
     return static_cast<std::size_t>(std::strtoull(text, nullptr, 10));
 }
 
+std::size_t Cores() {
+    return std::max(1u, std::thread::hardware_concurrency());
+}
+
+std::size_t MemoryBudget() {
+    const auto pages = sysconf(_SC_PHYS_PAGES), pageSize = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || pageSize <= 0) return 16384;
+    const auto gigabytes = static_cast<std::size_t>(pages) * static_cast<std::size_t>(pageSize) >> 30;
+    return std::max<std::size_t>(4096, gigabytes * 2048);
+}
+
+bool Unlimited() {
+    const char* text = std::getenv("APS5_TRANSLATOR_JOBS");
+    return text != nullptr && std::string(text) == "max";
+}
+
 struct Options {
-    std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
+    bool unlimited = Unlimited();
+    std::size_t jobs = unlimited ? Cores() : std::max<std::size_t>(1, Setting("APS5_TRANSLATOR_JOBS", Cores()));
     std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 4096);
     std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 2500);
     std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 2500);
     std::size_t large = Setting("APS5_TRANSLATOR_LARGE", 2000);
-    std::size_t budget = Setting("APS5_TRANSLATOR_BUDGET", 16384);
+    std::size_t budget = unlimited ? ~std::size_t{0} / 4 : Setting("APS5_TRANSLATOR_BUDGET", MemoryBudget());
     std::size_t hot = Setting("APS5_TRANSLATOR_HOT", 1000);
     bool quick = std::getenv("APS5_TRANSLATOR_TIER") != nullptr && std::string(std::getenv("APS5_TRANSLATOR_TIER")) == "quick";
     bool verbose = std::getenv("APS5_TRANSLATOR_STATS") != nullptr;
