@@ -427,6 +427,16 @@ MTLVertexFormat NativeVertexFormat(VkFormat format) {
     }
 }
 
+bool HasFlatInputs(std::span<const Graphics::CompiledShader> shaders) {
+    for (const auto& shader : shaders) {
+        if (shader.stage != ShaderRecompiler::ShaderStage::Fragment) continue;
+        for (const auto& parameter : shader.program->fragmentParameters) {
+            if (parameter.flat || parameter.flatP10 || parameter.flatP20 || parameter.vertexOrder || parameter.perVertex) return true;
+        }
+    }
+    return false;
+}
+
 std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
     for (const auto& shader : shaders) {
         if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex and pixel stages");
@@ -436,7 +446,7 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
             if (NativeVertexFormat(format) == MTLVertexFormatInvalid) return "vertex format " + std::to_string(static_cast<int>(format)) + " has no Metal vertex format";
         }
     }
-    const auto translated = Metal::TranslateState(graphics);
+    const auto translated = Metal::TranslateState(graphics, HasFlatInputs(shaders));
     if (translated.rejection != nullptr) return std::string(translated.rejection);
     if (graphics.samples > 1 || std::any_of(graphics.colors.begin(), graphics.colors.end(), [](const Graphics::ColorTarget& color) { return color.samples > 1; }) || (graphics.depth && graphics.depth->samples > 1)) return std::string("multisampled Metal draws are not wired yet");
     return std::nullopt;
@@ -1495,7 +1505,7 @@ struct VulkanDevice::State {
             std::fprintf(stderr, "%.*s\n", static_cast<int>(request.vertexLibrary.text.size()), request.vertexLibrary.text.data());
             if (!request.fragmentFunction.empty()) std::fprintf(stderr, "%.*s\n", static_cast<int>(request.fragmentLibrary.text.size()), request.fragmentLibrary.text.data());
         }
-        throw std::runtime_error("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
+        throw Graphics::UnrenderableDraw("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
     }
 
     DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
@@ -1592,8 +1602,8 @@ struct VulkanDevice::State {
             else throw std::runtime_error("AGC graphics: Metal draws support only vertex and pixel stages");
         }
         if (vertex == nullptr) throw std::runtime_error("AGC graphics: Metal draw has no vertex stage");
-        const auto translated = Metal::TranslateState(graphics);
-        if (translated.rejection != nullptr) throw std::runtime_error(std::string("AGC graphics: ") + translated.rejection);
+        const auto translated = Metal::TranslateState(graphics, HasFlatInputs(shaders));
+        if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection);
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) throw std::runtime_error("AGC graphics: multisampled Metal draws are not wired yet");
         @autoreleasepool {

@@ -35,7 +35,6 @@ MTL4FunctionDescriptor* functionDescriptor(id<MTLLibrary> library, const std::st
     MTL4LibraryFunctionDescriptor* function = [MTL4LibraryFunctionDescriptor new];
     function.library = library;
     function.name = nsString(name);
-    if (constants.empty()) return function;
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
     for (const auto& constant : constants) {
         const std::uint32_t scalar = constant.value;

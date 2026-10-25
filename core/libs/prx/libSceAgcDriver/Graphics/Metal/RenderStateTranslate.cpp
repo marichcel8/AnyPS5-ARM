@@ -202,7 +202,7 @@ Winding TranslateFrontFace(VkFrontFace face) {
     return face == VK_FRONT_FACE_CLOCKWISE ? Winding::Clockwise : Winding::CounterClockwise;
 }
 
-TranslatedState TranslateState(const State& state) {
+TranslatedState TranslateState(const State& state, bool flatInputs) {
     TranslatedState result;
     auto reject = [&](const char* reason) {
         if (result.rejection == nullptr) result.rejection = reason;
@@ -212,7 +212,7 @@ TranslatedState TranslateState(const State& state) {
     if (!TranslatePrimitive(state.topology, result.primitive)) reject("topology needs primitive conversion on Metal");
     if (state.depthBoundsTest) reject("depth bounds test is not available on Metal");
     if (state.conservativeRasterization != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) reject("conservative rasterization is not available on Metal");
-    if (state.provokingVertexMode != VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT) reject("last provoking vertex is not available on Metal");
+    if (flatInputs && state.provokingVertexMode != VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT) reject("last provoking vertex is not available on Metal");
     if (state.customSampleLocations || state.sampleLocationGrid) reject("custom sample locations are not mapped on Metal");
     if (state.blends.size() > MaxColorAttachments) reject("more color targets than Metal attachments");
 

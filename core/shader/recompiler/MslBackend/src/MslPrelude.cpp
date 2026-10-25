@@ -787,6 +787,15 @@ constexpr std::string_view Atomic64GpuText = R"(static inline device atomic_uint
 constexpr std::string_view WaveText = R"(static inline uint aps5_ballot32(bool predicate) { return uint(static_cast<simd_vote::vote_t>(simd_ballot(predicate))); }
 )";
 
+constexpr std::string_view VertexWaveText = R"(#define simd_shuffle(value, lane) (value)
+#define simd_shuffle_xor(value, mask) (value)
+#define simd_shuffle_up(value, delta) (value)
+#define simd_shuffle_down(value, delta) (value)
+#define simd_broadcast_first(value) (value)
+#define simd_any(predicate) (predicate)
+static inline uint aps5_ballot32(bool predicate) { return predicate ? 1u : 0u; }
+)";
+
 constexpr std::string_view PermuteText = R"(static inline uint aps5_permute(uint value, uint address, bool active, uint lane) {
     const uint request = active ? (((address >> 2u) & 31u) | 0x100u) : 0u;
     uint result = 0u;
@@ -1034,7 +1043,8 @@ std::string Prelude(const State& state) {
     }
     if (has(Dot2)) text += Dot2Text;
     if (has(Half)) text += state.target.relaxedFloat ? HalfText : ExactHalfText;
-    if (has(Wave)) text += WaveText;
+    if (has(Wave | Lane) && state.program.Resources().stage == IrShaderStage::Vertex) text += VertexWaveText;
+    else if (has(Wave)) text += WaveText;
     if (has(Permute)) text += PermuteText;
     if (has(Fault | Bda | GuestBuffers)) text += FaultText;
     if (has(Tables)) text += Replace(std::string(TableFaultText), "$REASON", Reason(BdaAbi::FaultReason::ImageTable));
