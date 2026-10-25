@@ -102,7 +102,7 @@ void NoteColorMetadataFill(std::uint64_t, std::size_t, std::uint32_t) {}
 
 void NoteDepthMetadataFill(std::uint64_t, std::size_t, std::uint32_t) {}
 
-void NoteHtileDepthClear(std::uint64_t, std::size_t, std::size_t) {}
+bool NoteHtileDepthClear(std::uint64_t, std::size_t, std::size_t) { return false; }
 
 void NoteKeysFillOnGpu(std::uint64_t, std::size_t, DccKeys) {}
 
@@ -188,7 +188,7 @@ auto StorageTexture::DiscardPendingInside(std::uint64_t, std::size_t) -> std::si
 
 auto StorageTexture::FillClear(std::span<const std::uint32_t, 4>, std::uint32_t, const char*&, bool) -> bool { return false; }
 
-auto StorageTexture::FlushPending(std::uint64_t, std::size_t, const StorageTexture*, const char*, PublishScope, bool*) -> bool { return false; }
+auto StorageTexture::FlushPending(std::uint64_t, std::size_t, const StorageTexture*, const char*, PublishScope, bool*, bool) -> bool { return false; }
 
 auto StorageTexture::NoteKeysFill(std::uint64_t, std::size_t, std::uint8_t) -> std::size_t { return 0; }
 

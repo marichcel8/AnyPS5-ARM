@@ -137,6 +137,7 @@ std::uint32_t LowMask(std::uint32_t bits) {
 
 SpirvBufferFormatInfo ConversionFormat(const ImageResource& image) {
     const auto format = image.conversionFormat;
+    if (format == FmaskExpansion) throw MslUnsupported("MSL backend: an image reads FMASK, which is not emitted");
     if (format == IrBufferFormat::Invalid || (image.resourceClass == ImageResourceClass::Storage && SampledTextureNumericClass(format) == IrTextureNumericClass::Sint)) return {};
     const auto info = GetFormatInfo(format);
     if (SampledTextureNumericClass(format) != IrTextureNumericClass::Uint || (info.type != SpirvFormatComponentType::Uint && info.type != SpirvFormatComponentType::Unorm && info.type != SpirvFormatComponentType::Float) || !info.packedBitfield || info.byteSize != 4u || info.componentCount == 0u || info.componentCount > 4u) throw MslUnsupported("MSL backend: an image conversion format is not a packed 32-bit unsigned integer, unorm or float format");
@@ -145,6 +146,7 @@ SpirvBufferFormatInfo ConversionFormat(const ImageResource& image) {
 
 SpirvBufferFormatInfo SintStorageFormat(const ImageResource& image) {
     const auto format = image.conversionFormat;
+    if (format == FmaskExpansion) throw MslUnsupported("MSL backend: an image reads FMASK, which is not emitted");
     if (image.resourceClass != ImageResourceClass::Storage || format == IrBufferFormat::Invalid || SampledTextureNumericClass(format) != IrTextureNumericClass::Sint) return {};
     const auto info = GetFormatInfo(format);
     if (image.numericClass != IrTextureNumericClass::Uint || info.type != SpirvFormatComponentType::Sint || info.packedBitfield || info.componentCount == 0u || info.byteSize == 12u) throw MslUnsupported("MSL backend: a storage image conversion format is not a SINT format written through a UINT view");

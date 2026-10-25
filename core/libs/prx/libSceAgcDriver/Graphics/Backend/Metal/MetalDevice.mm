@@ -2068,11 +2068,11 @@ auto VulkanDevice::PreparePhaseMs(const PreparedDispatch&) -> std::span<const do
     return std::span<const double, 5>(zeros);
 }
 
-auto VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*) -> void {
+auto VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*, std::optional<std::pair<std::uint64_t, std::size_t>>) -> void {
     state->dispatch(shader, x, y, z, snapshots);
 }
 
-auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*) -> IndirectOutcome {
+auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*, const std::array<std::uint32_t, 3>&) -> IndirectOutcome {
     const auto started = std::chrono::steady_clock::now();
     WaitIdle();
     std::array<std::uint32_t, 3> groups{};
@@ -2084,7 +2084,7 @@ auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& sha
 
 auto VulkanDevice::PrepareRecipe(const std::shared_ptr<const Recipe>&, bool) -> std::shared_ptr<RecipeHit> { return {}; }
 
-auto VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResult&, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint64_t, const std::shared_ptr<RecipeHit>&, IndirectOutcome&, const std::shared_ptr<PreparedDispatch>&, bool) -> RecipeOutcome { return RecipeOutcome::Rebuild; }
+auto VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResult&, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint64_t, const std::shared_ptr<RecipeHit>&, IndirectOutcome&, const std::shared_ptr<PreparedDispatch>&, bool, const std::array<std::uint32_t, 3>&) -> RecipeOutcome { return RecipeOutcome::Rebuild; }
 
 auto VulkanDevice::DispatchRecipes() -> bool { return false; }
 
