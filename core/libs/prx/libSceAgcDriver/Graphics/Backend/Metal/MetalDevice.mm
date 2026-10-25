@@ -1505,7 +1505,7 @@ struct VulkanDevice::State {
             std::fprintf(stderr, "%.*s\n", static_cast<int>(request.vertexLibrary.text.size()), request.vertexLibrary.text.data());
             if (!request.fragmentFunction.empty()) std::fprintf(stderr, "%.*s\n", static_cast<int>(request.fragmentLibrary.text.size()), request.fragmentLibrary.text.data());
         }
-        throw std::runtime_error("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
+        throw Graphics::UnrenderableDraw("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
     }
 
     DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
@@ -1603,7 +1603,7 @@ struct VulkanDevice::State {
         }
         if (vertex == nullptr) throw std::runtime_error("AGC graphics: Metal draw has no vertex stage");
         const auto translated = Metal::TranslateState(graphics, HasFlatInputs(shaders));
-        if (translated.rejection != nullptr) throw std::runtime_error(std::string("AGC graphics: ") + translated.rejection);
+        if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection);
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) throw std::runtime_error("AGC graphics: multisampled Metal draws are not wired yet");
         @autoreleasepool {

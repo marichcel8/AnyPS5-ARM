@@ -271,7 +271,7 @@ std::string Parameters(const State& state) {
     if (has(LocalId)) parameters.push_back("uint3 aps5_local [[thread_position_in_threadgroup]]");
     if (has(GlobalId)) parameters.push_back("uint3 aps5_global [[thread_position_in_grid]]");
     if (has(LocalIndex)) parameters.push_back("uint aps5_index [[thread_index_in_threadgroup]]");
-    if (has(Lane)) parameters.push_back("uint aps5_lane [[thread_index_in_simdgroup]]");
+    if (has(Lane) && state.program.Resources().stage != IrShaderStage::Vertex) parameters.push_back("uint aps5_lane [[thread_index_in_simdgroup]]");
     std::string text;
     for (std::size_t index = 0; index < parameters.size(); ++index) {
         text += index == 0u ? "\n    " : ",\n    ";
@@ -388,6 +388,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     AnalyzePrecision(state);
     EmitFlow(state);
     if (geometry) CheckGeometry(state);
+    if (stage == IrShaderStage::Vertex && (state.features & Permute) != 0u) throw MslUnsupported("MSL backend: vertex functions cannot run cross-lane permutes");
     if (!compute && !geometry && (state.features & (Lds | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
 
     std::string declarations;
@@ -400,6 +401,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
         const auto pointer = [&](std::uint32_t feature, std::string_view name) { return (state.features & feature) != 0u ? std::string(name) : std::string("nullptr"); };
         declare("aps5_ctx aps5_c = {" + pointer(Bda, "aps5_bda_table") + ", " + pointer(Fault, "aps5_fault_buffer") + ", " + pointer(GuestBuffers, "aps5_buffers") + ", " + U32(static_cast<std::uint32_t>(program.Resources().stage)) + ", false};");
     }
+    if (stage == IrShaderStage::Vertex && (state.features & Lane) != 0u) declare("const uint aps5_lane = 0u;");
     if ((state.features & Lds) != 0u) declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
     ForEachHalf(state, [&](std::uint32_t) {
         if ((state.features & Scratch) != 0u) declare("uint aps5_scratch" + HalfSuffix() + "[" + std::to_string(std::max(state.scratchDwords, 1u)) + "];");
