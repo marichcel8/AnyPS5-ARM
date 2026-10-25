@@ -8,7 +8,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <dlfcn.h>
-#include <setjmp.h>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
 #include <unordered_map>
@@ -45,6 +44,8 @@ extern const std::uint64_t aps5_guest_tls[4]; // image offset, file size, block 
 
 void aps5_host_bridge(GuestState* state, std::uint64_t target);
 void aps5_enter();
+[[noreturn]] void aps5_native_restore(const std::uint64_t* registers);
+extern std::uint64_t aps5_setjmp_target;
 }
 
 namespace {
@@ -59,20 +60,20 @@ thread_local GuestState* bridgedState = nullptr;
 
 // A setjmp that may still be jumped to. The guest's 96-byte jmp_buf holds the x86-64 state in the
 // layout libc used under Rosetta (return address, rbx, rsp, rbp, r12-r15, mxcsr, x87 control word)
-// plus a marker; the native registers of the aps5_call frame that ran setjmp live here, keyed by
-// the buffer's address.
+// plus a marker; the native registers of the translated caller of setjmp live here, keyed by the
+// buffer's address.
 constexpr std::uint64_t JumpMagic = 0x6a6d70c0de5a17b1ull;
 constexpr std::size_t JumpMagicWord = 9;
 constexpr std::size_t JumpPurgeSize = 64;
 
 struct JumpRecord {
-    jmp_buf native;
+    std::uint64_t native[24];
     std::uint64_t guestRsp;
     GuestState* bridged;
 };
 
 thread_local std::unordered_map<std::uint64_t, JumpRecord> jumpRecords;
-std::uint64_t setjmpTarget = 0, longjmpTarget = 0;
+std::uint64_t longjmpTarget = 0;
 
 struct sigaction previousBus {}, previousSegv {};
 // APS5_NATIVE_TRACE: report each redirected host call into guest code.
@@ -206,7 +207,7 @@ JumpRecord& PrepareJump(GuestState* state, std::uint64_t buffer) {
     std::memcpy(&state->x87Control, reinterpret_cast<const std::uint8_t*>(&words[8]) + 4, 2);
     state->gpr[Rax] = value != 0 ? value : 1;
     bridgedState = found->second.bridged;
-    _longjmp(found->second.native, 1);
+    aps5_native_restore(found->second.native);
 }
 
 void InstallRedirect() {
@@ -215,7 +216,7 @@ void InstallRedirect() {
         void* jumpSet = nullptr;
         void* jumpLong = nullptr;
         targets(&jumpSet, &jumpLong);
-        setjmpTarget = reinterpret_cast<std::uint64_t>(jumpSet);
+        aps5_setjmp_target = reinterpret_cast<std::uint64_t>(jumpSet);
         longjmpTarget = reinterpret_cast<std::uint64_t>(jumpLong);
     }
     struct sigaction action {};
@@ -230,23 +231,27 @@ void InstallRedirect() {
 
 extern "C" {
 
+std::uint64_t aps5_setjmp_target = 0;
+
+// Called by aps5_call (HostBridge.S) for a guest setjmp: fills the guest jmp_buf and returns the
+// area where the native registers of the translated caller are saved.
+std::uint64_t* aps5_prepare_jump(GuestState* state) {
+    return PrepareJump(state, state->gpr[Rdi]).native;
+}
+
 // A guest call or jump whose target the translator could not resolve statically. The caller has
 // pushed the guest return address; a translated callee pops it with its ret, a host callee does not.
-void aps5_call(GuestState* state, std::uint64_t target) {
+void aps5_call_impl(GuestState* state, std::uint64_t target) {
     if (const auto* function = Find(target)) {
         function->code(state);
         return;
     }
     if (target >= ImageBase() && target - ImageBase() < aps5_guest_image_size) {
         Dl_info self {};
-        dladdr(reinterpret_cast<void*>(&aps5_call), &self);
+        dladdr(reinterpret_cast<void*>(&aps5_call_impl), &self);
         std::fprintf(stderr, "[translator] from translated code at %p (executable offset 0x%llx)\n", __builtin_return_address(0),
                      static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(__builtin_return_address(0)) - reinterpret_cast<std::uint64_t>(self.dli_fbase)));
         Fail("call into untranslated guest code at", target);
-    }
-    if (target == setjmpTarget) {
-        _setjmp(PrepareJump(state, state->gpr[Rdi]).native);
-        return;
     }
     if (target == longjmpTarget) GuestLongjmp(state);
     auto* outer = bridgedState;
