@@ -102,6 +102,7 @@ Three things keep very large guest functions from stalling LLVM:
 | `APS5_TRANSLATOR_BUDGET` | 2048 per GB of RAM | guest instructions compiled at once over all threads |
 | `APS5_TRANSLATOR_CACHE` | `~/Library/Caches/AnyPS5/translator` | cache directory, `off` disables it |
 | `APS5_TRANSLATOR_LD` | `ld` | linker that joins the partitions |
+| `APS5_TRANSLATOR_VERIFY` | unset | verify each lifted partition, as the fixtures do |
 | `APS5_TRANSLATOR_STATS` | unset | print the time of each partition and of each phase |
 
 ## Milestones

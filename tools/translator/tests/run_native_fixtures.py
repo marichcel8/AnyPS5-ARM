@@ -1,7 +1,7 @@
 """Translates the macOS fixtures to native arm64 and runs them without Rosetta.
 
 usage: run_native_fixtures.py <build-translator> <arm64 libs directory> [work directory]"""
-import pathlib, shutil, subprocess, sys, tempfile
+import os, pathlib, shutil, subprocess, sys, tempfile
 
 HERE = pathlib.Path(__file__).resolve().parent
 FIXTURES = HERE.parents[2] / "core/relinker/relinker/tests/macos"
@@ -43,7 +43,8 @@ def host_reference(source, flags, work):
 
 
 def translate_and_run(build, libraries, directory, expected_exit, expected_output):
-    translated = subprocess.run([str(build / "aps5-translator"), str(directory / "eboot.elf"), str(directory / "guest.o")], capture_output=True, text=True)
+    translated = subprocess.run([str(build / "aps5-translator"), str(directory / "eboot.elf"), str(directory / "guest.o")], capture_output=True, text=True,
+                                env=dict(os.environ, APS5_TRANSLATOR_VERIFY="1"))
     if translated.returncode != 0:
         return f"translation failed: {translated.stderr.strip()}"
     shutil.rmtree(directory / "libs", ignore_errors=True)

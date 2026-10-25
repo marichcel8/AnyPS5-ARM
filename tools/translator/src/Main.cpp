@@ -85,6 +85,7 @@ struct Options {
     std::size_t hot = Setting("APS5_TRANSLATOR_HOT", 1000);
     bool quick = std::getenv("APS5_TRANSLATOR_TIER") != nullptr && std::string(std::getenv("APS5_TRANSLATOR_TIER")) == "quick";
     bool verbose = std::getenv("APS5_TRANSLATOR_STATS") != nullptr;
+    bool verify = std::getenv("APS5_TRANSLATOR_VERIFY") != nullptr;
 };
 
 void Optimize(llvm::Module& module, llvm::TargetMachine& machine, const std::vector<llvm::Function*>& huge, const std::vector<llvm::Function*>& giant) {
@@ -358,7 +359,7 @@ int main(int argc, char** argv) {
             llvm::LLVMContext context;
             Translator::Statistics stats;
             auto module = lifter.Lift(context, partitions[index], index == 0, shared, options.huge, stats);
-            if (llvm::verifyModule(*module, &llvm::errs())) throw std::runtime_error("lifted partition " + std::to_string(index) + " does not verify");
+            if (options.verify && llvm::verifyModule(*module, &llvm::errs())) throw std::runtime_error("lifted partition " + std::to_string(index) + " does not verify");
             const bool cold = options.quick && std::none_of(partitions[index].begin(), partitions[index].end(), [&](std::uint64_t entry) { return hot.count(entry - elf.ImageBegin()) != 0; });
             auto machine = Machine(cold ? llvm::CodeGenOptLevel::None : llvm::CodeGenOptLevel::Default);
             module->setTargetTriple(HostTriple);
