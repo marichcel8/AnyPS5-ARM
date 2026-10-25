@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/Backend/Backend.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
+#include "prx/libSceAgcDriver/Execution/include/DisplayFormat.hpp"
+#include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Device.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalCompiler.hpp"
@@ -58,6 +60,45 @@ constexpr std::uint32_t ArgumentSlots = static_cast<std::uint32_t>(BufferSlot::C
 constexpr std::size_t PresentSlots = 3;
 constexpr std::uint32_t RenderSlots = ShaderRecompiler::MetalAbi::MaxBufferSlots;
 constexpr std::uint32_t FirstVertexBuffer = ShaderRecompiler::MetalAbi::FirstVertexBufferSlot;
+
+constexpr const char* ScanoutSource = R"(#include <metal_stdlib>
+using namespace metal;
+struct ScanoutParams { uint width; uint height; uint pitch; uint blocksPerRow; uint tiled; uint redLow; uint tenBit; };
+uint scanout_tile(uint x, uint y) {
+    return ((y << 4u) & 0x0070u) ^ ((y << 5u) & 0x0f00u) ^ ((y << 9u) & 0x1000u) ^ ((y << 8u) & 0x4000u) ^ ((x << 2u) & 0x000cu) ^ ((x << 5u) & 0x0380u) ^ ((x << 4u) & 0x0400u) ^ ((x << 6u) & 0x0800u) ^ ((x << 9u) & 0xa000u);
+}
+kernel void aps5_scanout(device const uint* source [[buffer(0)]], constant ScanoutParams& p [[buffer(1)]], texture2d<float, access::write> target [[texture(0)]], uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    const uint offset = p.tiled != 0u ? ((gid.y / 128u) * p.blocksPerRow + gid.x / 128u) * 65536u + scanout_tile(gid.x, gid.y) : (gid.y * p.pitch + gid.x) * 4u;
+    const uint word = source[offset / 4u];
+    float4 color;
+    if (p.tenBit != 0u) {
+        const float low = float((word >> 2u) & 0xffu);
+        const float high = float((word >> 22u) & 0xffu);
+        color = float4(p.redLow != 0u ? low : high, float((word >> 12u) & 0xffu), p.redLow != 0u ? high : low, 255.0f);
+    } else {
+        const float byte0 = float(word & 0xffu);
+        const float byte2 = float((word >> 16u) & 0xffu);
+        color = float4(p.redLow != 0u ? byte0 : byte2, float((word >> 8u) & 0xffu), p.redLow != 0u ? byte2 : byte0, float(word >> 24u));
+    }
+    target.write(color / 255.0f, gid);
+}
+)";
+
+struct ScanoutParams {
+    std::uint32_t width;
+    std::uint32_t height;
+    std::uint32_t pitch;
+    std::uint32_t blocksPerRow;
+    std::uint32_t tiled;
+    std::uint32_t redLow;
+    std::uint32_t tenBit;
+};
+
+bool GpuScanout(const DisplayBuffer& buffer) {
+    static const bool disabled = std::getenv("APS5_METAL_CPU_SCANOUT") != nullptr;
+    return !disabled && buffer.dccAddress == 0 && !DisplayHalfFloat(buffer.pixelFormat) && !DisplayPq(buffer.pixelFormat) && DisplayTexelBytes(buffer.pixelFormat) == 4u && buffer.tilingMode <= 1u;
+}
 
 struct UploadChunk {
     Metal::NativeBuffer buffer;
@@ -150,6 +191,11 @@ struct IdentityHash {
 bool Verbose() {
     static const bool verbose = std::getenv("APS5_METAL_VERBOSE") != nullptr;
     return verbose;
+}
+
+bool Trace() {
+    static const bool trace = std::getenv("APS5_METAL_TRACE") != nullptr;
+    return trace;
 }
 
 std::set<std::uint32_t> DeclaredConstants(std::string_view source) {
@@ -393,6 +439,7 @@ struct VulkanDevice::State {
     std::uint32_t encodedDispatches = 0;
     std::uint64_t recordedSinceSubmit = 0;
     std::uint64_t lastSerial = 0;
+    const char* resolvedBy = "";
 
     std::vector<std::unique_ptr<UploadChunk>> chunks;
     UploadChunk* chunk = nullptr;
@@ -424,6 +471,9 @@ struct VulkanDevice::State {
     std::optional<std::size_t> pendingPresent;
     std::uint32_t presentWidth = 0;
     std::uint32_t presentHeight = 0;
+    std::uint64_t presentAfter = 0;
+    id<MTLComputePipelineState> scanoutPipeline = nil;
+    id<MTL4ArgumentTable> scanoutTable = nil;
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
     std::uint64_t reportDraws = 0;
@@ -549,15 +599,23 @@ struct VulkanDevice::State {
         if (!writable) {
             for (const auto& snapshot : snapshots) {
                 if (address >= snapshot.address && bytes <= snapshot.bytes.size() && address - snapshot.address <= snapshot.bytes.size() - bytes) {
+                    resolvedBy = "snapshot";
                     return uploadBytes(snapshot.bytes.data() + (address - snapshot.address), bytes, bytes);
                 }
             }
         }
         const auto windows = device->Guest().Snapshot();
         if (windows != nullptr) {
-            if (const auto resolved = Metal::Resolve(*windows, address, bytes); resolved && (!writable || (resolved.window->writable && !resolved.window->copied))) return resolved.deviceAddress;
+            if (const auto resolved = Metal::Resolve(*windows, address, bytes); resolved && (!writable || (resolved.window->writable && !resolved.window->copied))) {
+                resolvedBy = "window";
+                return resolved.deviceAddress;
+            }
         }
-        if (const auto* import = importHost(address, bytes)) return import->buffer.gpuAddress + (address - import->span.base);
+        if (const auto* import = importHost(address, bytes)) {
+            resolvedBy = "import";
+            return import->buffer.gpuAddress + (address - import->span.base);
+        }
+        resolvedBy = writable ? "staged, written back" : "staged";
         auto buffer = device->NewSharedBuffer(bytes, "AnyPS5 staged guest range");
         if (!buffer) throw std::runtime_error("AGC graphics: Metal staging buffer could not be allocated");
         std::memcpy(buffer.contents, reinterpret_cast<const void*>(address), bytes);
@@ -699,6 +757,10 @@ struct VulkanDevice::State {
                 }
                 request.label = "AnyPS5 guest compute";
                 request.priority = Metal::CompilePriority::Urgent;
+                if (Trace()) {
+                    std::fprintf(stderr, "[metal] compute pipeline %016llx%016llx:\n%.*s\n", static_cast<unsigned long long>(identity.high), static_cast<unsigned long long>(identity.low), static_cast<int>(source->size()), source->data());
+                    for (const auto& constant : request.constants) std::fprintf(stderr, "[metal] function constant %u = 0x%x\n", constant.index, constant.value);
+                }
                 ticket = compiler->Compute(request);
                 pipelines.emplace(identity, PipelineEntry{std::move(source), ticket});
                 pipelinesCreated.fetch_add(1, std::memory_order_relaxed);
@@ -735,6 +797,13 @@ struct VulkanDevice::State {
 
     void stagePresent(std::uint32_t width, std::uint32_t height, std::span<const std::byte> bgra) {
         if (width == 0 || height == 0 || bgra.size() < static_cast<std::size_t>(width) * height * 4u) throw std::runtime_error("AGC graphics: Metal present source is empty or too small");
+        const auto slot = presentTarget(width, height);
+        [presentTextures[slot] replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:bgra.data() bytesPerRow:static_cast<NSUInteger>(width) * 4u];
+        presentAfter = 0;
+        pendingPresent = slot;
+    }
+
+    std::size_t presentTarget(std::uint32_t width, std::uint32_t height) {
         const auto slot = presentSlot;
         presentSlot = (presentSlot + 1u) % PresentSlots;
         if (presentSerials[slot] != 0 && !device->WaitSerial(Queue, presentSerials[slot], WaitTimeoutMs)) throw std::runtime_error("AGC graphics: Metal present slot did not retire in time");
@@ -748,15 +817,56 @@ struct VulkanDevice::State {
             MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
             descriptor.storageMode = MTLStorageModeShared;
             descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
-            descriptor.usage = MTLTextureUsageShaderRead;
+            descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite;
             texture = [native newTextureWithDescriptor:descriptor];
             if (texture == nil) throw std::runtime_error("AGC graphics: Metal present texture could not be created");
             texture.label = @"AnyPS5 present source";
             device->AddResidentAllocation((__bridge void*)texture);
         }
-        [texture replaceRegion:MTLRegionMake2D(0, 0, width, height) mipmapLevel:0 withBytes:bgra.data() bytesPerRow:static_cast<NSUInteger>(width) * 4u];
         presentWidth = width;
         presentHeight = height;
+        return slot;
+    }
+
+    id<MTLComputePipelineState> scanout() {
+        if (scanoutPipeline != nil) return scanoutPipeline;
+        NSError* error = nil;
+        id<MTLLibrary> library = [native newLibraryWithSource:[NSString stringWithUTF8String:ScanoutSource] options:nil error:&error];
+        id<MTLFunction> function = library != nil ? [library newFunctionWithName:@"aps5_scanout"] : nil;
+        if (function == nil) throw std::runtime_error(std::string("AGC graphics: Metal scanout kernel failed to compile: ") + (error.localizedDescription.UTF8String ?: ""));
+        scanoutPipeline = [native newComputePipelineStateWithFunction:function error:&error];
+        if (scanoutPipeline == nil) throw std::runtime_error(std::string("AGC graphics: Metal scanout pipeline failed to build: ") + (error.localizedDescription.UTF8String ?: ""));
+        MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
+        descriptor.maxBufferBindCount = 2;
+        descriptor.maxTextureBindCount = 1;
+        scanoutTable = [native newArgumentTableWithDescriptor:descriptor error:&error];
+        if (scanoutTable == nil) throw std::runtime_error("AGC graphics: Metal scanout argument table could not be created");
+        return scanoutPipeline;
+    }
+
+    void stageScanout(const DisplayBuffer& buffer) {
+        const auto bytes = DisplayBufferSize(buffer);
+        GuestMemory::FlushGpuWrites(buffer.address, bytes);
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(buffer.address), bytes, buffer.alignment);
+        auto state = scanout();
+        registry->Refresh();
+        begin();
+        writebackDirty();
+        const auto source = resolve(buffer.address, bytes, false, {});
+        const ScanoutParams params{buffer.width, buffer.height, buffer.pitchInPixel == 0 ? buffer.width : buffer.pitchInPixel, (buffer.width + 127u) / 128u, buffer.tilingMode == 0 ? 1u : 0u, DisplayRedLow(buffer.pixelFormat) ? 1u : 0u, DisplayTenBit(buffer.pixelFormat) ? 1u : 0u};
+        const auto slot = presentTarget(buffer.width, buffer.height);
+        auto compute = computeEncoder();
+        [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        [scanoutTable setAddress:source atIndex:0];
+        [scanoutTable setAddress:uploadBytes(&params, sizeof(params)) atIndex:1];
+        [scanoutTable setTexture:presentTextures[slot].gpuResourceID atIndex:0];
+        [compute setComputePipelineState:state];
+        [compute setArgumentTable:scanoutTable];
+        [compute dispatchThreads:MTLSizeMake(buffer.width, buffer.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+        ++encodedDispatches;
+        flush();
+        reap();
+        presentAfter = lastSerial;
         pendingPresent = slot;
     }
 
@@ -768,8 +878,12 @@ struct VulkanDevice::State {
         source.texture = (__bridge void*)presentTextures[slot];
         source.width = presentWidth;
         source.height = presentHeight;
+        const auto scanned = presentAfter;
+        presentAfter = 0;
+        if (scanned != 0) device->WaitOnQueue(Queue, Queue, scanned);
         const auto result = presenter->Present(source);
         if (result.serial != 0) presentSerials[slot] = result.serial;
+        if (scanned != 0 && !device->WaitSerial(Queue, scanned, WaitTimeoutMs)) throw std::runtime_error("AGC graphics: Metal scanout did not finish in time");
         reportPresents();
         return result.pacedMs + result.waitMs;
     }
@@ -1002,6 +1116,7 @@ struct VulkanDevice::State {
                     if (base == 0 || bytes == 0) continue;
                     const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                     entries[element] = {resolve(base, bytes, written, snapshots), static_cast<std::uint32_t>(bytes), 0};
+                    if (Trace()) std::fprintf(stderr, "[metal] buffer %u.%u: 0x%llx+0x%llx %s through %s\n", binding.binding, element, static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), written ? "written" : "read", resolvedBy);
                 }
                 slots[SlotIndex(BufferSlot::GuestBuffers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
                 break;
@@ -1098,6 +1213,7 @@ struct VulkanDevice::State {
             [compute setComputePipelineState:state];
             [compute setArgumentTable:table];
             [compute dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+            if (Trace()) std::fprintf(stderr, "[metal] dispatch %016llx%016llx: %ux%ux%u groups of %ux%ux%u, %zu snapshots\n", static_cast<unsigned long long>(shader.Identity().high), static_cast<unsigned long long>(shader.Identity().low), x, y, z, threads[0], threads[1], threads[2], snapshots.size());
             if (std::any_of(uses.begin(), uses.end(), [](const ImageUse& use) { return use.written; })) {
                 [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
                 std::vector<const CachedSurface*> stored;
@@ -1641,6 +1757,10 @@ auto VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) -> bool {
     if (s.presenter == nullptr) return false;
     std::lock_guard lock(s.mutex);
     @autoreleasepool {
+        if (GpuScanout(buffer)) {
+            s.stageScanout(buffer);
+            return true;
+        }
         s.settleForPresent();
         const auto pixels = ReadDisplayBuffer(buffer);
         s.stagePresent(buffer.width, buffer.height, pixels);
