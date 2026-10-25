@@ -63,7 +63,8 @@ public final class Installer: @unchecked Sendable {
     }
 
     public let game: Game
-    public let toolkit: Toolkit
+    public let toolkit: Toolkit?
+    public let native: NativeEngine?
     let progress: @Sendable (Step, Double) -> Void
     let log: @Sendable (String) -> Void
     private let lock = NSLock()
@@ -73,12 +74,27 @@ public final class Installer: @unchecked Sendable {
     public init(game: Game, toolkit: Toolkit, progress: @escaping @Sendable (Step, Double) -> Void, log: @escaping @Sendable (String) -> Void) {
         self.game = game
         self.toolkit = toolkit
+        self.native = nil
+        self.progress = progress
+        self.log = log
+    }
+
+    public init(game: Game, native: NativeEngine, progress: @escaping @Sendable (Step, Double) -> Void, log: @escaping @Sendable (String) -> Void) {
+        self.game = game
+        self.toolkit = nil
+        self.native = native
         self.progress = progress
         self.log = log
     }
 
     /// The installed bundle of a game folder, inside the games root's store.
     public static func bundle(for game: Game, root: URL) -> URL {
+        if let packaged = ImportedBundles.shared.bundle(for: game.id) { return packaged }
+        return storeBundle(for: game, root: root)
+    }
+
+    /// The bundle an unlock makes, whether or not an app packaged elsewhere stands in for it.
+    static func storeBundle(for game: Game, root: URL) -> URL {
         var hash: UInt64 = 0xCBF2_9CE4_8422_2325
         for byte in game.folder.standardizedFileURL.path.utf8 {
             hash ^= UInt64(byte)
@@ -91,7 +107,7 @@ public final class Installer: @unchecked Sendable {
     /// Where an installed game's files and saves live, outside its bundle.
     public static func dataFolder(for game: Game, root: URL) -> URL {
         root.appendingPathComponent(GameLibrary.storeName).appendingPathComponent("Data")
-            .appendingPathComponent(bundle(for: game, root: root).deletingPathExtension().lastPathComponent)
+            .appendingPathComponent(storeBundle(for: game, root: root).deletingPathExtension().lastPathComponent)
     }
 
     /// Removes the marks macOS leaves on files that came from a download (quarantine) or were
@@ -121,12 +137,36 @@ public final class Installer: @unchecked Sendable {
 
     public static func record(of bundle: URL) -> InstallRecord? {
         let file = bundle.appendingPathComponent("Contents/Resources/anyps5-install.json")
-        guard FileManager.default.fileExists(atPath: bundle.appendingPathComponent("Contents/MacOS/eboot").path),
-              let data = try? Data(contentsOf: file) else { return nil }
+        guard FileManager.default.fileExists(atPath: bundle.appendingPathComponent("Contents/MacOS/eboot").path) else { return nil }
+        guard let data = try? Data(contentsOf: file) else { return ImportedBundles.shared.contains(bundle) ? importedRecord(of: bundle) : nil }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         return try? decoder.decode(InstallRecord.self, from: data)
     }
+
+    /// What an app packaged outside the launcher records: its title, the bundle's date, and
+    /// no toolkit, so it never counts as outdated.
+    static func importedRecord(of bundle: URL) -> InstallRecord? {
+        guard let titleID = NativeEngine.packagedTitle(of: bundle) else { return nil }
+        let date = (try? bundle.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? Date()
+        return InstallRecord(source: bundle.path, titleID: titleID, toolkit: ImportedBundles.toolkitName, date: date)
+    }
+
+    /// Looks for apps already packaged by the native engine for these games, so they are
+    /// unlocked without unlocking them again.
+    public static func refreshImports(for games: [Game], root: URL, folders: [URL]) {
+        let packaged = NativeEngine.packagedApps(in: folders)
+        var map: [String: URL] = [:]
+        for game in games {
+            guard let app = packaged[game.titleID], record(of: storeBundle(for: game, root: root)) == nil else { continue }
+            map[game.id] = app
+        }
+        ImportedBundles.shared.set(map)
+    }
+
+    public static let importedToolkit = "imported"
+
+    public static func isImported(_ game: Game) -> Bool { ImportedBundles.shared.bundle(for: game.id) != nil }
 
     public func cancel() {
         lock.lock()
@@ -143,8 +183,10 @@ public final class Installer: @unchecked Sendable {
     }
 
     public func run(root: URL) throws -> URL {
+        if let native { return try runNative(native, root: root) }
+        guard let toolkit else { throw InstallError("no engine to unlock with") }
         let fileManager = FileManager.default
-        let bundle = Installer.bundle(for: game, root: root)
+        let bundle = Installer.storeBundle(for: game, root: root)
         let store = root.appendingPathComponent(GameLibrary.storeName)
         let work = store.appendingPathComponent("Work").appendingPathComponent(UUID().uuidString)
         defer { try? fileManager.removeItem(at: work) }
@@ -468,10 +510,11 @@ public final class Installer: @unchecked Sendable {
         }
     }
 
-    func runTool(_ tool: URL, _ arguments: [String], in directory: URL? = nil, quiet: Bool = false, status: (@Sendable (String) -> Void)? = nil) throws {
+    func runTool(_ tool: URL, _ arguments: [String], in directory: URL? = nil, environment: [String: String]? = nil, quiet: Bool = false, status: (@Sendable (String) -> Void)? = nil) throws {
         let process = Process()
         process.executableURL = tool
         process.arguments = arguments
+        if let environment { process.environment = ProcessInfo.processInfo.environment.merging(environment) { _, new in new } }
         if let directory { process.currentDirectoryURL = directory }
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -626,5 +669,78 @@ final class RelinkProgress: @unchecked Sendable {
         guard estimate > reached else { return nil }
         reached = estimate
         return estimate
+    }
+}
+
+/// The apps the native engine packaged outside the launcher's store, by game folder.
+final class ImportedBundles: @unchecked Sendable {
+    static let shared = ImportedBundles()
+    static let toolkitName = Installer.importedToolkit
+    private let lock = NSLock()
+    private var bundles: [String: URL] = [:]
+
+    func bundle(for id: String) -> URL? {
+        lock.lock()
+        defer { lock.unlock() }
+        return bundles[id]
+    }
+
+    func contains(_ bundle: URL) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return bundles.values.contains { $0.standardizedFileURL == bundle.standardizedFileURL }
+    }
+
+    func set(_ map: [String: URL]) {
+        lock.lock()
+        bundles = map
+        lock.unlock()
+    }
+}
+
+extension Installer {
+    /// Unlocks with the native engine: the executable as a plain ELF, then
+    /// package_native_app.py translates it to arm64 and packages the bundle.
+    func runNative(_ engine: NativeEngine, root: URL) throws -> URL {
+        let fileManager = FileManager.default
+        let bundle = Installer.storeBundle(for: game, root: root)
+        let store = root.appendingPathComponent(GameLibrary.storeName)
+        let work = store.appendingPathComponent("Work").appendingPathComponent(UUID().uuidString)
+        defer { try? fileManager.removeItem(at: work) }
+        let partial = bundle.deletingPathExtension().appendingPathExtension("partial")
+        defer { try? fileManager.removeItem(at: partial) }
+        if let problem = engine.problem { throw InstallError("the native engine is incomplete: " + problem) }
+
+        progress(.unwrap, 0)
+        let source = work.appendingPathComponent("source")
+        try fileManager.createDirectory(at: source, withIntermediateDirectories: true)
+        let elf = source.appendingPathComponent("eboot.elf")
+        try unwrap(game.folder.appendingPathComponent("eboot.bin"), to: elf)
+        progress(.unwrap, 1)
+
+        try checkCancelled()
+        try? fileManager.removeItem(at: partial)
+        try fileManager.createDirectory(at: partial.deletingLastPathComponent(), withIntermediateDirectories: true)
+        log("\(game.titleID): translating with \(engine.version), \(NativeEngine.translatorJobs()) parallel jobs")
+        progress(.relink, 0.02)
+        try runTool(engine.python, engine.arguments(elf: elf, game: game.folder, bundle: partial), in: work, environment: engine.environment()) { segment in
+            if segment.contains("instructions lifted") { self.progress(.relink, 1); self.progress(.copy, 0.2) }
+            if segment.contains("imports have no arm64 export") { self.progress(.copy, 0.4) }
+        }
+        guard fileManager.fileExists(atPath: partial.appendingPathComponent("Contents/MacOS/eboot").path) else { throw InstallError("the native engine wrote no bundle") }
+
+        try checkCancelled()
+        progress(.bundle, 0.6)
+        let resources = partial.appendingPathComponent("Contents/Resources")
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(InstallRecord(source: game.folder.path, titleID: game.titleID, toolkit: engine.version, date: Date())).write(to: resources.appendingPathComponent("anyps5-install.json"))
+
+        progress(.finish, 0)
+        Installer.clearMarks(partial)
+        try Installer.place(partial: partial, bundle: bundle, data: Installer.dataFolder(for: game, root: root))
+        progress(.finish, 1)
+        return bundle
     }
 }

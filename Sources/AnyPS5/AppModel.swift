@@ -252,6 +252,9 @@ final class AppModel: ObservableObject {
 
     /// The toolkit inside the app (or ANYPS5_TOOLKIT); the default engine.
     let builtInToolkit = Toolkit.locate()
+    /// The native arm64 engine, when its checkout and builds are in place; unlocking uses it
+    /// before any relinker toolkit.
+    let nativeEngine = NativeEngine.locate()
     /// Downloaded engine toolkits (Settings → Engine); the previews keep theirs apart.
     let toolkitStore: ToolkitStore
     @Published var installedToolkits: [InstalledToolkit] = []
@@ -654,6 +657,7 @@ final class AppModel: ObservableObject {
         let current = selectedGame?.id
         Task.detached(priority: .userInitiated) {
             let found = GameLibrary.scan(root)
+            Installer.refreshImports(for: found, root: root, folders: NativeEngine.importFolders(games: root))
             let records = Dictionary(uniqueKeysWithValues: found.compactMap { game in Installer.record(of: Installer.bundle(for: game, root: root)).map { (game.id, $0) } })
             await MainActor.run {
                 self.games = found
@@ -705,7 +709,7 @@ final class AppModel: ObservableObject {
         if let (step, fraction) = progress[game.id] { return .installing(step: step, fraction: fraction) }
         if queue.contains(game.id) { return .queued }
         if let failure = failures[game.id] { return .failed(failure) }
-        if let record = installedRecords[game.id] { return .installed(outdated: engineVersion(for: game).map { $0 != record.toolkit } ?? false) }
+        if let record = installedRecords[game.id] { return .installed(outdated: record.toolkit != Installer.importedToolkit && engineVersion(for: game).map { $0 != record.toolkit } ?? false) }
         if game.executable == .unreadable { return .unreadable }
         return .locked
     }
@@ -798,7 +802,7 @@ final class AppModel: ObservableObject {
 
     func unlock(_ game: Game) {
         guard let root else { return }
-        guard toolkit(for: game) != nil else { show(T.text(.noToolkit), symbol: "exclamationmark.triangle"); return }
+        guard nativeEngine != nil || toolkit(for: game) != nil else { show(T.text(.noToolkit), symbol: "exclamationmark.triangle"); return }
         failures[game.id] = nil
         guard !queue.contains(game.id), progress[game.id] == nil else { return }
         queue.append(game.id)
@@ -809,31 +813,43 @@ final class AppModel: ObservableObject {
     private func startNext(root: URL) {
         guard installer == nil, !queue.isEmpty else { return }
         let id = queue.removeFirst()
-        guard let game = games.first(where: { $0.id == id }), let toolkit = toolkit(for: game) else { startNext(root: root); return }
+        guard let game = games.first(where: { $0.id == id }), nativeEngine != nil || toolkit(for: game) != nil else { startNext(root: root); return }
+        let toolkit = nativeEngine == nil ? self.toolkit(for: game) : nil
         // A downloaded engine is checked against its manifest again before anything of it runs;
         // a custom folder must still hold a whole toolkit.
-        let downloaded = installedToolkits.first { $0.folder == toolkit.root }?.version
-        let custom = customToolkit?.root == toolkit.root
+        let downloaded = toolkit.flatMap { toolkit in installedToolkits.first { $0.folder == toolkit.root }?.version }
+        let custom = toolkit.map { customToolkit?.root == $0.root } ?? false
         let store = toolkitStore
         progress[id] = (.unwrap, 0)
         installLog[id] = []
-        let installer = Installer(game: game, toolkit: toolkit, progress: { step, fraction in
+        let report: @Sendable (Installer.Step, Double) -> Void = { step, fraction in
             Task { @MainActor in
                 // The relinker reports thousands of times; the bar moves in visible steps.
                 guard let current = self.progress[id] else { return }
                 if current.0 != step || abs(current.1 - fraction) >= 0.005 || fraction >= 1 { self.progress[id] = (step, fraction) }
             }
-        }, log: { line in
+        }
+        let write: @Sendable (String) -> Void = { line in
             Task { @MainActor in
                 self.installLog[id, default: []].append(line)
                 if self.installLog[id]!.count > 600 { self.installLog[id]!.removeFirst(100) }
             }
-        })
+        }
+        let installer: Installer
+        if let nativeEngine {
+            installer = Installer(game: game, native: nativeEngine, progress: report, log: write)
+        } else if let toolkit {
+            installer = Installer(game: game, toolkit: toolkit, progress: report, log: write)
+        } else {
+            progress[id] = nil
+            startNext(root: root)
+            return
+        }
         self.installer = installer
         Task.detached(priority: .userInitiated) {
             let result: Result<URL, Error> = Result {
                 if let downloaded { _ = try store.verifiedToolkit(version: downloaded) }
-                if custom, let problem = Toolkit.layoutProblem(at: toolkit.root) { throw InstallError("the engine folder is incomplete: \(problem)") }
+                if custom, let toolkit, let problem = Toolkit.layoutProblem(at: toolkit.root) { throw InstallError("the engine folder is incomplete: \(problem)") }
                 return try installer.run(root: root)
             }
             await MainActor.run {
@@ -876,6 +892,7 @@ final class AppModel: ObservableObject {
 
     func uninstall(_ game: Game) {
         guard let root else { return }
+        guard !Installer.isImported(game) else { show("This app was packaged outside the launcher and stays where it is", symbol: "info.circle"); return }
         try? FileManager.default.removeItem(at: Installer.bundle(for: game, root: root))
         try? FileManager.default.removeItem(at: Installer.dataFolder(for: game, root: root))
         installedRecords[game.id] = nil
