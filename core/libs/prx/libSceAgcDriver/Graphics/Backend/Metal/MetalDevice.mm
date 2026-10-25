@@ -193,6 +193,11 @@ bool Verbose() {
     return verbose;
 }
 
+bool Trace() {
+    static const bool trace = std::getenv("APS5_METAL_TRACE") != nullptr;
+    return trace;
+}
+
 std::set<std::uint32_t> DeclaredConstants(std::string_view source) {
     std::set<std::uint32_t> ids;
     constexpr std::string_view marker = "[[function_constant(";
@@ -434,6 +439,7 @@ struct VulkanDevice::State {
     std::uint32_t encodedDispatches = 0;
     std::uint64_t recordedSinceSubmit = 0;
     std::uint64_t lastSerial = 0;
+    const char* resolvedBy = "";
 
     std::vector<std::unique_ptr<UploadChunk>> chunks;
     UploadChunk* chunk = nullptr;
@@ -593,15 +599,23 @@ struct VulkanDevice::State {
         if (!writable) {
             for (const auto& snapshot : snapshots) {
                 if (address >= snapshot.address && bytes <= snapshot.bytes.size() && address - snapshot.address <= snapshot.bytes.size() - bytes) {
+                    resolvedBy = "snapshot";
                     return uploadBytes(snapshot.bytes.data() + (address - snapshot.address), bytes, bytes);
                 }
             }
         }
         const auto windows = device->Guest().Snapshot();
         if (windows != nullptr) {
-            if (const auto resolved = Metal::Resolve(*windows, address, bytes); resolved && (!writable || (resolved.window->writable && !resolved.window->copied))) return resolved.deviceAddress;
+            if (const auto resolved = Metal::Resolve(*windows, address, bytes); resolved && (!writable || (resolved.window->writable && !resolved.window->copied))) {
+                resolvedBy = "window";
+                return resolved.deviceAddress;
+            }
         }
-        if (const auto* import = importHost(address, bytes)) return import->buffer.gpuAddress + (address - import->span.base);
+        if (const auto* import = importHost(address, bytes)) {
+            resolvedBy = "import";
+            return import->buffer.gpuAddress + (address - import->span.base);
+        }
+        resolvedBy = writable ? "staged, written back" : "staged";
         auto buffer = device->NewSharedBuffer(bytes, "AnyPS5 staged guest range");
         if (!buffer) throw std::runtime_error("AGC graphics: Metal staging buffer could not be allocated");
         std::memcpy(buffer.contents, reinterpret_cast<const void*>(address), bytes);
@@ -1098,6 +1112,7 @@ struct VulkanDevice::State {
                     if (base == 0 || bytes == 0) continue;
                     const bool written = element >= binding.bufferWritten.size() || binding.bufferWritten[element];
                     entries[element] = {resolve(base, bytes, written, snapshots), static_cast<std::uint32_t>(bytes), 0};
+                    if (Trace()) std::fprintf(stderr, "[metal] buffer %u.%u: 0x%llx+0x%llx %s through %s\n", binding.binding, element, static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), written ? "written" : "read", resolvedBy);
                 }
                 slots[SlotIndex(BufferSlot::GuestBuffers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
                 break;
@@ -1194,6 +1209,7 @@ struct VulkanDevice::State {
             [compute setComputePipelineState:state];
             [compute setArgumentTable:table];
             [compute dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+            if (Trace()) std::fprintf(stderr, "[metal] dispatch %016llx%016llx: %ux%ux%u groups of %ux%ux%u, %zu snapshots\n", static_cast<unsigned long long>(shader.Identity().high), static_cast<unsigned long long>(shader.Identity().low), x, y, z, threads[0], threads[1], threads[2], snapshots.size());
             if (std::any_of(uses.begin(), uses.end(), [](const ImageUse& use) { return use.written; })) {
                 [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
                 std::vector<const CachedSurface*> stored;
