@@ -753,7 +753,10 @@ struct VulkanDevice::State {
         }
         const auto before = pendingWrites.size();
         std::erase_if(pendingWrites, [&](const PendingWrite& write) { return write.serial != 0 && write.serial <= through; });
-        pendingTotal().fetch_sub(before - pendingWrites.size(), std::memory_order_acq_rel);
+        if (pendingTotal().fetch_sub(before - pendingWrites.size(), std::memory_order_acq_rel) == before - pendingWrites.size()) {
+            pendingLow().store(~0ull, std::memory_order_release);
+            pendingHigh().store(0, std::memory_order_release);
+        }
         pendingCount.store(pendingWrites.size(), std::memory_order_release);
         checkFault();
     }
@@ -762,6 +765,8 @@ struct VulkanDevice::State {
         const auto end = address + bytes;
         if (!pendingWrites.empty() && pendingWrites.back().serial == 0 && pendingWrites.back().begin <= address && pendingWrites.back().end >= end) return;
         pendingWrites.push_back({address, end, 0});
+        for (auto low = pendingLow().load(std::memory_order_acquire); address < low && !pendingLow().compare_exchange_weak(low, address, std::memory_order_acq_rel);) {}
+        for (auto high = pendingHigh().load(std::memory_order_acquire); end > high && !pendingHigh().compare_exchange_weak(high, end, std::memory_order_acq_rel);) {}
         pendingTotal().fetch_add(1, std::memory_order_acq_rel);
         pendingCount.store(pendingWrites.size(), std::memory_order_release);
     }
@@ -781,8 +786,19 @@ struct VulkanDevice::State {
         return total;
     }
 
+    static std::atomic<std::uint64_t>& pendingLow() {
+        static std::atomic<std::uint64_t> low{~0ull};
+        return low;
+    }
+
+    static std::atomic<std::uint64_t>& pendingHigh() {
+        static std::atomic<std::uint64_t> high{0};
+        return high;
+    }
+
     static void flushHook(std::uint64_t address, std::size_t bytes) {
         if (pendingTotal().load(std::memory_order_acquire) == 0) return;
+        if (address + bytes <= pendingLow().load(std::memory_order_acquire) || address >= pendingHigh().load(std::memory_order_acquire)) return;
         static thread_local std::vector<State*> active;
         active.clear();
         {
