@@ -43,6 +43,7 @@
 
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
+#include <pthread/qos.h>
 #endif
 
 namespace {
@@ -259,11 +260,13 @@ int main(int argc, char** argv) {
 
         std::vector<std::string> objects(partitions.size());
         std::vector<std::size_t> sizes(partitions.size(), 0);
+        std::vector<std::size_t> costs(partitions.size(), 0);
         std::size_t hugeCount = 0;
         for (std::size_t i = 0; i < partitions.size(); ++i) {
             std::string entries;
             for (const auto entry : partitions[i]) {
                 sizes[i] += lifter.FunctionSize(entry);
+                costs[i] += lifter.FunctionSize(entry) > options.giant ? lifter.FunctionSize(entry) / 8 : lifter.FunctionSize(entry);
                 if (lifter.FunctionSize(entry) > options.huge) ++hugeCount;
                 entries += llvm::utohexstr(entry, true) + ",";
             }
@@ -330,16 +333,19 @@ int main(int argc, char** argv) {
         std::condition_variable released;
         std::size_t inFlight = 0;
         auto worker = [&]() {
+#if defined(__APPLE__)
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
             for (;;) {
                 std::size_t index = 0, cost = 0;
                 {
                     std::unique_lock<std::mutex> guard(lock);
                     released.wait(guard, [&] {
-                        return next >= order.size() || inFlight == 0 || inFlight + std::min(sizes[order[next]], options.budget) <= options.budget;
+                        return next >= order.size() || inFlight == 0 || inFlight + std::min(costs[order[next]], options.budget) <= options.budget;
                     });
                     if (next >= order.size()) return;
                     index = order[next++];
-                    cost = std::min(sizes[index], options.budget);
+                    cost = std::min(costs[index], options.budget);
                     inFlight += cost;
                 }
                 auto release = llvm::make_scope_exit([&] {
