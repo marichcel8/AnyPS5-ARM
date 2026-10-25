@@ -33,6 +33,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <thread>
 #include <optional>
 #include <set>
 #include <span>
@@ -99,6 +100,22 @@ bool GpuScanout(const DisplayBuffer& buffer) {
     static const bool disabled = std::getenv("APS5_METAL_CPU_SCANOUT") != nullptr;
     return !disabled && buffer.dccAddress == 0 && !DisplayHalfFloat(buffer.pixelFormat) && !DisplayPq(buffer.pixelFormat) && DisplayTexelBytes(buffer.pixelFormat) == 4u && buffer.tilingMode <= 1u;
 }
+
+thread_local bool encodingNow = false;
+
+struct EncodingScope {
+    bool previous = encodingNow;
+    EncodingScope() { encodingNow = true; }
+    ~EncodingScope() { encodingNow = previous; }
+    EncodingScope(const EncodingScope&) = delete;
+    EncodingScope& operator=(const EncodingScope&) = delete;
+};
+
+struct PendingWrite {
+    std::uint64_t begin = 0;
+    std::uint64_t end = 0;
+    std::uint64_t serial = 0;
+};
 
 struct UploadChunk {
     Metal::NativeBuffer buffer;
@@ -440,6 +457,9 @@ struct VulkanDevice::State {
     std::uint64_t recordedSinceSubmit = 0;
     std::uint64_t lastSerial = 0;
     const char* resolvedBy = "";
+    std::vector<PendingWrite> pendingWrites;
+    std::atomic<std::size_t> pendingCount{0};
+    std::atomic<std::uint32_t> hookUsers{0};
 
     std::vector<std::unique_ptr<UploadChunk>> chunks;
     UploadChunk* chunk = nullptr;
@@ -488,11 +508,18 @@ struct VulkanDevice::State {
 
     ~State() {
         if (device == nullptr) return;
+        {
+            std::lock_guard lock(targetsMutex());
+            std::erase(targets(), this);
+        }
+        while (hookUsers.load(std::memory_order_acquire) != 0) std::this_thread::yield();
         try {
             flush();
             drain(lastSerial);
         } catch (...) {
         }
+        pendingTotal().fetch_sub(pendingWrites.size(), std::memory_order_acq_rel);
+        pendingWrites.clear();
         drawPipelines.clear();
         renderPipelines.reset();
         for (auto& [key, depth] : depthSurfaces) {
@@ -608,14 +635,17 @@ struct VulkanDevice::State {
         if (windows != nullptr) {
             if (const auto resolved = Metal::Resolve(*windows, address, bytes); resolved && (!writable || (resolved.window->writable && !resolved.window->copied))) {
                 resolvedBy = "window";
+                if (writable) noteWrite(address, bytes);
                 return resolved.deviceAddress;
             }
         }
         if (const auto* import = importHost(address, bytes)) {
             resolvedBy = "import";
+            if (writable) noteWrite(address, bytes);
             return import->buffer.gpuAddress + (address - import->span.base);
         }
         resolvedBy = writable ? "staged, written back" : "staged";
+        if (writable) noteWrite(address, bytes);
         auto buffer = device->NewSharedBuffer(bytes, "AnyPS5 staged guest range");
         if (!buffer) throw std::runtime_error("AGC graphics: Metal staging buffer could not be allocated");
         std::memcpy(buffer.contents, reinterpret_cast<const void*>(address), bytes);
@@ -702,6 +732,9 @@ struct VulkanDevice::State {
             staged.clear();
             if (textures != nullptr) textures->Seal(Queue, serial);
             lastSerial = serial;
+            for (auto& write : pendingWrites) {
+                if (write.serial == 0) write.serial = serial;
+            }
             recordedSinceSubmit = 0;
             ++epoch;
         }
@@ -714,7 +747,77 @@ struct VulkanDevice::State {
             for (const auto& item : entry.first) std::memcpy(item.host, item.staged, item.bytes);
             for (const auto& buffer : entry.second) device->ReleaseBuffer(buffer);
         }
+        const auto before = pendingWrites.size();
+        std::erase_if(pendingWrites, [&](const PendingWrite& write) { return write.serial != 0 && write.serial <= through; });
+        pendingTotal().fetch_sub(before - pendingWrites.size(), std::memory_order_acq_rel);
+        pendingCount.store(pendingWrites.size(), std::memory_order_release);
         checkFault();
+    }
+
+    void noteWrite(std::uint64_t address, std::uint64_t bytes) {
+        const auto end = address + bytes;
+        if (!pendingWrites.empty() && pendingWrites.back().serial == 0 && pendingWrites.back().begin <= address && pendingWrites.back().end >= end) return;
+        pendingWrites.push_back({address, end, 0});
+        pendingTotal().fetch_add(1, std::memory_order_acq_rel);
+        pendingCount.store(pendingWrites.size(), std::memory_order_release);
+    }
+
+    static std::mutex& targetsMutex() {
+        static std::mutex lock;
+        return lock;
+    }
+
+    static std::vector<State*>& targets() {
+        static std::vector<State*> list;
+        return list;
+    }
+
+    static std::atomic<std::size_t>& pendingTotal() {
+        static std::atomic<std::size_t> total{0};
+        return total;
+    }
+
+    static void flushHook(std::uint64_t address, std::size_t bytes) {
+        if (pendingTotal().load(std::memory_order_acquire) == 0) return;
+        static thread_local std::vector<State*> active;
+        active.clear();
+        {
+            std::lock_guard lock(targetsMutex());
+            for (auto* target : targets()) {
+                if (target->pendingCount.load(std::memory_order_acquire) == 0) continue;
+                target->hookUsers.fetch_add(1, std::memory_order_acq_rel);
+                active.push_back(target);
+            }
+        }
+        const auto targetsHeld = active;
+        std::exception_ptr failure;
+        for (auto* target : targetsHeld) {
+            try {
+                if (!failure) target->flushFor(address, bytes);
+            } catch (...) {
+                failure = std::current_exception();
+            }
+            target->hookUsers.fetch_sub(1, std::memory_order_acq_rel);
+        }
+        if (failure) std::rethrow_exception(failure);
+    }
+
+    void flushFor(std::uint64_t address, std::size_t bytes) {
+        std::lock_guard lock(mutex);
+        reap();
+        const auto end = address + bytes;
+        bool open = false;
+        std::uint64_t wait = 0;
+        for (const auto& write : pendingWrites) {
+            if (write.end <= address || write.begin >= end) continue;
+            if (write.serial == 0) open = true;
+            else wait = std::max(wait, write.serial);
+        }
+        if (open && !encodingNow) {
+            flush();
+            wait = lastSerial;
+        }
+        if (wait != 0) drain(wait);
     }
 
     void drain(std::uint64_t serial) {
@@ -1195,6 +1298,7 @@ struct VulkanDevice::State {
         id<MTLComputePipelineState> state = pipeline(shader);
         @autoreleasepool {
             std::lock_guard lock(mutex);
+            const EncodingScope encoding;
             registry->Refresh();
             begin();
             std::array<std::uint64_t, ArgumentSlots> slots{};
@@ -1382,6 +1486,7 @@ struct VulkanDevice::State {
         if (translated.pipeline.sampleCount > 1) throw std::runtime_error("AGC graphics: multisampled Metal draws are not wired yet");
         @autoreleasepool {
             std::lock_guard lock(mutex);
+            const EncodingScope encoding;
             registry->Refresh();
             begin();
             Metal::RenderPipelineRequest request;
@@ -1573,6 +1678,11 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         if (!s.fault) throw std::runtime_error("AGC graphics: Metal fault buffer could not be allocated");
         std::memset(s.fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
         if (window != nullptr && window->context != nullptr) s.attachWindow(window->context);
+        {
+            std::lock_guard lock(State::targetsMutex());
+            State::targets().push_back(&s);
+        }
+        GuestMemory::SetFlushHook(&State::flushHook);
     }
 }
 
