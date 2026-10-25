@@ -1,3 +1,4 @@
+#include "prx/libc/include/Api.hpp"
 #include <climits>
 #include <clocale>
 #include <cstddef>
@@ -23,13 +24,6 @@
 #include "prx/libc/include/ApplicationHeap.hpp"
 #include "prx/libc/include/GuestLocale.hpp"
 #include "SceTypes.hpp"
-
-extern "C" {
-void* APS5_VABI _Znwm_nid_postfix(std::size_t size);
-void APS5_VABI _ZdlPv_nid_postfix(void* pointer);
-void APS5_VABI _Locksyslock_nid_postfix();
-void APS5_VABI _Unlocksyslock_nid_postfix();
-}
 
 namespace {
 
@@ -112,6 +106,7 @@ void APS5_VABI DestroyCollate(GuestLocale::Facet*) {}
 void APS5_VABI DeleteCollate(GuestLocale::Facet* self) {
     if (self == nullptr) throw std::invalid_argument("collate delete: null facet");
     _ZdlPv_nid_postfix(self);
+
 }
 
 void APS5_VABI RetainFacet(GuestLocale::Facet* self) {
@@ -413,11 +408,6 @@ GuestLocale::IosBase* APS5_VABI SetStreamWidth(GuestLocale::IosBase* stream, std
     return stream;
 }
 
-struct StreamManipulator {
-    GuestLocale::IosBase* (APS5_VABI* function)(GuestLocale::IosBase*, std::int32_t);
-    std::int32_t argument;
-};
-
 static_assert(sizeof(StreamManipulator) == 0x10);
 
 StreamManipulator APS5_VABI _ZSt4setwi_nid_postfix(std::int32_t width) {
@@ -457,9 +447,7 @@ GuestLocale::Implementation* APS5_VABI _ZNSt6locale16_GetgloballocaleEv_nid_post
 }
 
 namespace {
-struct GuestLocaleFacade {
-    GuestLocale::Implementation* implementation;
-};
+
 GuestLocaleFacade g_classicLocaleFacade{&g_classicLocale};
 }
 
@@ -640,6 +628,7 @@ void APS5_VABI _init_env_nid_postfix() {
 void APS5_VABI init_env_nid_postfix(const InitEnvParams* params) {
     (void)params;
     _init_env_nid_postfix();
+
 }
 
 SonyLconv* APS5_VABI localeconv_nid_postfix(void) {

@@ -1,3 +1,7 @@
+#include "prx/libkernel/Pthread/include/Mutex.hpp"
+#include "prx/libkernel/Pthread/include/Cond.hpp"
+#include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 #include "prx/libkernel/Time/include/SleepWake.hpp"
@@ -148,16 +152,6 @@ static const bool g_timerResolutionRaised = [] {
     return raised;
 }();
 
-extern "C" {
-int APS5_VABI scePthreadCondInit(PthreadCond* cond, const PthreadCondattr* attr, const char* name);
-int APS5_VABI scePthreadCondDestroy(PthreadCond* cond);
-int APS5_VABI scePthreadCondTimedwait(PthreadCond* cond, PthreadMutex* mutex, unsigned int usec);
-int APS5_VABI scePthreadMutexInit(PthreadMutex* mutex, const PthreadMutexattr* attr, const char* name);
-int APS5_VABI scePthreadMutexDestroy(PthreadMutex* mutex);
-int APS5_VABI scePthreadMutexLock(PthreadMutex* mutex);
-int APS5_VABI scePthreadMutexUnlock(PthreadMutex* mutex);
-}
-
 static void ReportTimedWait(const char* name, const std::function<void()>& body) {
     std::vector<double> samples(200);
     for (auto& sample : samples) {
@@ -181,11 +175,13 @@ static const bool g_timerSelfTest = [] {
     scePthreadCondInit(&cond, nullptr, nullptr);
     scePthreadMutexInit(&guestMutex, nullptr, nullptr);
     scePthreadMutexLock(&guestMutex);
+
     ReportTimedWait("scePthreadCondTimedwait(1000 us)", [&] { scePthreadCondTimedwait(&cond, &guestMutex, 1000); });
     ReportTimedWait("scePthreadCondTimedwait(13000 us)", [&] { scePthreadCondTimedwait(&cond, &guestMutex, 13000); });
     scePthreadMutexUnlock(&guestMutex);
     scePthreadMutexDestroy(&guestMutex);
     scePthreadCondDestroy(&cond);
+
     ReportTimedWait("sceKernelUsleep(1000)", [&] { sceKernelUsleep_nid_postfix(1000); });
     ReportTimedWait("Sleep(1)", [&] { Sleep(1); });
     HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
