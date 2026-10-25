@@ -460,6 +460,10 @@ struct VulkanDevice::State {
     std::vector<PendingWrite> pendingWrites;
     std::atomic<std::size_t> pendingCount{0};
     std::atomic<std::uint32_t> hookUsers{0};
+    std::atomic<std::uint64_t> hookSubmits{0};
+    std::atomic<std::uint64_t> hookWaits{0};
+    std::uint64_t reportSubmits = 0;
+    std::uint64_t reportWaits = 0;
 
     std::vector<std::unique_ptr<UploadChunk>> chunks;
     UploadChunk* chunk = nullptr;
@@ -816,8 +820,11 @@ struct VulkanDevice::State {
         if (open && !encodingNow) {
             flush();
             wait = lastSerial;
+            ++hookSubmits;
         }
-        if (wait != 0) drain(wait);
+        if (wait == 0) return;
+        if (device->CompletedSerial(Queue) < wait) ++hookWaits;
+        drain(wait);
     }
 
     void drain(std::uint64_t serial) {
@@ -949,7 +956,6 @@ struct VulkanDevice::State {
 
     void stageScanout(const DisplayBuffer& buffer) {
         const auto bytes = DisplayBufferSize(buffer);
-        GuestMemory::FlushGpuWrites(buffer.address, bytes);
         GuestMemory::CheckRange(reinterpret_cast<const void*>(buffer.address), bytes, buffer.alignment);
         auto state = scanout();
         registry->Refresh();
@@ -1001,15 +1007,17 @@ struct VulkanDevice::State {
         const auto presented = stats.presented - reportStats.presented;
         const auto drawCount = draws.load(std::memory_order_relaxed);
         const auto dispatchCount = dispatches.load(std::memory_order_relaxed);
-        std::fprintf(stderr, "[metal] present: %llu flips in %.1f s (%.1f fps), %llu presented, %llu suspended, %llu without drawable, %llu upscaled; source %ux%u, refresh %.0f Hz, effective %.1f Hz; %llu draws, %llu dispatches\n",
+        std::fprintf(stderr, "[metal] present: %llu flips in %.1f s (%.1f fps), %llu presented, %llu suspended, %llu without drawable, %llu upscaled; source %ux%u, refresh %.0f Hz, effective %.1f Hz; %llu draws, %llu dispatches; CPU accesses to GPU-written ranges: %llu submits, %llu waits\n",
                      static_cast<unsigned long long>(reportFrames), seconds, seconds > 0.0 ? static_cast<double>(presented) / seconds : 0.0, static_cast<unsigned long long>(presented),
                      static_cast<unsigned long long>(stats.suspended - reportStats.suspended), static_cast<unsigned long long>(stats.noDrawable - reportStats.noDrawable),
                      static_cast<unsigned long long>(stats.upscaled - reportStats.upscaled), presentWidth, presentHeight, stats.refreshHz, stats.effectiveHz,
-                     static_cast<unsigned long long>(drawCount - reportDraws), static_cast<unsigned long long>(dispatchCount - reportDispatches));
+                     static_cast<unsigned long long>(drawCount - reportDraws), static_cast<unsigned long long>(dispatchCount - reportDispatches), static_cast<unsigned long long>(hookSubmits - reportSubmits), static_cast<unsigned long long>(hookWaits - reportWaits));
         reportAt = now;
         reportFrames = 0;
         reportDraws = drawCount;
         reportDispatches = dispatchCount;
+        reportSubmits = hookSubmits;
+        reportWaits = hookWaits;
         reportStats = stats;
     }
 
