@@ -65,6 +65,8 @@ def main():
     if guesttools.available():
         # The expected values come from the same source compiled for the host.
         cases.append(("lifter-smoke", compiled("lifter_smoke.c"), 28, "3b0c6e4bf8726a1c"))
+        cases.append(("x87-smoke", compiled("x87_smoke.c"), 0, "x87 ok"))
+        cases.append(("string-smoke", compiled("string_smoke.c"), 0, "strings ok"))
         expected = host_reference("vector_smoke.c", VECTOR_FLAGS, work)
         if expected is not None:
             cases.append(("vector-smoke", compiled("vector_smoke.c", VECTOR_FLAGS), *expected))

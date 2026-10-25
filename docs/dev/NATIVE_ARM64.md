@@ -37,6 +37,7 @@ The relinker already decodes guest code (TLS scan, `--to-intel`). In the arm64 m
 - **Pipeline:** x86-64 is decoded with Capstone and lifted to LLVM IR, one LLVM function per guest function, operating on `GuestState`. LLVM optimizes it and emits arm64.
 - **Flags:** flags are computed into `GuestState` fields; LLVM drops the dead ones.
 - **SIMD:** SSE and AVX map to LLVM vector types, and 256-bit operations are lowered to two 128-bit NEON operations by LLVM.
+- **x87:** the FPU stack is eight doubles in `GuestState` with a dynamic top, plus the control and status words (control word 0x037f at thread start). Loads, stores, arithmetic, comparisons (status word and `fcomi` flags), `fcmov`, rounding by the control word, transcendental instructions, BCD (`fbld`/`fbstp`) and 80-bit memory operands are lifted; 80-bit values are rounded to double precision, and tag words and exceptions are not modeled. `tests/x87_smoke.c` checks the set.
 - **Function discovery:**
   - the ELF entry, `DT_INIT`/`INIT_ARRAY`
   - exported and local symbols
@@ -71,6 +72,28 @@ python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm
 ```
 
 `aps5-translator <eboot.elf> <guest.o>` writes one arm64 object with the lifted functions, the guest image and the function table. The image's relocated slots are symbolic, so the host linker binds the guest's imports to the NID exports of the arm64 prx libraries. Linking it with `libaps5-translator-runtime.a` and the needed `.prx` files gives a native executable.
+
+### Large titles
+
+A title's code is split into partitions of about 8k guest instructions. Each partition is lifted, optimized and compiled in its own LLVM context on its own thread, and `ld -r` joins the partition objects into the one `guest.o`. Partition objects are cached under `~/Library/Caches/AnyPS5/translator/<ELF hash>`, keyed by the translator binary, the ELF and the settings, so a repeated or interrupted run only compiles what is missing.
+
+Three things keep very large guest functions from stalling LLVM:
+
+- **Flag liveness.** A backward data flow over each function finds the arithmetic flags no later instruction reads; their stores (and the parity and adjust computations behind them) are not emitted. Flags are dead across calls, returns and jumps to other functions, as the System V ABI preserves none. `APS5_TRANSLATOR_ALL_FLAGS=1` keeps every flag store.
+- **A small graph.** Only branch targets and instructions control reaches from elsewhere start a basic block. A jump through a bounded jump table switches over that table's targets only; every other indirect jump goes to one shared dispatch per function.
+- **Guest registers in SSA.** In functions up to 2500 guest instructions, the lifter works on a copy of `GuestState` on the native stack and copies the fields the function uses back before each call, runtime call and return, and in again after a call returns. SROA turns the copy into SSA values, so alias analysis no longer sees one memory access per register use.
+- **Optimization tiers.** Functions above 2000 guest instructions are not inlined. Above 2500 they keep `GuestState` in memory, skip the O2 pipeline for a few linear passes (SROA, EarlyCSE, SimplifyCFG, ADCE), and are compiled with fast instruction selection and register allocation, because the greedy allocator's live range splitting grows too fast on them.
+- **Bounded memory.** Partitions run on threads with 256 MB stacks, because alias analysis recurses deeply on large phi webs. The threads together hold at most 16384 guest instructions in flight, taken in order from the largest partition down; a larger partition runs alone.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `APS5_TRANSLATOR_JOBS` | CPU cores, at most 4 | threads |
+| `APS5_TRANSLATOR_PARTITION` | 4096 | guest instructions per partition |
+| `APS5_TRANSLATOR_LARGE` / `_HUGE` / `_GIANT` | 2000 / 2500 / 2500 | no inlining / light pipeline and no register promotion / fast codegen, in guest instructions |
+| `APS5_TRANSLATOR_BUDGET` | 16384 | guest instructions compiled at once over all threads |
+| `APS5_TRANSLATOR_CACHE` | `~/Library/Caches/AnyPS5/translator` | cache directory, `off` disables it |
+| `APS5_TRANSLATOR_LD` | `ld` | linker that joins the partitions |
+| `APS5_TRANSLATOR_STATS` | unset | print the time of each partition |
 
 ## Milestones
 

@@ -53,6 +53,7 @@ bool Lifter::Impl::EmitVectorFloat(const Instruction& instruction) {
     const bool vex = mnemonic.front() == 'v';
     const std::string op = vex ? mnemonic.substr(1) : mnemonic;
     if (op.size() < 4) return false;
+    if (instruction.x86.op_count == 2 && instruction.Memory(0) && instruction.Memory(1)) return false;
     const std::string suffix = op.substr(op.size() - 2);
     const bool scalar = suffix == "ss" || suffix == "sd";
     const bool packed = suffix == "ps" || suffix == "pd";

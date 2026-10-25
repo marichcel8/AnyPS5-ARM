@@ -27,16 +27,21 @@ struct Statistics {
 // function becomes `void g_<offset>(GuestState*)`; aps5_guest_functions maps guest offsets to them.
 class Lifter {
 public:
-    Lifter(const Elf& elf, llvm::LLVMContext& context);
+    explicit Lifter(const Elf& elf);
     ~Lifter();
 
     void Discover();
-    std::unique_ptr<llvm::Module> Lift();
+    std::vector<std::vector<std::uint64_t>> Partitions(std::size_t instructions) const;
+    std::size_t FunctionSize(std::uint64_t entry) const;
+    std::unique_ptr<llvm::Module> Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, std::size_t promoteLimit, Statistics& stats) const;
     const Statistics& Stats() const { return stats; }
 
-private:
+    struct Program;
     struct Impl;
-    std::unique_ptr<Impl> impl;
+
+private:
+    const Elf& elf;
+    std::unique_ptr<Program> program;
     Statistics stats;
 };
 

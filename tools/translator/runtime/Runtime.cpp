@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -98,6 +99,7 @@ GuestState* NewState() {
     auto* state = static_cast<GuestState*>(std::aligned_alloc(alignof(GuestState), sizeof(GuestState)));
     std::memset(state, 0, sizeof(*state));
     state->mxcsr = 0x1f80;
+    state->x87Control = 0x037f;
     void* stack = mmap(nullptr, GuestStackBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stack == MAP_FAILED) Fail("cannot map a guest stack for", 0);
     state->gpr[Rsp] = reinterpret_cast<std::uint64_t>(stack) + GuestStackBytes - 64;
@@ -252,4 +254,122 @@ int main(int argc, char** argv, char** envp) {
         start(reinterpret_cast<void (*)(void*, void*)>(entryAddress), block);
     }
     return entry(block, nullptr);
+}
+
+extern "C" {
+
+void aps5_cpuid(GuestState* state) {
+    const auto leaf = static_cast<std::uint32_t>(state->gpr[Rax]);
+    const auto subleaf = static_cast<std::uint32_t>(state->gpr[Rcx]);
+    std::uint32_t a = 0, b = 0, c = 0, d = 0;
+    static const char brand[49] = "AnyPS5 x86-64 (AMD Zen 2 compatible)";
+    switch (leaf) {
+    case 0:
+        a = 0xd;
+        b = 0x68747541;
+        d = 0x69746e65;
+        c = 0x444d4163;
+        break;
+    case 1:
+        a = 0x00870f10;
+        b = 0x00080800;
+        c = (1u << 0) | (1u << 9) | (1u << 12) | (1u << 13) | (1u << 19) | (1u << 20) | (1u << 23) | (1u << 26) | (1u << 27) | (1u << 28);
+        d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 19) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
+        break;
+    case 7:
+        if (subleaf == 0) b = (1u << 3) | (1u << 5) | (1u << 8);
+        break;
+    case 0xd:
+        if (subleaf == 0) {
+            a = 7;
+            b = 0x340;
+            c = 0x340;
+        }
+        break;
+    case 0x80000000:
+        a = 0x80000004;
+        b = 0x68747541;
+        d = 0x69746e65;
+        c = 0x444d4163;
+        break;
+    case 0x80000001:
+        c = (1u << 0) | (1u << 5);
+        d = (1u << 11) | (1u << 20) | (1u << 29);
+        break;
+    case 0x80000002: case 0x80000003: case 0x80000004: {
+        std::uint32_t words[4];
+        std::memcpy(words, brand + (leaf - 0x80000002) * 16, 16);
+        a = words[0];
+        b = words[1];
+        c = words[2];
+        d = words[3];
+        break;
+    }
+    default:
+        break;
+    }
+    state->gpr[Rax] = a;
+    state->gpr[Rbx] = b;
+    state->gpr[Rcx] = c;
+    state->gpr[Rdx] = d;
+}
+
+double aps5_x87_load80(const std::uint8_t* source) {
+    std::uint64_t mantissa = 0;
+    std::uint16_t top = 0;
+    std::memcpy(&mantissa, source, 8);
+    std::memcpy(&top, source + 8, 2);
+    const int exponent = top & 0x7fff;
+    const double sign = (top & 0x8000) != 0 ? -1.0 : 1.0;
+    if (exponent == 0x7fff) {
+        if ((mantissa << 1) == 0) return sign * HUGE_VAL;
+        return std::copysign(std::nan(""), sign);
+    }
+    if (mantissa == 0) return sign * 0.0;
+    return sign * std::ldexp(static_cast<double>(mantissa), (exponent == 0 ? 1 : exponent) - 16383 - 63);
+}
+
+void aps5_x87_store80(std::uint8_t* target, double value) {
+    std::uint64_t mantissa = 0;
+    std::uint16_t top = std::signbit(value) ? 0x8000 : 0;
+    const double magnitude = std::fabs(value);
+    if (std::isnan(value)) {
+        mantissa = 0xc000000000000000ull;
+        top |= 0x7fff;
+    } else if (std::isinf(value)) {
+        mantissa = 0x8000000000000000ull;
+        top |= 0x7fff;
+    } else if (magnitude != 0.0) {
+        int exponent = 0;
+        const double fraction = std::frexp(magnitude, &exponent);
+        mantissa = static_cast<std::uint64_t>(std::ldexp(fraction, 64));
+        top |= static_cast<std::uint16_t>(exponent - 1 + 16383);
+    }
+    std::memcpy(target, &mantissa, 8);
+    std::memcpy(target + 8, &top, 2);
+}
+
+double aps5_x87_loadbcd(const std::uint8_t* source) {
+    double value = 0.0;
+    for (int i = 8; i >= 0; --i) value = value * 100.0 + (source[i] >> 4) * 10.0 + (source[i] & 0x0f);
+    return (source[9] & 0x80) != 0 ? -value : value;
+}
+
+void aps5_x87_storebcd(std::uint8_t* target, double value) {
+    std::memset(target, 0, 10);
+    const double magnitude = std::fabs(value);
+    if (!(magnitude < 1e18)) {
+        target[7] = 0xc0;
+        target[8] = 0xff;
+        target[9] = 0xff;
+        return;
+    }
+    auto digits = static_cast<std::uint64_t>(magnitude);
+    for (int i = 0; i < 9; ++i) {
+        target[i] = static_cast<std::uint8_t>(digits % 10 | (digits / 10 % 10) << 4);
+        digits /= 100;
+    }
+    if (std::signbit(value)) target[9] = 0x80;
+}
+
 }
