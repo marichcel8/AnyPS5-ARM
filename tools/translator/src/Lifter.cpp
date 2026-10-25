@@ -314,9 +314,70 @@ llvm::Value* Lifter::Impl::Test(Condition condition) {
     case Condition::G: return builder.CreateAnd(builder.CreateNot(GetFlag(Zf)), builder.CreateICmpEQ(GetFlag(Sf), GetFlag(Of)));
     case Condition::RcxZero: return builder.CreateICmpEQ(Gpr64(Rcx), builder.getInt64(0));
     case Condition::EcxZero: return builder.CreateICmpEQ(ReadPart(Rcx, 32), builder.getInt32(0));
+    case Condition::Loop: case Condition::LoopE: case Condition::LoopNe: {
+        auto* count = builder.CreateSub(Gpr64(Rcx), builder.getInt64(1));
+        SetGpr64(Rcx, count);
+        auto* nonzero = builder.CreateICmpNE(count, builder.getInt64(0));
+        if (condition == Condition::LoopE) return builder.CreateAnd(nonzero, GetFlag(Zf));
+        if (condition == Condition::LoopNe) return builder.CreateAnd(nonzero, builder.CreateNot(GetFlag(Zf)));
+        return nonzero;
+    }
     case Condition::None: break;
     }
     throw Unsupported{"condition"};
+}
+
+llvm::Value* Lifter::Impl::PackFlags() {
+    static const std::pair<Flag, unsigned> bits[] = {{Cf, 0}, {Pf, 2}, {Af, 4}, {Zf, 6}, {Sf, 7}, {Df, 10}, {Of, 11}};
+    llvm::Value* flags = builder.getInt64(0x202);
+    for (const auto& [flag, bit] : bits) flags = builder.CreateOr(flags, builder.CreateShl(builder.CreateZExt(GetFlag(flag), builder.getInt64Ty()), bit));
+    return flags;
+}
+
+void Lifter::Impl::UnpackFlags(llvm::Value* flags) {
+    static const std::pair<Flag, unsigned> bits[] = {{Cf, 0}, {Pf, 2}, {Af, 4}, {Zf, 6}, {Sf, 7}, {Df, 10}, {Of, 11}};
+    auto* wide = builder.CreateZExt(flags, builder.getInt64Ty());
+    for (const auto& [flag, bit] : bits) {
+        if (flag == Df && flags->getType()->getIntegerBitWidth() < 16) continue;
+        if (flag == Of && flags->getType()->getIntegerBitWidth() < 16) continue;
+        SetFlag(flag, builder.CreateTrunc(builder.CreateLShr(wide, bit), builder.getInt1Ty()));
+    }
+}
+
+void Lifter::Impl::RotateCarry(const Instruction& instruction) {
+    const auto bits = instruction.Bits(0);
+    auto* wide = Int(bits + 1);
+    auto* a = Read(instruction, 0);
+    llvm::Value* count = instruction.x86.op_count == 1 ? Const(bits, 1) : Resize(Read(instruction, 1), bits);
+    count = builder.CreateAnd(count, Const(bits, bits == 64 ? 63 : 31));
+    auto* nonzero = builder.CreateICmpNE(count, Const(bits, 0));
+    auto* rotation = builder.CreateZExt(builder.CreateURem(count, Const(bits, bits + 1)), wide);
+    auto* combined = builder.CreateOr(builder.CreateZExt(a, wide), builder.CreateShl(builder.CreateZExt(GetFlag(Cf), wide), bits));
+    const auto intrinsic = instruction.id == X86_INS_RCL ? llvm::Intrinsic::fshl : llvm::Intrinsic::fshr;
+    auto* rotated = builder.CreateIntrinsic(intrinsic, {wide}, {combined, combined, rotation});
+    auto* result = builder.CreateTrunc(rotated, Int(bits));
+    auto* carry = builder.CreateTrunc(builder.CreateLShr(rotated, bits), builder.getInt1Ty());
+    llvm::Value* overflow = nullptr;
+    if (instruction.id == X86_INS_RCL) overflow = builder.CreateXor(SignBit(result), carry);
+    else overflow = builder.CreateXor(SignBit(result), builder.CreateTrunc(builder.CreateLShr(result, bits - 2), builder.getInt1Ty()));
+    Write(instruction, 0, result);
+    SetFlag(Cf, builder.CreateSelect(nonzero, carry, GetFlag(Cf)));
+    SetFlag(Of, builder.CreateSelect(nonzero, overflow, GetFlag(Of)));
+}
+
+void Lifter::Impl::Enter(const Instruction& instruction) {
+    const auto size = static_cast<std::uint64_t>(instruction.Op(0).imm) & 0xffff;
+    const auto level = static_cast<unsigned>(instruction.Op(1).imm) & 31;
+    Push(Gpr64(Rbp));
+    auto* frame = Gpr64(Rsp);
+    for (unsigned i = 1; i < level; ++i) {
+        auto* rbp = builder.CreateSub(Gpr64(Rbp), builder.getInt64(8));
+        SetGpr64(Rbp, rbp);
+        Push(Load(builder.getInt64Ty(), rbp));
+    }
+    if (level > 0) Push(frame);
+    SetGpr64(Rbp, frame);
+    SetGpr64(Rsp, builder.CreateSub(Gpr64(Rsp), builder.getInt64(size)));
 }
 
 void Lifter::Impl::Push(llvm::Value* value) {
@@ -909,6 +970,32 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
     case X86_INS_POP:
         if (instruction.Op(0).size != 8) throw Unsupported{"16-bit pop"};
         Write(instruction, 0, Pop());
+        return;
+    case X86_INS_ENTER:
+        Enter(instruction);
+        return;
+    case X86_INS_RCL: case X86_INS_RCR:
+        RotateCarry(instruction);
+        return;
+    case X86_INS_LAHF: {
+        auto* flags = builder.CreateTrunc(PackFlags(), builder.getInt8Ty());
+        WritePart(Rax, 8, builder.CreateAnd(flags, builder.getInt8(static_cast<std::uint8_t>(0xd7))), 8);
+        return;
+    }
+    case X86_INS_SAHF:
+        UnpackFlags(ReadPart(Rax, 8, 8));
+        return;
+    case X86_INS_PUSHFQ:
+        Push(PackFlags());
+        return;
+    case X86_INS_POPFQ:
+        UnpackFlags(Pop());
+        return;
+    case X86_INS_XLATB:
+        WritePart(Rax, 8, Load(builder.getInt8Ty(), builder.CreateAdd(Gpr64(Rbx), builder.CreateZExt(ReadPart(Rax, 8), builder.getInt64Ty()))));
+        return;
+    case X86_INS_VCVTPH2PS: case X86_INS_VCVTPS2PH:
+        HalfFloat(instruction);
         return;
     case X86_INS_LEAVE:
         SetGpr64(Rsp, Gpr64(Rbp));
