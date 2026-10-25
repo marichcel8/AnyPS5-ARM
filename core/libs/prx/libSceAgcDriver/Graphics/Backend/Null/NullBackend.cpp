@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/Backend/Backend.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceOverlay.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
@@ -195,5 +196,30 @@ auto StorageTexture::NoteKeysFill(std::uint64_t, std::size_t, std::uint8_t) -> s
 auto StorageTexture::PendingSerial() -> std::uint64_t { return 0; }
 
 auto StorageTexture::StoreSmallPending(const char*) -> std::size_t { return 0; }
+
+auto StorageTexture::StoreReadbackBeforeLabel(const char*) -> void {}
+
+bool DrawPipelineEnabled() { return false; }
+
+void CountEmptyIndirectDraw(double) {}
+
+std::array<std::uint32_t, 8> DepthCopySourceWords(const DepthTarget&) { return {}; }
+
+void FinishLeaseWork() {}
+
+void ReportHostImports() {}
+
+PipelineLibraryCounters PipelineLibraryCountersOf(VkDevice) { return {}; }
+
+}
+
+namespace AgcDriver {
+
+void PerformanceCounters::AddDriverNanoseconds(std::uint64_t) {}
+
+PacketCounters& PacketCounters::ThisThread() {
+    thread_local PacketCounters counters;
+    return counters;
+}
 
 }
