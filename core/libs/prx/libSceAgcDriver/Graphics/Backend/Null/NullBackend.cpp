@@ -233,3 +233,13 @@ PacketCounters& PacketCounters::ThisThread() {
 }
 
 }
+
+extern "C" void AgcDriverTogglePerformanceOverlay_nid_postfix() {}
+
+extern "C" bool AgcDriverMinimalOverlayShown_nid_postfix() { return false; }
+
+extern "C" int AgcDriverOverlayCorner_nid_postfix() { return 0; }
+
+extern "C" std::uint64_t AgcDriverProcessFootprint_nid_postfix() { return 0; }
+
+extern "C" std::uint64_t AgcDriverGeneratedFrames_nid_postfix() { return 0; }
