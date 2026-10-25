@@ -65,6 +65,9 @@ extension AppModel {
         case .notifications: return [PanelCategory(id: "notifications", title: TS.text(.notifTitle), symbol: "bell", rows: notificationRows())]
         case .compat: return [PanelCategory(id: "compat", title: compatTitle, symbol: "person.3.sequence", rows: compatRows())]
         case .crashReport: return [PanelCategory(id: "report", title: TC.text(.reportKicker), symbol: "stethoscope", rows: crashReportRows())]
+        case .findPlayers: return findPlayersCategories()
+        case .gameHub: return hubCategories()
+        case .lfgPost: return [PanelCategory(id: "post", title: FP.text(.findPlayers), symbol: "plus.bubble", rows: lfgPostRows())]
         case .confirmUninstall:
             guard let game = selectedGame else { return [] }
             return [PanelCategory(id: "confirm", title: T.text(.uninstall), symbol: "trash", rows: [
@@ -437,6 +440,9 @@ extension AppModel {
     // MARK: Panel input
 
     /// Moves through the open panel; returns whether the command was used.
+    /// Panels with categories on the left (Settings, Find players, a game's hub).
+    var overlayHasCategories: Bool { overlay == .settings || overlay == .findPlayers || overlay == .gameHub }
+
     func panelCommand(_ command: Command) -> Bool {
         let categories = panelCategories()
         guard !categories.isEmpty else { return false }
@@ -457,8 +463,8 @@ extension AppModel {
             if command == .back || command == .left { leaveRows(single) }
             return true
         }
-        panelRow = min(panelRow, rows.count - 1)
-        if !rows[panelRow].focusable, let first = rows.firstIndex(where: \.focusable) { panelRow = first }
+        focusRow(focusedRow(in: rows), in: rows)
+        if !rows[panelRow].focusable, let first = rows.firstIndex(where: \.focusable) { focusRow(first, in: rows) }
         let row = rows[panelRow]
         switch command {
         case .up: movePanelRow(-1, rows)
@@ -489,7 +495,7 @@ extension AppModel {
 
     private func enterRows(_ rows: [PanelRow]) {
         guard let first = rows.firstIndex(where: \.focusable) else { return }
-        panelRow = first
+        focusRow(first, in: rows)
         panelInRows = true
         Sounds.shared.play(.move)
     }
@@ -504,7 +510,7 @@ extension AppModel {
         var next = panelRow + delta
         while rows.indices.contains(next) && !rows[next].focusable { next += delta }
         guard rows.indices.contains(next) else { return }
-        panelRow = next
+        focusRow(next, in: rows)
         Sounds.shared.play(.move)
     }
 
@@ -551,6 +557,8 @@ extension AppModel {
 
 /// The settings screen: categories on the left, their rows on the right.
 struct SettingsPanel: View {
+    var title = T.text(.settings)
+    var subtitle: String?
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
 
@@ -559,7 +567,11 @@ struct SettingsPanel: View {
         let current = categories.indices.contains(model.panelCategory) ? categories[model.panelCategory] : nil
         HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 6 * scale) {
-                Text(T.text(.settings)).font(.display(40 * scale, .light)).foregroundStyle(.white).padding(.bottom, 26 * scale)
+                Text(title).font(.display(40 * scale, .light)).foregroundStyle(.white).lineLimit(2).minimumScaleFactor(0.6)
+                    .padding(.bottom, subtitle == nil ? 26 * scale : 0)
+                if let subtitle {
+                    Text(subtitle).font(.display(15 * scale)).foregroundStyle(.white.opacity(0.6)).padding(.bottom, 26 * scale)
+                }
                 ForEach(Array(categories.enumerated()), id: \.element.id) { index, category in
                     let selected = index == model.panelCategory
                     let focused = selected && !model.panelInRows
@@ -585,7 +597,7 @@ struct SettingsPanel: View {
             .frame(width: 330 * scale)
             .padding(.trailing, 36 * scale)
             if let current {
-                RowList(rows: current.rows, focusedRow: model.panelInRows ? model.panelRow : nil)
+                RowList(rows: current.rows, focusedRow: model.panelInRows ? model.focusedRow(in: current.rows) : nil)
                     .id(current.id)
                     .transition(.opacity.combined(with: .offset(x: 18 * scale)))
             }
@@ -613,7 +625,7 @@ struct SidePanel: View {
             VStack(alignment: .leading, spacing: 8 * scale) {
                 Text(title).font(.display(30 * scale, .light)).foregroundStyle(.white).lineLimit(2)
                 if let subtitle { Text(subtitle).font(.display(15 * scale)).foregroundStyle(.white.opacity(0.6)) }
-                RowList(rows: rows, focusedRow: model.panelRow)
+                RowList(rows: rows, focusedRow: model.focusedRow(in: rows))
                     .padding(.top, 18 * scale)
             }
             .padding(36 * scale)
@@ -651,8 +663,8 @@ struct RowList: View {
                 RowView(row: row, focused: focusedRow == index)
                     .id(row.id)
                     .onTapGesture {
-                        if model.overlay == .settings { model.panelInRows = true }
-                        model.panelRow = index
+                        if model.overlayHasCategories { model.panelInRows = true }
+                        model.focusRow(index, in: rows)
                         model.activate(row)
                     }
             }

@@ -120,6 +120,12 @@ enum Overlay: Equatable {
     case compat
     /// A game's last start: why it stopped, the report to export and the issue to open.
     case crashReport
+    /// Find players: the looking-for-group board, the user's posts, Live now and public parties, people.
+    case findPlayers
+    /// "Find players for <game>": a post being written.
+    case lfgPost
+    /// One game's hub: who plays it now, posts, public share plays and parties, its players.
+    case gameHub
 }
 
 struct Toast: Identifiable, Equatable {
@@ -143,9 +149,27 @@ final class AppModel: ObservableObject {
     @Published private(set) var scanning = false
     @Published var selected = 0
     @Published var focus = HomeFocus.tiles
-    @Published var overlay: Overlay?
+    @Published var overlay: Overlay? {
+        didSet { if oldValue != overlay { discoverOverlayChanged() } }
+    }
     @Published var panelCategory = 0
-    @Published var panelRow = 0
+    @Published var panelRow = 0 {
+        didSet { if !keepingFocus { panelFocusID = nil } }
+    }
+    /// The item the panel's focus is on, so rows coming in above it do not move it to another.
+    var panelFocusID: String?
+    private var keepingFocus = false
+
+    /// Focuses row `index` of `rows`, remembering which item that is.
+    func focusRow(_ index: Int, in rows: [PanelRow]) {
+        keepingFocus = true
+        panelRow = index
+        panelFocusID = rows.indices.contains(index) ? rows[index].id : nil
+        keepingFocus = false
+    }
+
+    /// Where the focused item is in `rows` now.
+    func focusedRow(in rows: [PanelRow]) -> Int { ListFocus.index(of: panelFocusID, in: rows.map(\.id), fallback: panelRow) }
     @Published var panelInRows = false
     /// The pad action waiting for a key in the controls panel.
     @Published var capturing: PadAction?
@@ -475,6 +499,8 @@ final class AppModel: ObservableObject {
     @Published var gameSession: TogetherGameSession?
     @Published var gameInvites: [TogetherGameInvite] = []
     var openingSession = false
+    /// Find players, Live now, public parties, discovery and game hubs.
+    @Published var discover = DiscoverState()
     /// Share play: what the friends panel shows, and the running share play's pieces.
     @Published var share = ShareState()
     var shareSession: ShareSession?
