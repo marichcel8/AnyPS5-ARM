@@ -48,8 +48,8 @@ asm(".text\n"
     "    jmp *0(%rdi)\n");
 #elif defined(__aarch64__)
 // Translated guest code reaches these two through aps5_call, which the translator runtime
-// (tools/translator/runtime/Runtime.cpp) recognizes by address: setjmp has to run in its own frame
-// and longjmp has to unwind the native frames. Any other caller has no guest state to save.
+// (tools/translator/runtime/Runtime.cpp) recognizes them by address: it saves the native registers of
+// the translated caller for setjmp and resumes them for longjmp. Any other caller has no guest state.
 extern "C" {
 
 int APS5_VABI setjmp_nid_postfix(void*) {
