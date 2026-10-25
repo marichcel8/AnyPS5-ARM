@@ -1,7 +1,7 @@
 typedef unsigned long long u64;
 int puts(const char*); void exit(int);
-int setjmp(void*) __attribute__((returns_twice));
-void longjmp(void*, int) __attribute__((noreturn));
+[[gnu::returns_twice]] int setjmp(void*);
+[[noreturn]] void longjmp(void*, int);
 
 static int first = -1;
 static u64 outer[12], inner[12], spare[12];
@@ -11,7 +11,7 @@ static void same(int id, long long got, long long want) {
     if (got != want && first < 0) first = id;
 }
 
-__attribute__((noinline)) static int descend(int levels, int value) {
+[[gnu::noinline]] static int descend(int levels, int value) {
     volatile int pad[8];
     pad[0] = levels;
     if (levels == 0) {
@@ -22,7 +22,7 @@ __attribute__((noinline)) static int descend(int levels, int value) {
     return below + pad[0];
 }
 
-__attribute__((noinline)) static void jump_if(int condition, u64* buffer, int value) {
+[[gnu::noinline]] static void jump_if(int condition, u64* buffer, int value) {
     if (condition) longjmp(buffer, value);
 }
 
