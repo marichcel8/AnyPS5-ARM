@@ -113,6 +113,8 @@ auto Recorder::Active() -> Recorder* { return nullptr; }
 
 auto Recorder::CloseLabelGroup(std::uint64_t) -> void {}
 
+auto Recorder::LastWriteNote(std::uint64_t, std::size_t) const -> std::uint64_t { return 0; }
+
 auto Recorder::CountRecordedWork() -> void {}
 
 auto Recorder::CountSamples() -> void {}
@@ -200,6 +202,14 @@ auto StorageTexture::StoreSmallPending(const char*) -> std::size_t { return 0; }
 auto StorageTexture::StoreReadbackBeforeLabel(const char*) -> void {}
 
 bool DrawPipelineEnabled() { return false; }
+
+std::optional<MultisampledSingleClear> MatchMultisampledSingleClear(std::span<const std::uint32_t>, std::span<const std::uint32_t>, const std::array<std::uint32_t, 3>&) { return std::nullopt; }
+
+bool TakeMultisampledSingleClear(std::span<const std::uint32_t>, std::span<const std::uint32_t>, const std::array<std::uint32_t, 3>&) { return false; }
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> PipelinedColorMetadataPassWrites(const ColorMetadataPass&) { return {}; }
+
+bool ShaderStoresThroughAddresses(const ShaderRecompiler::SharedSpirv&) { return false; }
 
 void CountEmptyIndirectDraw(double) {}
 

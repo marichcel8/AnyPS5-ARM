@@ -1822,6 +1822,21 @@ auto VulkanDevice::WaitForPipelineJournalReplay() -> void {}
 
 auto VulkanDevice::SavePipelineCache() -> void {}
 
+auto VulkanDevice::SubmittedEpoch() const -> std::uint64_t {
+    auto& s = *state;
+    if (s.sync == nullptr) return 0;
+    std::lock_guard lock(s.mutex);
+    return s.lastSerial;
+}
+
+auto VulkanDevice::GpuCopyPossible(std::uint64_t, std::uint64_t, std::size_t) const -> bool { return false; }
+
+auto VulkanDevice::HostSampleOrder(const Graphics::State&) const -> Graphics::SampleOrder { return {}; }
+
+auto VulkanDevice::RealFramePending() const -> bool { return false; }
+
+auto VulkanDevice::graphicsContext() const -> Graphics::Context { return {}; }
+
 auto VulkanDevice::SealPassWriteOnly() -> void {}
 
 auto VulkanDevice::AcquireRealImage() -> bool { return false; }
