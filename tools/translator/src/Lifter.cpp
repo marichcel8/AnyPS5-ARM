@@ -731,24 +731,30 @@ void Lifter::Impl::Exchange(const Instruction& instruction) {
     else WritePart(Rax, bits, builder.CreateSelect(equal, expected, old));
 }
 
-// stos and movs, with or without rep; the direction flag picks the step sign.
 void Lifter::Impl::String(const Instruction& instruction) {
-    const bool move = instruction.id == X86_INS_MOVSB || instruction.id == X86_INS_MOVSW || instruction.id == X86_INS_MOVSD || instruction.id == X86_INS_MOVSQ;
+    const auto id = instruction.id;
+    const bool move = id == X86_INS_MOVSB || id == X86_INS_MOVSW || id == X86_INS_MOVSD || id == X86_INS_MOVSQ;
+    const bool compare = id == X86_INS_CMPSB || id == X86_INS_CMPSW || id == X86_INS_CMPSD || id == X86_INS_CMPSQ;
+    const bool scan = id == X86_INS_SCASB || id == X86_INS_SCASW || id == X86_INS_SCASD || id == X86_INS_SCASQ;
+    const bool load = id == X86_INS_LODSB || id == X86_INS_LODSW || id == X86_INS_LODSD || id == X86_INS_LODSQ;
     const auto bytes = instruction.Op(0).size;
+    const auto bits = bytes * 8u;
     auto step = [&]() {
         auto* delta = builder.CreateSelect(GetFlag(Df), builder.getInt64(0 - static_cast<std::uint64_t>(bytes)), builder.getInt64(bytes));
         auto* rdi = Gpr64(Rdi);
-        if (move) {
-            auto* rsi = Gpr64(Rsi);
-            Store(Load(Int(bytes * 8), rsi), rdi);
-            SetGpr64(Rsi, builder.CreateAdd(rsi, delta));
-        } else {
-            Store(ReadPart(Rax, bytes * 8), rdi);
-        }
-        SetGpr64(Rdi, builder.CreateAdd(rdi, delta));
+        auto* rsi = Gpr64(Rsi);
+        if (move) Store(Load(Int(bits), rsi), rdi);
+        else if (compare) Sub(Load(Int(bits), rsi), Load(Int(bits), rdi), builder.getFalse());
+        else if (scan) Sub(ReadPart(Rax, bits), Load(Int(bits), rdi), builder.getFalse());
+        else if (load && bits == 32) SetGpr64(Rax, builder.CreateZExt(Load(Int(bits), rsi), builder.getInt64Ty()));
+        else if (load) WritePart(Rax, bits, Load(Int(bits), rsi));
+        else Store(ReadPart(Rax, bits), rdi);
+        if (move || compare || load) SetGpr64(Rsi, builder.CreateAdd(rsi, delta));
+        if (!load) SetGpr64(Rdi, builder.CreateAdd(rdi, delta));
     };
-    if (instruction.Prefixed(X86_PREFIX_REPNE)) throw Unsupported{"repne " + instruction.mnemonic};
-    if (!instruction.Prefixed(X86_PREFIX_REP)) {
+    const bool repne = instruction.Prefixed(X86_PREFIX_REPNE);
+    if (repne && !compare && !scan) throw Unsupported{"repne " + instruction.mnemonic};
+    if (!repne && !instruction.Prefixed(X86_PREFIX_REP)) {
         step();
         return;
     }
@@ -761,7 +767,8 @@ void Lifter::Impl::String(const Instruction& instruction) {
     builder.SetInsertPoint(body);
     step();
     SetGpr64(Rcx, builder.CreateSub(Gpr64(Rcx), builder.getInt64(1)));
-    builder.CreateBr(header);
+    if (compare || scan) BranchIf(repne ? GetFlag(Zf) : builder.CreateNot(GetFlag(Zf)), done, header);
+    else builder.CreateBr(header);
     builder.SetInsertPoint(done);
 }
 
@@ -926,7 +933,24 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
         return;
     case X86_INS_STOSB: case X86_INS_STOSW: case X86_INS_STOSD: case X86_INS_STOSQ:
     case X86_INS_MOVSB: case X86_INS_MOVSW: case X86_INS_MOVSQ:
+    case X86_INS_CMPSB: case X86_INS_CMPSW: case X86_INS_CMPSQ:
+    case X86_INS_SCASB: case X86_INS_SCASW: case X86_INS_SCASD: case X86_INS_SCASQ:
+    case X86_INS_LODSB: case X86_INS_LODSW: case X86_INS_LODSD: case X86_INS_LODSQ:
         String(instruction);
+        return;
+    case X86_INS_CMPSD:
+        if (x86.op_count == 2 && instruction.Memory(0) && instruction.Memory(1)) {
+            String(instruction);
+            return;
+        }
+        if (EmitVectorFloat(instruction)) return;
+        throw Unsupported{instruction.mnemonic};
+    case X86_INS_CPUID:
+        builder.CreateCall(module->getOrInsertFunction("aps5_cpuid", llvm::FunctionType::get(builder.getVoidTy(), {builder.getPtrTy()}, false)), {guest});
+        return;
+    case X86_INS_XGETBV:
+        SetGpr64(Rax, builder.getInt64(7));
+        SetGpr64(Rdx, builder.getInt64(0));
         return;
     case X86_INS_MOVSD:
         // movsd is both the string move and the scalar double move; only the string form is lifted.

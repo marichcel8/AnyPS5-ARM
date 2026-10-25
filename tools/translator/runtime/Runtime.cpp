@@ -258,6 +258,62 @@ int main(int argc, char** argv, char** envp) {
 
 extern "C" {
 
+void aps5_cpuid(GuestState* state) {
+    const auto leaf = static_cast<std::uint32_t>(state->gpr[Rax]);
+    const auto subleaf = static_cast<std::uint32_t>(state->gpr[Rcx]);
+    std::uint32_t a = 0, b = 0, c = 0, d = 0;
+    static const char brand[49] = "AnyPS5 x86-64 (AMD Zen 2 compatible)";
+    switch (leaf) {
+    case 0:
+        a = 0xd;
+        b = 0x68747541;
+        d = 0x69746e65;
+        c = 0x444d4163;
+        break;
+    case 1:
+        a = 0x00870f10;
+        b = 0x00080800;
+        c = (1u << 0) | (1u << 9) | (1u << 12) | (1u << 13) | (1u << 19) | (1u << 20) | (1u << 23) | (1u << 26) | (1u << 27) | (1u << 28);
+        d = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) | (1u << 19) | (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
+        break;
+    case 7:
+        if (subleaf == 0) b = (1u << 3) | (1u << 5) | (1u << 8);
+        break;
+    case 0xd:
+        if (subleaf == 0) {
+            a = 7;
+            b = 0x340;
+            c = 0x340;
+        }
+        break;
+    case 0x80000000:
+        a = 0x80000004;
+        b = 0x68747541;
+        d = 0x69746e65;
+        c = 0x444d4163;
+        break;
+    case 0x80000001:
+        c = (1u << 0) | (1u << 5);
+        d = (1u << 11) | (1u << 20) | (1u << 29);
+        break;
+    case 0x80000002: case 0x80000003: case 0x80000004: {
+        std::uint32_t words[4];
+        std::memcpy(words, brand + (leaf - 0x80000002) * 16, 16);
+        a = words[0];
+        b = words[1];
+        c = words[2];
+        d = words[3];
+        break;
+    }
+    default:
+        break;
+    }
+    state->gpr[Rax] = a;
+    state->gpr[Rbx] = b;
+    state->gpr[Rcx] = c;
+    state->gpr[Rdx] = d;
+}
+
 double aps5_x87_load80(const std::uint8_t* source) {
     std::uint64_t mantissa = 0;
     std::uint16_t top = 0;
