@@ -269,6 +269,36 @@ void deadzoneShapesSticks() {
 
 }
 
+bool hasKey(const Pad::InputConfiguration& configuration, SDL_Scancode key, Pad::PadButton button) {
+    for (const auto& binding : configuration.bindings) {
+        if (binding.key == key && binding.control == Pad::InputControl::Button && binding.button == button) return true;
+    }
+    return false;
+}
+
+void layouts() {
+    useConfig("Cross = KEY:F\n");
+    auto both = Pad::LoadInputLayouts();
+    require(both.classic.startLayout == Pad::Layout::Classic, "the classic layout starts by default");
+    require(hasKey(both.classic, SDL_SCANCODE_F, Pad::PadButton::Cross), "top-level lines apply to the classic layout");
+    require(!hasKey(both.shooter, SDL_SCANCODE_F, Pad::PadButton::Cross), "top-level lines do not touch the shooter layout");
+    require(hasKey(both.shooter, SDL_SCANCODE_SPACE, Pad::PadButton::Cross), "the shooter layout jumps on Space");
+    require(hasKey(both.shooter, SDL_SCANCODE_UNKNOWN, Pad::PadButton::R2) == false, "mouse bindings carry no key");
+    useConfig("Layout = Shooter\n[Shooter]\nCross = KEY:J\n[Classic]\nCircle = KEY:K\n");
+    both = Pad::LoadInputLayouts();
+    require(both.shooter.startLayout == Pad::Layout::Shooter, "Layout selects the starting layout");
+    require(hasKey(both.shooter, SDL_SCANCODE_J, Pad::PadButton::Cross) && !hasKey(both.shooter, SDL_SCANCODE_SPACE, Pad::PadButton::Cross), "a Shooter section replaces the shooter binding");
+    require(hasKey(both.classic, SDL_SCANCODE_K, Pad::PadButton::Circle), "a Classic section overrides the classic layout");
+    bool onF8 = false;
+    for (const auto& binding : both.classic.bindings) onF8 = onF8 || (binding.control == Pad::InputControl::SwitchLayout && binding.key == SDL_SCANCODE_F8);
+    require(onF8, "F8 switches layouts");
+    require(rejects("Layout = Both\n"), "an unknown layout is rejected");
+    require(rejects("[Gamepad]\n"), "an unknown section is rejected");
+    require(rejects("SwitchLayout = MOUSE:Left\n"), "SwitchLayout accepts only keys");
+}
+
+}
+
 int main() try {
     root = std::filesystem::temp_directory_path() / ("anyps5_input_mapping-" + std::to_string(std::random_device{}()));
     std::filesystem::create_directories(root);
@@ -287,6 +317,7 @@ int main() try {
     nonAsciiPaths();
     deadzoneOffMatchesRawSticks();
     deadzoneShapesSticks();
+    layouts();
     std::filesystem::remove_all(root);
     std::cout << "input mapping tests passed\n";
     return 0;

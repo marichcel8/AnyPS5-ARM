@@ -83,7 +83,13 @@ std::uint32_t ScriptedButtons() {
 }
 #include "prx/libSceIme/include/ImeInput.hpp"
 
-PadInput::PadInput() : PadInput(Pad::LoadInputMapping()) {
+PadInput::PadInput() : PadInput(Pad::LoadInputLayouts()) {
+}
+
+PadInput::PadInput(Pad::InputLayouts layouts) : keyboardMouse(std::move(layouts)) {
+    mouseLookArmed = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
+    for (auto& channel : RemotePad::OpenAllFromEnvironment()) remotes.push_back(Remote{std::move(channel)});
+    openAvailableControllers();
 }
 
 PadInput::PadInput(Pad::InputConfiguration configuration) : keyboardMouse(std::move(configuration)) {
@@ -337,7 +343,10 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
         return;
     }
     if (event.type == SDL_WINDOWEVENT) {
-        if (keyboardMouse.HandleEvent(event, std::chrono::steady_clock::now()).releaseMouse) setMouseMode(false);
+        if (keyboardMouse.HandleEvent(event, std::chrono::steady_clock::now()).releaseMouse) {
+            setMouseMode(false);
+            mouseLookArmed = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
+        }
         publish(window.FrameNumber());
         return;
     }
@@ -349,11 +358,21 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
     if (!input || ignoreInput) return;
     if (event.type == SDL_KEYDOWN && ImeCapturesKeyboard_nid_postfix()) return;
     keyboardMouse.SetTitleReadsMouse(MouseIsOpen_nid_no_patch());
+    if (mouseLookArmed && (event.type == SDL_KEYDOWN || event.type == SDL_MOUSEBUTTONDOWN) && !keyboardMouse.MouseMode() && !MouseIsOpen_nid_no_patch()) {
+        mouseLookArmed = false;
+        setMouseMode(true);
+    }
     const auto requests = keyboardMouse.HandleEvent(event, std::chrono::steady_clock::now());
     if (requests.toggleFullscreen && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) window.ToggleFullscreen();
     if (requests.togglePerformanceOverlay && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) AgcDriverTogglePerformanceOverlay_nid_postfix();
     if (requests.screenshot && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) AgcDriverRequestScreenshot_nid_postfix();
     if (requests.toggleMouse) setMouseMode(!keyboardMouse.MouseMode());
+    if (requests.switchLayout && keyboardMouse.SwitchLayout()) {
+        const bool shooter = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
+        APS5_LOG_OUT("Pad: input layout %s", shooter ? "Shooter" : "Classic");
+        mouseLookArmed = false;
+        if (shooter != keyboardMouse.MouseMode() && !MouseIsOpen_nid_no_patch()) setMouseMode(shooter);
+    }
     if (event.type != SDL_MOUSEMOTION) publish(window.FrameNumber());
 }
 
