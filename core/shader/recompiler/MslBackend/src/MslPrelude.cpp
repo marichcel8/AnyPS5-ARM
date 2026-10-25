@@ -1079,6 +1079,7 @@ std::string Prelude(const State& state) {
         if (has(Formatted)) {
             if (has(GuestBuffers)) {
                 auto direct = Replace(Replace(std::string(FormatAccessText), "NAME", ""), "BAD", "{}");
+                direct = Replace(direct, "READ(bytes[part], packed ? 4u : bits >> 3u)", "(packed || bits == 32u ? aps5_buffer_load(c, element, r, bytes[part], 4u) : aps5_buffer_load(c, element, r, bytes[part] & ~3u, 4u) >> ((bytes[part] & 3u) * 8u))");
                 direct = Replace(direct, "READ(", "aps5_buffer_load(c, element, r, ");
                 text += Replace(direct, "WRITE(", "aps5_buffer_store(c, element, r, ");
             }

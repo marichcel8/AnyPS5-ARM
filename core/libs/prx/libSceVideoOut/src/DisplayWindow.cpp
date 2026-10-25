@@ -1,17 +1,21 @@
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
+#include "prx/libSceVideoOut/include/StatsOverlay.hpp"
+#include "prx/libSceVideoOut/include/Telemetry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/AspectFit.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libkernel/AppMetadata/include/AppMetadata.hpp"
-#include "prx/libkernel/Time/include/Time.hpp"
 #include "Decoder/Png.hpp"
 #include "SDL_vulkan.h"
 #ifdef ANYPS5_GPU_BACKEND_METAL
 #include "SDL_metal.h"
 #endif
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 #ifdef _WIN32
 #include "SDL_syswm.h"
@@ -23,6 +27,25 @@ namespace {
 
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("DisplayWindow: ") + reason);
+}
+
+// ANYPS5_WINDOW_SIZE sets the share of the usable display the first window takes, as a percent
+// (1 to 100, DisplayWindowInitialSizePercent by default); ANYPS5_FULLSCREEN=1 opens it full screen.
+std::uint32_t initialSizePercent() {
+    const char* text = std::getenv("ANYPS5_WINDOW_SIZE");
+    if (text == nullptr || *text == '\0') return DisplayWindowInitialSizePercent;
+    char* end = nullptr;
+    const auto value = std::strtoul(text, &end, 10);
+    if (*end != '\0' || value == 0 || value > 100) throw std::runtime_error("DisplayWindow: ANYPS5_WINDOW_SIZE must be a percent from 1 to 100, not '" + std::string(text) + "'");
+    return static_cast<std::uint32_t>(value);
+}
+
+bool startsFullscreen() {
+    const char* text = std::getenv("ANYPS5_FULLSCREEN");
+    const std::string_view value = text != nullptr ? text : "";
+    if (value.empty() || value == "0") return false;
+    if (value == "1") return true;
+    throw std::runtime_error("DisplayWindow: ANYPS5_FULLSCREEN must be 1 or 0, not '" + std::string(value) + "'");
 }
 
 void applyAppIcon(SDL_Window* window) {
@@ -55,10 +78,10 @@ void DisplayWindow::Ensure(std::uint32_t sourceWidth, std::uint32_t sourceHeight
 void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight) {
     SDL_Rect usable{};
     require(SDL_GetDisplayUsableBounds(0, &usable) == 0, SDL_GetError());
-    require(DisplayWindowInitialSizePercent > 0 && DisplayWindowInitialSizePercent <= 100, "initial window size percent must be between 1 and 100");
+    const auto percent = initialSizePercent();
     require(usable.w > 0 && usable.h > 0, "usable display extent must be positive");
-    const auto boundsWidth = static_cast<std::uint32_t>(static_cast<std::uint64_t>(usable.w) * DisplayWindowInitialSizePercent / 100);
-    const auto boundsHeight = static_cast<std::uint32_t>(static_cast<std::uint64_t>(usable.h) * DisplayWindowInitialSizePercent / 100);
+    const auto boundsWidth = static_cast<std::uint32_t>(static_cast<std::uint64_t>(usable.w) * percent / 100);
+    const auto boundsHeight = static_cast<std::uint32_t>(static_cast<std::uint64_t>(usable.h) * percent / 100);
     const auto initialSize = AgcDriver::ComputeContainSize_nid_postfix(sourceWidth, sourceHeight, boundsWidth, boundsHeight, true);
     require(initialSize.width >= DisplayWindowMinimumWidth && initialSize.height >= DisplayWindowMinimumHeight, "initial window extent is smaller than the minimum");
     const auto title = GetAppTitle_nid_postfix();
@@ -74,6 +97,7 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     SDL_SetWindowMinimumSize(window, static_cast<int>(DisplayWindowMinimumWidth), static_cast<int>(DisplayWindowMinimumHeight));
     applyAppIcon(window);
     installSubclass();
+    if (startsFullscreen()) require(SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP) == 0, SDL_GetError());
 }
 
 void DisplayWindow::updateAspectRatio(std::uint32_t sourceWidth, std::uint32_t sourceHeight) {
@@ -118,22 +142,23 @@ void DisplayWindow::DrawableSize(std::uint32_t& width, std::uint32_t& height) co
 void DisplayWindow::UpdateTitle() {
     require(window != nullptr, "window must exist before updating title");
     static const AppTitle title = GetAppTitle_nid_postfix();
-    static std::uint64_t fpsStart = sceKernelGetProcessTimeCounter();
-    static std::uint64_t frameNum = 0;
+    static auto fpsStart = std::chrono::steady_clock::now();
     static std::uint64_t fpsFrames = 0;
     static double currentFps = 0.0;
-    const auto now = sceKernelGetProcessTimeCounter();
-    const auto frequency = sceKernelGetProcessTimeCounterFrequency();
+    const auto now = std::chrono::steady_clock::now();
     frameNum++;
     fpsFrames++;
-    if (now - fpsStart >= frequency * 2) {
-        currentFps = static_cast<double>(fpsFrames) * static_cast<double>(frequency) / static_cast<double>(now - fpsStart);
+    const double elapsed = std::chrono::duration<double>(now - fpsStart).count();
+    if (elapsed >= 2.0) {
+        currentFps = static_cast<double>(fpsFrames) / elapsed;
         fpsStart = now;
         fpsFrames = 0;
     }
     char text[160];
     std::snprintf(text, sizeof(text), "%s | FPS: %.2f (%llu)", title.value, currentFps, static_cast<unsigned long long>(frameNum));
     SDL_SetWindowTitle(window, text);
+    StatsOverlay::Present(window);
+    if (auto* telemetry = VideoOutTelemetry::Instance(); telemetry != nullptr && (frameNum == 1 || frameNum % 30 == 0)) telemetry->EmitPresent(frameNum, currentFps);
 }
 
 void DisplayWindow::installSubclass() {

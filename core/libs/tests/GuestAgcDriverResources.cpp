@@ -37,6 +37,9 @@ int APS5_VABI sceAgcDriverGetSubmitValidationConfig(void*);
 int APS5_VABI sceAgcDriverRequestCaptureStart(const char*);
 int APS5_VABI sceAgcDriverRequestCaptureStop(void);
 int APS5_VABI sceAgcDriverTriggerCapture(void);
+int APS5_VABI sceAgcDriverRegisterOwnerForSystem();
+int APS5_VABI sceAgcDriverInitResourceRegistrationInterface();
+int APS5_VABI sceAgcDriverSetResourceRegistrationInfo();
 }
 
 static constexpr int Unavailable = static_cast<int>(0x8A6C9018);
@@ -98,8 +101,25 @@ int main() {
     Require(sceAgcDriverFindResourcesPublic(nullptr, nullptr) == Unavailable);
     Require(sceAgcDriverUnregisterAllResourcesForOwner(owner) == Unavailable);
     Require(std::string_view(name) == "unchanged");
+    constexpr int InvalidStream = static_cast<int>(0x8A6C0033);
+    constexpr int NullStream = static_cast<int>(0x8A6C0035);
+    constexpr int StreamNotRegistered = static_cast<int>(0x8A6C003A);
+    for (const std::uint32_t id : {0u, 32u, 0x101u, 0xffffffffu}) {
+        Require(sceAgcDriverRegisterWorkloadStream(id, memory) == InvalidStream);
+        Require(sceAgcDriverRegisterWorkloadStream(id, nullptr) == InvalidStream);
+        Require(sceAgcDriverUnregisterWorkloadStream(id) == InvalidStream);
+    }
+    Require(sceAgcDriverRegisterWorkloadStream(2u, nullptr) == NullStream);
+    Require(sceAgcDriverUnregisterWorkloadStream(2u) == StreamNotRegistered);
+    Require(sceAgcDriverRegisterWorkloadStream(1u, memory) == 0);
+    Require(sceAgcDriverRegisterWorkloadStream(1u, memory) == InvalidStream);
+    Require(sceAgcDriverRegisterWorkloadStream(1u, nullptr) == InvalidStream);
+    Require(sceAgcDriverRegisterWorkloadStream(31u, reinterpret_cast<const char*>(memory) + 1) == 0);
+    Require(sceAgcDriverUnregisterWorkloadStream(1u) == 0);
+    Require(sceAgcDriverUnregisterWorkloadStream(1u) == StreamNotRegistered);
     Require(sceAgcDriverRegisterWorkloadStream(1u, memory) == 0);
     Require(sceAgcDriverUnregisterWorkloadStream(1u) == 0);
+    Require(sceAgcDriverUnregisterWorkloadStream(31u) == 0);
     Require(!sceAgcDriverIsCaptureInProgress());
     constexpr int debugUnavailable = static_cast<int>(0x8a6c1000u);
     Require(sceAgcDriverGetShaderDebuggingStatus() == 1);
@@ -119,4 +139,7 @@ int main() {
     Require(!sceAgcDriverIsCaptureInProgress());
     Require(!sceAgcDriverIsTraceInProgress());
     Require(!sceAgcDriverIsSubmitValidationEnabled());
+    Require(sceAgcDriverRegisterOwnerForSystem() == Unavailable);
+    Require(sceAgcDriverInitResourceRegistrationInterface() == Unavailable);
+    Require(sceAgcDriverSetResourceRegistrationInfo() == 0);
 }

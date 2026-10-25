@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/Backend/Backend.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceOverlay.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
@@ -102,7 +103,7 @@ void NoteColorMetadataFill(std::uint64_t, std::size_t, std::uint32_t) {}
 
 void NoteDepthMetadataFill(std::uint64_t, std::size_t, std::uint32_t) {}
 
-void NoteHtileDepthClear(std::uint64_t, std::size_t, std::size_t) {}
+bool NoteHtileDepthClear(std::uint64_t, std::size_t, std::size_t) { return false; }
 
 void NoteKeysFillOnGpu(std::uint64_t, std::size_t, DccKeys) {}
 
@@ -111,6 +112,8 @@ void NoteMemoryValueFill(const MemoryValueFill&) {}
 auto Recorder::Active() -> Recorder* { return nullptr; }
 
 auto Recorder::CloseLabelGroup(std::uint64_t) -> void {}
+
+auto Recorder::LastWriteNote(std::uint64_t, std::size_t) const -> std::uint64_t { return 0; }
 
 auto Recorder::CountRecordedWork() -> void {}
 
@@ -188,7 +191,7 @@ auto StorageTexture::DiscardPendingInside(std::uint64_t, std::size_t) -> std::si
 
 auto StorageTexture::FillClear(std::span<const std::uint32_t, 4>, std::uint32_t, const char*&, bool) -> bool { return false; }
 
-auto StorageTexture::FlushPending(std::uint64_t, std::size_t, const StorageTexture*, const char*, PublishScope, bool*) -> bool { return false; }
+auto StorageTexture::FlushPending(std::uint64_t, std::size_t, const StorageTexture*, const char*, PublishScope, bool*, bool) -> bool { return false; }
 
 auto StorageTexture::NoteKeysFill(std::uint64_t, std::size_t, std::uint8_t) -> std::size_t { return 0; }
 
@@ -196,4 +199,47 @@ auto StorageTexture::PendingSerial() -> std::uint64_t { return 0; }
 
 auto StorageTexture::StoreSmallPending(const char*) -> std::size_t { return 0; }
 
+auto StorageTexture::StoreReadbackBeforeLabel(const char*) -> void {}
+
+bool DrawPipelineEnabled() { return false; }
+
+std::optional<MultisampledSingleClear> MatchMultisampledSingleClear(std::span<const std::uint32_t>, std::span<const std::uint32_t>, const std::array<std::uint32_t, 3>&) { return std::nullopt; }
+
+bool TakeMultisampledSingleClear(std::span<const std::uint32_t>, std::span<const std::uint32_t>, const std::array<std::uint32_t, 3>&) { return false; }
+
+std::vector<std::pair<std::uint64_t, std::uint64_t>> PipelinedColorMetadataPassWrites(const ColorMetadataPass&) { return {}; }
+
+bool ShaderStoresThroughAddresses(const ShaderRecompiler::SharedSpirv&) { return false; }
+
+void CountEmptyIndirectDraw(double) {}
+
+std::array<std::uint32_t, 8> DepthCopySourceWords(const DepthTarget&) { return {}; }
+
+void FinishLeaseWork() {}
+
+void ReportHostImports() {}
+
+PipelineLibraryCounters PipelineLibraryCountersOf(VkDevice) { return {}; }
+
 }
+
+namespace AgcDriver {
+
+void PerformanceCounters::AddDriverNanoseconds(std::uint64_t) {}
+
+PacketCounters& PacketCounters::ThisThread() {
+    thread_local PacketCounters counters;
+    return counters;
+}
+
+}
+
+extern "C" void AgcDriverTogglePerformanceOverlay_nid_postfix() {}
+
+extern "C" bool AgcDriverMinimalOverlayShown_nid_postfix() { return false; }
+
+extern "C" int AgcDriverOverlayCorner_nid_postfix() { return 0; }
+
+extern "C" std::uint64_t AgcDriverProcessFootprint_nid_postfix() { return 0; }
+
+extern "C" std::uint64_t AgcDriverGeneratedFrames_nid_postfix() { return 0; }

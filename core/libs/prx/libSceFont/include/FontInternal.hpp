@@ -43,13 +43,17 @@ inline std::uint8_t& AttributeSlot(AttributeSet& attributes, int attribute) {
     return attributes[static_cast<std::size_t>((attribute >> 4) - 1)];
 }
 
+struct FallbackFace {
+    std::shared_ptr<const std::vector<unsigned char>> data;
+    FT_Face face = nullptr;
+    std::uint32_t subFontIndex = 0;
+};
+
 struct FontState {
     std::shared_ptr<const std::vector<unsigned char>> faceData;
     FT_Face face = nullptr;
-    float scaleW = 16.0f;
-    float scaleH = 16.0f;
+    std::vector<FallbackFace> fallbacks;
     std::map<int, int> scriptLanguages;
-    std::map<int, int> typographicFeatures;
     AttributeSet attributes = DEFAULT_ATTRIBUTES;
 
     FontState() = default;
@@ -70,7 +74,6 @@ struct GeneratedGlyph {
     std::vector<FontGlyphOutlinePoint> outlinePoints;
     std::vector<std::uint8_t> outlineTags;
     std::vector<std::uint16_t> outlineContours;
-    AttributeSet attributes = DEFAULT_ATTRIBUTES;
     bool metricsInitialized = false;
     bool outlineInitialized = false;
 };
@@ -109,11 +112,15 @@ FontState* TryGetState(FontHandle handle);
 FontState& ResetState(FontHandle handle);
 void RemoveState(FontHandle handle);
 void LoadStateFace(FontState& state, std::shared_ptr<const std::vector<unsigned char>> bytes, std::uint32_t subFontIndex);
+void AddStateFallbackFace(FontState& state, std::shared_ptr<const std::vector<unsigned char>> bytes, std::uint32_t subFontIndex);
+FT_Face FallbackFaceForCode(const FontState& state, std::uint32_t code, FT_UInt* glyphIndex);
+FT_Face FaceForCode(const FontState& state, std::uint32_t code, FT_UInt* glyphIndex);
 
 bool IsSystemFontSet(std::uint32_t fontSetType);
 std::vector<SystemFontFile> SystemFontCandidates(std::uint32_t fontSetType);
 std::filesystem::path SystemFontDirectory();
 std::optional<SystemFontFile> FindSystemFontFile(std::uint32_t fontSetType);
+std::vector<SystemFontFile> FindSystemFontFallbackFiles(std::uint32_t fontSetType);
 
 void TrackGeneratedGlyph(FontGlyph glyph);
 bool ForgetGeneratedGlyph(FontGlyph glyph);
@@ -142,7 +149,7 @@ void CachedStyleSetScalar(CachedStyle& style, float value);
 void ClearRenderOutputs(FontGlyphMetrics* metrics, FontRenderOutput* result);
 int ComputeHorizontalLayout(FontHandle handle, const StyleStateBlock* style, std::uint8_t* outWords);
 int ComputeVerticalLayout(FontHandle handle, const StyleStateBlock* style, std::uint8_t* outWords);
-int GetCharGlyphMetrics(FontHandle handle, std::uint32_t code, FontGlyphMetrics* metrics, bool useCachedStyle);
+int GetCharGlyphMetrics(FontHandle handle, std::uint32_t code, FontGlyphMetrics* metrics, bool useCachedStyle, float* usedScaleW = nullptr, float* usedScaleH = nullptr);
 int RenderFaceGlyphToSurface(FT_Face face, FT_UInt glyphIndex, FT_Vector shift, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result);
 int RenderCharGlyphImageCore(FontHandle handle, std::uint32_t code, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result);
 

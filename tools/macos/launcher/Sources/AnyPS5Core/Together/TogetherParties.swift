@@ -1,0 +1,153 @@
+import Foundation
+
+/// A party: up to eight friends together, with a leader and, while one runs, a voice call.
+public struct TogetherParty: Decodable, Equatable, Sendable, Identifiable {
+    public struct Call: Decodable, Equatable, Sendable {
+        public let id: String
+        /// Who is in the voice call now, by user ID.
+        public let `in`: [String]
+        /// Who of them muted themselves (none where the server does not say).
+        public let muted: [String]
+        /// Who of them hear nobody (deafened is always muted too).
+        public let deafened: [String]
+
+        public init(id: String, in members: [String], muted: [String] = [], deafened: [String] = []) {
+            self.id = id
+            self.in = members
+            self.muted = muted
+            self.deafened = deafened
+        }
+
+        enum CodingKeys: String, CodingKey { case id, `in`, muted, deafened }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try container.decode(String.self, forKey: .id)
+            self.in = try container.decode([String].self, forKey: .in)
+            muted = try container.decodeIfPresent([String].self, forKey: .muted) ?? []
+            deafened = try container.decodeIfPresent([String].self, forKey: .deafened) ?? []
+        }
+    }
+
+    public static let maxSize = 8
+
+    public let id: String
+    public let leaderId: String
+    /// "invite": only people a member invited may join; "friends": the leader's friends too.
+    public let privacy: String
+    public let members: [TogetherPerson]
+    public let invited: [TogetherPerson]
+    public let call: Call?
+    /// In the public list, and how; nil when it is not listed.
+    public let listing: TogetherPartyListing?
+    /// People who asked to join, from the public list or with the code (members are told).
+    public let requests: [TogetherPerson]?
+    /// The code anyone may ask to join with, while one works (members see it; older servers never say).
+    public let joinCode: TogetherJoinCode?
+    /// The party's Discord server or channel, set by the leader.
+    public let discord: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, leaderId, privacy, members, invited, call, requests, joinCode, discord
+        case listing = "public"
+    }
+
+    public init(id: String, leaderId: String, privacy: String, members: [TogetherPerson], invited: [TogetherPerson], call: Call?,
+                listing: TogetherPartyListing? = nil, requests: [TogetherPerson]? = nil, joinCode: TogetherJoinCode? = nil, discord: String? = nil) {
+        self.id = id
+        self.leaderId = leaderId
+        self.privacy = privacy
+        self.members = members
+        self.invited = invited
+        self.call = call
+        self.listing = listing
+        self.requests = requests
+        self.joinCode = joinCode
+        self.discord = discord
+    }
+
+    /// The same party with these members and call (someone taken out here before the server says).
+    public func with(members: [TogetherPerson], call: Call?) -> TogetherParty {
+        TogetherParty(id: id, leaderId: leaderId, privacy: privacy, members: members, invited: invited, call: call, listing: listing, requests: requests,
+                      joinCode: joinCode, discord: discord)
+    }
+
+    /// The same party with a new code, or none (made or stopped here before the server says).
+    public func with(joinCode: TogetherJoinCode?) -> TogetherParty {
+        TogetherParty(id: id, leaderId: leaderId, privacy: privacy, members: members, invited: invited, call: call, listing: listing, requests: requests,
+                      joinCode: joinCode, discord: discord)
+    }
+
+    public var open: Bool { privacy == "friends" }
+    public func isLeader(_ userId: String) -> Bool { leaderId == userId }
+
+    /// Whether `me` may remove `member` or hand them the lead: the leader, about someone else in the party.
+    public func canManage(_ member: String, me: String) -> Bool {
+        isLeader(me) && member != me && members.contains { $0.userId == member }
+    }
+}
+
+/// An invite waiting for the user.
+public struct TogetherPartyInvite: Decodable, Equatable, Sendable, Identifiable {
+    public var id: String { partyId }
+    public let partyId: String
+    public let from: TogetherPerson?
+    public let size: Int
+
+    public init(partyId: String, from: TogetherPerson?, size: Int) {
+        self.partyId = partyId
+        self.from = from
+        self.size = size
+    }
+}
+
+extension TogetherClient {
+    /// The party the user is in, invites waiting, and the public parties they asked to join.
+    public func myParty() async throws -> (party: TogetherParty?, invites: [TogetherPartyInvite], asked: [String]) {
+        struct Asked: Decodable { let partyId: String }
+        struct Mine: Decodable { let party: TogetherParty?; let invites: [TogetherPartyInvite]; let requests: [Asked]? }
+        let mine = try JSONDecoder.together.decode(Mine.self, from: try await authorized("GET", "me/party", nil))
+        return (mine.party, mine.invites, (mine.requests ?? []).map(\.partyId))
+    }
+
+    /// A new party with the user as its leader (leaving the one they were in); `open` lets
+    /// friends join without an invite.
+    public func startParty(open: Bool = false, listing: TogetherPartyListing? = nil) async throws -> TogetherParty {
+        var body: [String: Any] = ["privacy": open ? "friends" : "invite"]
+        if let listing { body["public"] = listing.body }
+        return try party(try await authorized("POST", "parties", body))
+    }
+
+    public func setParty(_ partyId: String, open: Bool) async throws -> TogetherParty {
+        try party(try await authorized("PATCH", "parties/\(partyId)", ["privacy": open ? "friends" : "invite"]))
+    }
+
+    public func invite(_ userIds: [String], to partyId: String) async throws -> TogetherParty {
+        try party(try await authorized("POST", "parties/\(partyId)/invites", ["userIds": userIds]))
+    }
+
+    /// An invite accepted, or a friend's open party walked into.
+    public func joinParty(_ partyId: String) async throws -> TogetherParty {
+        try party(try await authorized("POST", "parties/\(partyId)/join", [:]))
+    }
+
+    public func declineParty(_ partyId: String) async throws {
+        _ = try await authorized("POST", "parties/\(partyId)/decline", [:])
+    }
+
+    public func leaveParty(_ partyId: String) async throws {
+        _ = try await authorized("POST", "parties/\(partyId)/leave", [:])
+    }
+
+    /// The leader removes someone from the party.
+    public func kick(_ userId: String, from partyId: String) async throws {
+        _ = try await authorized("POST", "parties/\(partyId)/kick", ["userId": userId])
+    }
+
+    /// The leader hands the lead to another member.
+    public func makeLeader(_ userId: String, of partyId: String) async throws -> TogetherParty {
+        try party(try await authorized("POST", "parties/\(partyId)/leader", ["userId": userId]))
+    }
+
+    private func party(_ data: Data) throws -> TogetherParty { try JSONDecoder.together.decode(TogetherParty.self, from: data) }
+}

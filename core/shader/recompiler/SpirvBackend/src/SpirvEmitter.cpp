@@ -9,6 +9,7 @@
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <bit>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <string>
@@ -164,8 +165,14 @@ std::uint32_t SubgroupStageBit(IrShaderStage stage) {
 }
 
 
+std::string FailureText(const IrProgram& program) {
+    char hash[24];
+    std::snprintf(hash, sizeof(hash), "%llx", static_cast<unsigned long long>(program.Resources().shaderHash));
+    return std::string("SPIR-V emission failed: hash=0x") + hash + " stage=" + std::to_string(static_cast<unsigned>(program.Resources().stage));
+}
+
 [[noreturn]] void FailProgram(const IrProgram& program, const char* reason) {
-    throw std::runtime_error("SPIR-V emission failed: hash=0x" + std::to_string(program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(program.Resources().stage)) + " reason=" + reason);
+    throw std::runtime_error(FailureText(program) + " reason=" + reason);
 }
 
 const ShaderWorkgroupInputInfo* ShaderWorkgroupInputFor(const SpirvEmitterState& state) {
@@ -370,7 +377,7 @@ std::uint32_t SpirvValueEmitContext::Label(const IrBlock* block) const {
 }
 
 [[noreturn]] void SpirvValueEmitContext::Fail(const IrValue& inst, const char* reason) const {
-    throw std::runtime_error("SPIR-V emission failed: hash=0x" + std::to_string(state.program.Resources().shaderHash) + " stage=" + std::to_string(static_cast<unsigned>(state.program.Resources().stage)) + " opcode=" + std::string(IrOpcodeName(inst.Opcode())) + " reason=" + reason);
+    throw std::runtime_error(FailureText(state.program) + " opcode=" + std::string(IrOpcodeName(inst.Opcode())) + " reason=" + reason);
 }
 
 std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const CompiledBindingLayout& bindings, const SpirvTargetOptions& target) const {
@@ -394,14 +401,38 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     state.nonConstantImageOffsets = target.nonConstantImageOffsets;
     state.narrowSubgroupClock = target.narrowSubgroupClock;
     state.float64DenormPreserve = target.float64DenormPreserve;
+    state.depthRangeRemap = target.depthRangeRemap;
     state.registrationModules = target.registrationModules;
     state.fragmentDescriptorSet = target.fragmentDescriptorSet;
     state.contractFloat = target.contractFloat;
+    state.meshBarycentricPixel = target.meshBarycentricPixel;
+    state.meshBarycentricVertex = target.meshBarycentricVertex;
+    state.barycentricSmoothLocation = target.barycentricSmoothLocation;
+    state.barycentricLinearLocation = target.barycentricLinearLocation;
+    state.barycentricPositionsLocation = target.barycentricPositionsLocation;
+    state.meshExportedLocations = target.meshExportedLocations;
+    state.meshPerVertexLocations = target.meshPerVertexLocations;
     state.float16DenormPreserve = target.float16DenormPreserve;
     state.robustBufferAccess2 = target.robustBufferAccess2;
+    state.float32FlushToZero = target.float32FlushToZero;
+    state.waveLdsMemoryBarriers = target.waveLdsMemoryBarriers;
+    state.float32DenormPreserve = target.float32DenormPreserve;
+    state.fusedExactArithmetic = target.fusedExactArithmetic;
+    state.deviceScopeLdsMemoryBarriers = target.deviceScopeLdsMemoryBarriers;
     state.hostSubgroupSize = target.subgroupSize;
     state.singleLane = (target.subgroupStages & SubgroupStageBit(state.meshAsCompute ? IrShaderStage::Compute : program.Resources().stage)) == 0u;
     state.singleSampleImages = std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityStorageImageMultisample)) == target.supportedCapabilities.end();
+    if (target.largePixelFunctionLdsBuffer && program.Resources().stage == IrShaderStage::Pixel && state.requirements.functionLds && state.requirements.functionLdsDwords > target.pixelFunctionStorageDwords) {
+        state.pixelFunctionLdsBuffer = true;
+        state.requirements.subgroupLocalInvocationId = true;
+        state.requirements.subgroupBallot = true;
+    }
+    if (state.requirements.ldsLock && LdsInDeviceMemory(state) && std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityInt64Atomics)) != target.supportedCapabilities.end()) {
+        state.requirements.ldsLock = false;
+        state.requirements.ldsBufferInt64Atomics = true;
+    }
+    const bool int64Atomics = std::ranges::find(state.supportedCapabilities, static_cast<std::uint32_t>(spv::CapabilityInt64Atomics)) != state.supportedCapabilities.end();
+    state.requirements.bufferU64View = state.requirements.bufferInt64Atomics || (state.requirements.coherentBufferPairs && int64Atomics);
     if (HostSubgroupSingleLane(state)) {
         state.requirements.subgroupBallot = false;
         state.requirements.subgroupShuffle = false;
@@ -434,7 +465,10 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     EmitModuleHeader(state, bindings);
     EmitProgram(state);
     state.module.EmitEntryPoint(state.meshAsCompute ? static_cast<std::uint32_t>(spv::ExecutionModelGLCompute) : ExecutionModelForStage(state.program.Resources().stage), state.mainFunc, "main", state.interfaceVariables);
-    if (info != nullptr) info->fullSubgroups = state.spannedWave;
+    if (info != nullptr) {
+        info->fullSubgroups = state.spannedWave;
+        info->functionLdsBuffer = state.pixelFunctionLdsBuffer;
+    }
     return SplitContinueBodies(state.module.Finalize());
 }
 

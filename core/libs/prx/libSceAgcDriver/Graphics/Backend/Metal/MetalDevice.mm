@@ -527,7 +527,6 @@ struct VulkanDevice::State {
     std::unordered_map<Metal::CompileKey, std::shared_ptr<Metal::RenderPipeline>, Metal::CompileKeyHash> drawPipelines;
 
     void* window = nullptr;
-    SDL_MetalView view = nullptr;
     std::unique_ptr<Metal::Presenter> presenter;
     std::array<id<MTLTexture>, PresentSlots> presentTextures{};
     std::array<std::uint64_t, PresentSlots> presentSerials{};
@@ -592,12 +591,6 @@ struct VulkanDevice::State {
             id<MTLTexture> retired = texture;
             texture = nil;
             device->RetireAllocation((__bridge void*)retired, {});
-        }
-        if (view != nullptr) {
-            const auto destroy = [](void* context) { SDL_Metal_DestroyView(static_cast<SDL_MetalView>(context)); };
-            if (pthread_main_np() != 0) destroy(view);
-            else dispatch_async_f(dispatch_get_main_queue(), view, destroy);
-            view = nullptr;
         }
         for (auto& texture : nullTextures) {
             if (texture == nil) continue;
@@ -1001,23 +994,14 @@ struct VulkanDevice::State {
         return (__bridge id<MTLComputePipelineState>)ticket->ProductAs<Metal::CompiledPipeline>()->native;
     }
 
-    void attachWindow(void* sdlWindow) {
-        struct Request {
-            SDL_Window* window;
-            SDL_MetalView view;
-            void* layer;
-        } request{static_cast<SDL_Window*>(sdlWindow), nullptr, nullptr};
-        Aps5RunOnMainThread_nid_no_patch([](void* context) {
-            auto& item = *static_cast<Request*>(context);
-            item.view = SDL_Metal_CreateView(item.window);
-            if (item.view != nullptr) item.layer = SDL_Metal_GetLayer(item.view);
-        }, &request);
-        view = request.view;
-        if (request.layer == nullptr) throw std::runtime_error(std::string("AGC graphics: SDL_Metal_CreateView failed: ") + SDL_GetError());
+    void attachWindow(const PresentationWindow& target) {
+        if (target.createSurface == nullptr) throw std::runtime_error("AGC graphics: the presentation window has no Metal layer provider");
+        const auto layer = reinterpret_cast<void*>(target.createSurface(target.context, nullptr));
+        if (layer == nullptr) throw std::runtime_error("AGC graphics: the video output could not create a Metal layer for its window");
         std::string failure;
-        presenter = Metal::Presenter::Create(*device, request.layer, Metal::PresenterOptions::FromEnvironment(), &failure);
+        presenter = Metal::Presenter::Create(*device, layer, Metal::PresenterOptions::FromEnvironment(), &failure);
         if (presenter == nullptr) throw std::runtime_error("AGC graphics: Metal presenter could not be created: " + failure);
-        window = sdlWindow;
+        window = target.context;
     }
 
     void stagePresent(std::uint32_t width, std::uint32_t height, std::span<const std::byte> bgra) {
@@ -1805,7 +1789,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         s.fault = s.device->NewSharedBuffer(ShaderRecompiler::BdaAbi::FaultBufferBytes, "AnyPS5 fault buffer");
         if (!s.fault) throw std::runtime_error("AGC graphics: Metal fault buffer could not be allocated");
         std::memset(s.fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
-        if (window != nullptr && window->context != nullptr) s.attachWindow(window->context);
+        if (window != nullptr && window->context != nullptr) s.attachWindow(*window);
         {
             std::lock_guard lock(State::targetsMutex());
             State::targets().push_back(&s);
@@ -1819,6 +1803,35 @@ VulkanDevice::~VulkanDevice() = default;
 auto VulkanDevice::ReplayComputePipeline(const ShaderRecompiler::RecompileResult&, bool) -> bool { return false; }
 
 auto VulkanDevice::WaitForPipelineJournalReplay() -> void {}
+
+auto VulkanDevice::SavePipelineCache() -> void {}
+
+auto VulkanDevice::SubmittedEpoch() const -> std::uint64_t {
+    auto& s = *state;
+    if (s.sync == nullptr) return 0;
+    std::lock_guard lock(s.mutex);
+    return s.lastSerial;
+}
+
+auto VulkanDevice::GpuCopyPossible(std::uint64_t, std::uint64_t, std::size_t) const -> bool { return false; }
+
+auto VulkanDevice::HostSampleOrder(const Graphics::State&) const -> Graphics::SampleOrder { return {}; }
+
+auto VulkanDevice::RealFramePending() const -> bool { return false; }
+
+auto VulkanDevice::graphicsContext() const -> Graphics::Context { return {}; }
+
+auto VulkanDevice::SealPassWriteOnly() -> void {}
+
+auto VulkanDevice::AcquireRealImage() -> bool { return false; }
+
+auto VulkanDevice::QueueRealFrame() -> void {}
+
+auto VulkanDevice::WaitRecordedFor(std::uint64_t serial, std::uint64_t timeoutNanos) -> bool {
+    if (serial == 0 || state->device == nullptr) return true;
+    const auto milliseconds = std::min<std::uint64_t>((timeoutNanos + 999999u) / 1000000u, WaitTimeoutMs);
+    return state->device->WaitSerial(Queue, serial, static_cast<std::uint32_t>(milliseconds));
+}
 
 auto VulkanDevice::ComputePipelinesCreated() const -> std::uint64_t { return state->pipelinesCreated.load(std::memory_order_relaxed); }
 
@@ -2068,11 +2081,11 @@ auto VulkanDevice::PreparePhaseMs(const PreparedDispatch&) -> std::span<const do
     return std::span<const double, 5>(zeros);
 }
 
-auto VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*) -> void {
+auto VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*, std::optional<std::pair<std::uint64_t, std::size_t>>) -> void {
     state->dispatch(shader, x, y, z, snapshots);
 }
 
-auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*) -> IndirectOutcome {
+auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*, const std::array<std::uint32_t, 3>&) -> IndirectOutcome {
     const auto started = std::chrono::steady_clock::now();
     WaitIdle();
     std::array<std::uint32_t, 3> groups{};
@@ -2084,7 +2097,7 @@ auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& sha
 
 auto VulkanDevice::PrepareRecipe(const std::shared_ptr<const Recipe>&, bool) -> std::shared_ptr<RecipeHit> { return {}; }
 
-auto VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResult&, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint64_t, const std::shared_ptr<RecipeHit>&, IndirectOutcome&, const std::shared_ptr<PreparedDispatch>&, bool) -> RecipeOutcome { return RecipeOutcome::Rebuild; }
+auto VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResult&, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint64_t, const std::shared_ptr<RecipeHit>&, IndirectOutcome&, const std::shared_ptr<PreparedDispatch>&, bool, const std::array<std::uint32_t, 3>&) -> RecipeOutcome { return RecipeOutcome::Rebuild; }
 
 auto VulkanDevice::DispatchRecipes() -> bool { return false; }
 

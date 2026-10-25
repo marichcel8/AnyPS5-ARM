@@ -1,5 +1,6 @@
 #include <atomic>
 #include <bit>
+#include <charconv>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -8,6 +9,7 @@
 #include <optional>
 #include <thread>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 
@@ -30,6 +32,7 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
+#include "prx/libkernel/Time/include/SleepWake.hpp"
 #include "prx/libSceVideoOut/include/VideoOutDriver.hpp"
 #if APS5_ENABLE_TIMING_LOG
 #include "prx/libSceVideoOut/include/FrameTimingLog.hpp"
@@ -39,7 +42,6 @@
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
-#include "prx/libSceAgcDriver/Submit/include/Dcb.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include "prx/libc/include/Shutdown.hpp"
 
@@ -50,6 +52,26 @@ constexpr std::uint64_t PRESENT_POLL_MICROS = 10000;
 
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("VideoOut: ") + reason);
+}
+
+std::uint32_t resolutionIndex(std::uint32_t width, std::uint32_t height) {
+    return (width >= 3840 || height >= 2160) ? VIDEO_OUT_RESOLUTION_2160P : VIDEO_OUT_RESOLUTION_1080P;
+}
+
+std::optional<std::uint32_t> configuredResolution() {
+    const char* value = std::getenv("APS5_OUTPUT_RESOLUTION");
+    if (value == nullptr || *value == '\0') return std::nullopt;
+    const std::string text(value);
+    const char* end = text.data() + text.size();
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    const auto widthResult = std::from_chars(text.data(), end, width);
+    const bool separated = widthResult.ec == std::errc{} && widthResult.ptr != end && (*widthResult.ptr == 'x' || *widthResult.ptr == 'X');
+    const auto heightResult = separated ? std::from_chars(widthResult.ptr + 1, end, height) : std::from_chars_result{end, std::errc::invalid_argument};
+    if (!separated || heightResult.ec != std::errc{} || heightResult.ptr != end || width == 0 || height == 0) {
+        throw std::runtime_error("VideoOut: APS5_OUTPUT_RESOLUTION must be <width>x<height> with positive integers, got \"" + text + "\"");
+    }
+    return resolutionIndex(width, height);
 }
 
 std::vector<const char*> windowExtensions(SDL_Window* window) {
@@ -67,6 +89,16 @@ std::vector<const char*> windowExtensions(SDL_Window* window) {
 }
 
 // The window's surface and size are taken on the main thread, which macOS requires of window calls.
+#ifdef ANYPS5_GPU_BACKEND_METAL
+VkSurfaceKHR createWindowSurface(void* context, VkInstance) {
+    return OnMainThread([&] {
+        const auto view = SDL_Metal_CreateView(static_cast<SDL_Window*>(context));
+        void* layer = view != nullptr ? SDL_Metal_GetLayer(view) : nullptr;
+        if (layer == nullptr) throw std::runtime_error(std::string("SDL_Metal_CreateView failed: ") + SDL_GetError());
+        return reinterpret_cast<VkSurfaceKHR>(layer);
+    });
+}
+#else
 VkSurfaceKHR createWindowSurface(void* context, VkInstance instance) {
     return OnMainThread([&] {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -74,6 +106,7 @@ VkSurfaceKHR createWindowSurface(void* context, VkInstance instance) {
         return surface;
     });
 }
+#endif
 
 #ifdef __APPLE__
 // macOS hands a fully covered window's layer a drawable only about once a second, which would hold every flip.
@@ -318,6 +351,7 @@ VideoOutDriver::VideoOutDriver() {
         SDL_SetHint(SDL_HINT_WINDOWS_DPI_AWARENESS, "permonitorv2");
 #ifdef _WIN32
         SDL_SetHintWithPriority(SDL_HINT_DIRECTINPUT_ENABLED, "0", SDL_HINT_DEFAULT);
+        if (std::getenv("APS5_NO_WGI") != nullptr) SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_WGI, "0", SDL_HINT_DEFAULT);
 #endif
 #ifdef __linux__
         SDL_SetHint(SDL_HINT_VIDEODRIVER, "wayland,x11");
@@ -487,10 +521,7 @@ int VideoOutDriver::SubmitFlip(int handle, int index, int flipMode, int64_t flip
     // A title that does not pace on flipPendingNum can run ahead of the presenter now that the queue
     // worker no longer waits per flip; a full queue is the documented error, not a failure.
     if (flipQueue->reservations.load() >= VIDEO_OUT_FLIP_QUEUE_CAPACITY) return VIDEO_OUT_ERROR_FLIP_QUEUE_FULL;
-    std::array<uint32_t, AgcDriver::FlipPacketWords> words{AgcDriver::FlipPacketHeader, static_cast<uint32_t>(handle), static_cast<uint32_t>(index), static_cast<uint32_t>(flipMode), static_cast<uint32_t>(static_cast<uint64_t>(flipArg)), static_cast<uint32_t>(static_cast<uint64_t>(flipArg) >> 32u)};
-    Packet packet{words.data(), static_cast<uint32_t>(words.size()), 0, {}};
-    const auto result = sceAgcDriverSubmitDcb(&packet);
-    require(result == 0, "driver rejected flip submission");
+    AgcDriverSubmitFlip_nid_postfix(AgcDriver::FlipInfo{static_cast<std::uint32_t>(handle), index, static_cast<std::uint32_t>(flipMode), flipArg});
     return 0;
 }
 
@@ -538,12 +569,18 @@ int VideoOutDriver::GetDisplayRefreshRate() {
     return displayRefreshRate.load();
 }
 
+std::uint32_t VideoOutDriver::GetDisplayResolution() {
+    if (const auto configured = configuredResolution()) return *configured;
+    return displayResolution.load();
+}
+
 void VideoOutDriver::updateDisplayRefreshRate() {
     const int display = SDL_GetWindowDisplayIndex(window.Handle());
     if (display < 0) throw std::runtime_error(std::string("SDL_GetWindowDisplayIndex failed: ") + SDL_GetError());
     SDL_DisplayMode mode{};
     if (SDL_GetCurrentDisplayMode(display, &mode) != 0) throw std::runtime_error(std::string("SDL_GetCurrentDisplayMode failed: ") + SDL_GetError());
     displayRefreshRate.store(mode.refresh_rate);
+    displayResolution.store(resolutionIndex(mode.w, mode.h));
 }
 
 void VideoOutDriver::pollHostHdr() {
@@ -591,7 +628,11 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
             req.ReleaseLocked();
             return;
         }
-        require(req.cfg->outputMode != VIDEO_OUT_OUTPUT_MODE_119_88HZ || SupportsHighFrameRate(), "display no longer supports 119.88 Hz output");
+        if (req.cfg->outputMode == VIDEO_OUT_OUTPUT_MODE_119_88HZ && !SupportsHighFrameRate()) {
+            req.cfg->outputMode = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
+            triggerEvents(*req.cfg, VIDEO_OUT_EVENT_SET_MODE, reinterpret_cast<void*>(req.cfg->outputMode));
+            std::fprintf(stderr, "[videoout] display no longer supports 119.88 Hz; fell back to 59.94 Hz\n");
+        }
         require(req.ready && !req.terminal && req.generation == req.cfg->generation, "stale or incomplete flip request");
         const auto interval = static_cast<uint64_t>(req.flipRate + 1);
         require(req.cfg->lastFlipVblank <= std::numeric_limits<uint64_t>::max() - interval, "flip interval overflow");
@@ -669,6 +710,7 @@ void VideoOutDriver::processFlip(FlipRequest& req) {
     }
     req.terminal = true;
     req.cfg->vblankCond.notify_all();
+    KernelWakeSleepers_nid_no_patch();
     timing.Mark("notify_game");
 }
 
@@ -733,7 +775,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                         imeTextInput->HandleEvent(event, SDL_GetWindowID(window.Handle()));
                     }
                 }
-                padInput->Update();
+                padInput->Update(window);
                 updateDisplayRefreshRate();
                 pollHostHdr();
                 mouseInput->UpdateCapture(!padInput->MouseModeEnabled());
