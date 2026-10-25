@@ -28,6 +28,9 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <memory>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -140,9 +143,38 @@ struct WriteBack {
     std::size_t bytes = 0;
 };
 
+struct LabelStore {
+    std::uint64_t address = 0;
+    std::vector<std::byte> bytes;
+};
+
+struct Completion {
+    std::vector<WriteBack> writeBacks;
+    std::vector<Metal::NativeBuffer> staged;
+    std::vector<LabelStore> labels;
+    std::vector<std::function<void()>> actions;
+    bool waking = false;
+};
+
+struct Waker {
+    std::mutex mutex;
+    std::condition_variable ready;
+    bool pending = false;
+    bool stop = false;
+
+    void Notify() {
+        {
+            std::lock_guard lock(mutex);
+            pending = true;
+        }
+        ready.notify_one();
+    }
+};
+
 enum class Numeric : std::uint8_t { Float, Uint, Sint };
 
 constexpr std::uint32_t RawPackedFormat = 20;
+constexpr std::uint32_t ReleaseMemOpcode = 0x49;
 
 struct ImageKind {
     Numeric numeric = Numeric::Float;
@@ -464,6 +496,9 @@ struct VulkanDevice::State {
     std::atomic<std::uint64_t> hookWaits{0};
     std::uint64_t reportSubmits = 0;
     std::uint64_t reportWaits = 0;
+    std::array<std::uint64_t, 3> reportLabels{};
+    std::uint64_t snapshotBytes = 0;
+    std::uint64_t reportSnapshotBytes = 0;
 
     std::vector<std::unique_ptr<UploadChunk>> chunks;
     UploadChunk* chunk = nullptr;
@@ -472,7 +507,12 @@ struct VulkanDevice::State {
     std::vector<HostImport> imports;
     std::vector<Metal::NativeBuffer> staged;
     std::vector<WriteBack> writeBacks;
-    std::map<std::uint64_t, std::pair<std::vector<WriteBack>, std::vector<Metal::NativeBuffer>>> completions;
+    std::map<std::uint64_t, Completion> completions;
+    std::shared_ptr<Waker> waker;
+    std::thread completer;
+    std::atomic<std::uint64_t> labelsOnCompletion{0};
+    std::atomic<std::uint64_t> labelsOnCpu{0};
+    std::atomic<std::uint64_t> actionsOnCompletion{0};
 
     Metal::NativeBuffer fault;
 
@@ -511,6 +551,14 @@ struct VulkanDevice::State {
     std::atomic<std::uint64_t> draws{0};
 
     ~State() {
+        if (waker != nullptr) {
+            {
+                std::lock_guard lock(waker->mutex);
+                waker->stop = true;
+            }
+            waker->ready.notify_one();
+            if (completer.joinable()) completer.join();
+        }
         if (device == nullptr) return;
         {
             std::lock_guard lock(targetsMutex());
@@ -631,6 +679,7 @@ struct VulkanDevice::State {
             for (const auto& snapshot : snapshots) {
                 if (address >= snapshot.address && bytes <= snapshot.bytes.size() && address - snapshot.address <= snapshot.bytes.size() - bytes) {
                     resolvedBy = "snapshot";
+                    snapshotBytes += bytes;
                     return uploadBytes(snapshot.bytes.data() + (address - snapshot.address), bytes, bytes);
                 }
             }
@@ -730,8 +779,8 @@ struct VulkanDevice::State {
             }
             sealing.clear();
             auto& completion = completions[serial];
-            completion.first = std::move(writeBacks);
-            completion.second = std::move(staged);
+            completion.writeBacks = std::move(writeBacks);
+            completion.staged = std::move(staged);
             writeBacks.clear();
             staged.clear();
             if (textures != nullptr) textures->Seal(Queue, serial);
@@ -748,8 +797,10 @@ struct VulkanDevice::State {
         while (!completions.empty() && completions.begin()->first <= through) {
             auto entry = std::move(completions.begin()->second);
             completions.erase(completions.begin());
-            for (const auto& item : entry.first) std::memcpy(item.host, item.staged, item.bytes);
-            for (const auto& buffer : entry.second) device->ReleaseBuffer(buffer);
+            for (const auto& item : entry.writeBacks) std::memcpy(item.host, item.staged, item.bytes);
+            for (const auto& buffer : entry.staged) device->ReleaseBuffer(buffer);
+            for (const auto& label : entry.labels) storeLabel(label);
+            for (auto& action : entry.actions) action();
         }
         const auto before = pendingWrites.size();
         std::erase_if(pendingWrites, [&](const PendingWrite& write) { return write.serial != 0 && write.serial <= through; });
@@ -761,10 +812,58 @@ struct VulkanDevice::State {
         checkFault();
     }
 
-    void noteWrite(std::uint64_t address, std::uint64_t bytes) {
+    static void storeLabel(const LabelStore& label) {
+        if (label.bytes.size() == 8 && label.address % 8 == 0) {
+            std::uint64_t value;
+            std::memcpy(&value, label.bytes.data(), 8);
+            std::atomic_ref<std::uint64_t>(*reinterpret_cast<std::uint64_t*>(label.address)).store(value, std::memory_order_release);
+            return;
+        }
+        for (std::size_t done = 0; done < label.bytes.size(); done += 4) {
+            std::uint32_t value;
+            std::memcpy(&value, label.bytes.data() + done, 4);
+            std::atomic_ref<std::uint32_t>(*reinterpret_cast<std::uint32_t*>(label.address + done)).store(value, std::memory_order_relaxed);
+        }
+        std::atomic_thread_fence(std::memory_order_release);
+    }
+
+    Completion* afterRecorded() {
+        reap();
+        if (open) flush();
+        if (completions.empty()) return nullptr;
+        auto& [serial, completion] = *completions.rbegin();
+        if (!completion.waking) {
+            completion.waking = true;
+            if (waker == nullptr) {
+                waker = std::make_shared<Waker>();
+                completer = std::thread([this, signal = waker] { runCompleter(*signal); });
+            }
+            sync->OnComplete(Queue, serial, [signal = waker] { signal->Notify(); });
+        }
+        return &completion;
+    }
+
+    void runCompleter(Waker& signal) {
+        for (;;) {
+            {
+                std::unique_lock lock(signal.mutex);
+                signal.ready.wait(lock, [&] { return signal.pending || signal.stop; });
+                if (signal.stop) return;
+                signal.pending = false;
+            }
+            try {
+                std::lock_guard lock(mutex);
+                reap();
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "[metal] completion failed: %s\n", error.what());
+            }
+        }
+    }
+
+    void noteWrite(std::uint64_t address, std::uint64_t bytes, std::uint64_t serial = 0) {
         const auto end = address + bytes;
-        if (!pendingWrites.empty() && pendingWrites.back().serial == 0 && pendingWrites.back().begin <= address && pendingWrites.back().end >= end) return;
-        pendingWrites.push_back({address, end, 0});
+        if (!pendingWrites.empty() && pendingWrites.back().serial == serial && pendingWrites.back().begin <= address && pendingWrites.back().end >= end) return;
+        pendingWrites.push_back({address, end, serial});
         for (auto low = pendingLow().load(std::memory_order_acquire); address < low && !pendingLow().compare_exchange_weak(low, address, std::memory_order_acq_rel);) {}
         for (auto high = pendingHigh().load(std::memory_order_acquire); end > high && !pendingHigh().compare_exchange_weak(high, end, std::memory_order_acq_rel);) {}
         pendingTotal().fetch_add(1, std::memory_order_acq_rel);
@@ -1023,11 +1122,16 @@ struct VulkanDevice::State {
         const auto presented = stats.presented - reportStats.presented;
         const auto drawCount = draws.load(std::memory_order_relaxed);
         const auto dispatchCount = dispatches.load(std::memory_order_relaxed);
-        std::fprintf(stderr, "[metal] present: %llu flips in %.1f s (%.1f fps), %llu presented, %llu suspended, %llu without drawable, %llu upscaled; source %ux%u, refresh %.0f Hz, effective %.1f Hz; %llu draws, %llu dispatches; CPU accesses to GPU-written ranges: %llu submits, %llu waits\n",
+        const std::array<std::uint64_t, 3> labels{labelsOnCompletion.load(std::memory_order_relaxed), labelsOnCpu.load(std::memory_order_relaxed), actionsOnCompletion.load(std::memory_order_relaxed)};
+        std::fprintf(stderr, "[metal] present: %llu flips in %.1f s (%.1f fps), %llu presented, %llu suspended, %llu without drawable, %llu upscaled; source %ux%u, refresh %.0f Hz, effective %.1f Hz; %llu draws, %llu dispatches; CPU accesses to GPU-written ranges: %llu submits, %llu waits; labels: %llu on completion, %llu on CPU, %llu completion actions; %llu KiB snapshot uploads\n",
                      static_cast<unsigned long long>(reportFrames), seconds, seconds > 0.0 ? static_cast<double>(presented) / seconds : 0.0, static_cast<unsigned long long>(presented),
                      static_cast<unsigned long long>(stats.suspended - reportStats.suspended), static_cast<unsigned long long>(stats.noDrawable - reportStats.noDrawable),
                      static_cast<unsigned long long>(stats.upscaled - reportStats.upscaled), presentWidth, presentHeight, stats.refreshHz, stats.effectiveHz,
-                     static_cast<unsigned long long>(drawCount - reportDraws), static_cast<unsigned long long>(dispatchCount - reportDispatches), static_cast<unsigned long long>(hookSubmits - reportSubmits), static_cast<unsigned long long>(hookWaits - reportWaits));
+                     static_cast<unsigned long long>(drawCount - reportDraws), static_cast<unsigned long long>(dispatchCount - reportDispatches), static_cast<unsigned long long>(hookSubmits - reportSubmits), static_cast<unsigned long long>(hookWaits - reportWaits),
+                     static_cast<unsigned long long>(labels[0] - reportLabels[0]), static_cast<unsigned long long>(labels[1] - reportLabels[1]), static_cast<unsigned long long>(labels[2] - reportLabels[2]),
+                     static_cast<unsigned long long>((snapshotBytes - reportSnapshotBytes) / 1024));
+        reportSnapshotBytes = snapshotBytes;
+        reportLabels = labels;
         reportAt = now;
         reportFrames = 0;
         reportDraws = drawCount;
@@ -1800,15 +1904,51 @@ auto VulkanDevice::ReapRecorded() -> void {
     s.reap();
 }
 
-auto VulkanDevice::WriteLabelOnGpu(std::uint64_t, std::span<const std::byte>, std::uint64_t, std::uint32_t, bool) -> int { return 3; }
+auto VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::byte> bytes, std::uint64_t, std::uint32_t, bool) -> int {
+    auto& s = *state;
+    if (s.sync == nullptr || bytes.empty() || bytes.size() > Metal::Sync::MaxLabelBytes || address % 4 != 0 || bytes.size() % 4 != 0) return 4;
+    std::lock_guard lock(s.mutex);
+    if (GuestMemory::CurrentPacket().opcode != ReleaseMemOpcode || !GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes.size(), true)) return 3;
+    auto* completion = s.afterRecorded();
+    if (completion == nullptr) {
+        s.labelsOnCpu.fetch_add(1, std::memory_order_relaxed);
+        return 1;
+    }
+    completion->labels.push_back({address, std::vector<std::byte>(bytes.begin(), bytes.end())});
+    s.noteWrite(address, bytes.size(), s.completions.rbegin()->first);
+    s.labelsOnCompletion.fetch_add(1, std::memory_order_relaxed);
+    return 0;
+}
 
-auto VulkanDevice::AfterRecordedWork(std::function<void()>, bool) -> bool { return false; }
+auto VulkanDevice::AfterRecordedWork(std::function<void()> action, bool) -> bool {
+    auto& s = *state;
+    if (s.sync == nullptr) return false;
+    std::lock_guard lock(s.mutex);
+    auto* completion = s.afterRecorded();
+    if (completion == nullptr) return false;
+    completion->actions.push_back(std::move(action));
+    s.actionsOnCompletion.fetch_add(1, std::memory_order_relaxed);
+    return true;
+}
 
 auto VulkanDevice::PendingLabel(std::uint64_t, std::size_t, std::uint64_t, Graphics::Recorder::LabelRefusal*) const -> std::optional<Graphics::Recorder::LabelHit> { return {}; }
 
 auto VulkanDevice::OpenWriteOverlaps(std::uint64_t, std::size_t) const -> bool { return false; }
 
-auto VulkanDevice::RecordedWritesSettled(std::uint64_t, std::size_t) const -> bool { return state->lastSerial <= state->device->CompletedSerial(Queue) && state->recordedSinceSubmit == 0; }
+auto VulkanDevice::RecordedWritesSettled(std::uint64_t, std::size_t) const -> bool {
+    auto& s = *state;
+    if (s.sync == nullptr) return true;
+    std::lock_guard lock(s.mutex);
+    s.reap();
+    return s.completions.empty() && s.recordedSinceSubmit == 0;
+}
+
+auto VulkanDevice::SettleCompletions() -> void {
+    auto& s = *state;
+    if (s.sync == nullptr) return;
+    std::lock_guard lock(s.mutex);
+    if (!s.completions.empty()) s.drain(s.completions.rbegin()->first);
+}
 
 auto VulkanDevice::StoresPendingOver(std::uint64_t, std::size_t) const -> bool { return false; }
 

@@ -191,6 +191,8 @@ void Driver::WaitIdle() {
     --idleWaiters;
     rethrowFailure();
     checkStopping();
+    lock.unlock();
+    if (const auto localDevice = device.Load()) localDevice->SettleCompletions();
 }
 
 void Driver::CheckFailure() {
