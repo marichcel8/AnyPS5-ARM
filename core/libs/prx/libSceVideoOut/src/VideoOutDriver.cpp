@@ -49,6 +49,7 @@ namespace {
 
 constexpr std::uint64_t FLIP_ROOM_WAIT_MICROS = 60000000;
 constexpr std::uint64_t PRESENT_POLL_MICROS = 10000;
+constexpr auto INPUT_POLL_INTERVAL = std::chrono::milliseconds(5);
 
 void require(bool condition, const char* reason) {
     if (!condition) throw std::runtime_error(std::string("VideoOut: ") + reason);
@@ -743,6 +744,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
     std::optional<MouseInput> mouseInput;
     std::optional<KeyboardInput> keyboardInput;
     std::optional<ImeTextInput> imeTextInput;
+    auto lastInputPoll = std::chrono::steady_clock::time_point{};
 #if APS5_ENABLE_TIMING_LOG
     std::unique_ptr<FrameTimingLog> timingLog;
 #endif
@@ -768,7 +770,10 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 }
             }
 
-            const bool quit = OnMainThread([&] {
+            const auto polledAt = std::chrono::steady_clock::now();
+            const bool pollInput = polledAt - lastInputPoll >= INPUT_POLL_INTERVAL;
+            if (pollInput) lastInputPoll = polledAt;
+            const bool quit = pollInput && OnMainThread([&] {
                 SDL_Event event;
                 while (SDL_PollEvent(&event)) {
                     if (event.type == SDL_QUIT) return true;
