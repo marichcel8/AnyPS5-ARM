@@ -24,7 +24,9 @@ let package = Package(
         .executableTarget(name: "anyps5-tool", dependencies: ["AnyPS5Core"], path: "Sources/anyps5-tool"),
         // Unit tests of the core, run with `swift test`.
         .testTarget(name: "AnyPS5CoreTests", dependencies: ["AnyPS5Core"], path: "Tests/AnyPS5CoreTests"),
-        // Share play's WebRTC wiring end to end in one process, with a synthetic picture.
-        .testTarget(name: "AnyPS5SharePlayTests", dependencies: ["AnyPS5SharePlay"], path: "Tests/AnyPS5SharePlayTests"),
+        // Share play's WebRTC wiring end to end in one process, with a synthetic picture. The extra rpath
+        // finds WebRTC.framework next to the .xctest, where SwiftPM puts it (its own points at PackageFrameworks).
+        .testTarget(name: "AnyPS5SharePlayTests", dependencies: ["AnyPS5SharePlay"], path: "Tests/AnyPS5SharePlayTests",
+                    linkerSettings: [.unsafeFlags(["-Xlinker", "-rpath", "-Xlinker", "@loader_path/../../.."])]),
     ]
 )
