@@ -37,6 +37,7 @@ The relinker already decodes guest code (TLS scan, `--to-intel`). In the arm64 m
 - **Pipeline:** x86-64 is decoded with Capstone and lifted to LLVM IR, one LLVM function per guest function, operating on `GuestState`. LLVM optimizes it and emits arm64.
 - **Flags:** flags are computed into `GuestState` fields; LLVM drops the dead ones.
 - **SIMD:** SSE and AVX map to LLVM vector types, and 256-bit operations are lowered to two 128-bit NEON operations by LLVM.
+- **x87:** the FPU stack is eight doubles in `GuestState` with a dynamic top, plus the control and status words (control word 0x037f at thread start). Loads, stores, arithmetic, comparisons (status word and `fcomi` flags), `fcmov`, rounding by the control word, transcendental instructions, BCD (`fbld`/`fbstp`) and 80-bit memory operands are lifted; 80-bit values are rounded to double precision, and tag words and exceptions are not modeled. `tests/x87_smoke.c` checks the set.
 - **Function discovery:**
   - the ELF entry, `DT_INIT`/`INIT_ARRAY`
   - exported and local symbols

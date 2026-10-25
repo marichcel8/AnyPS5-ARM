@@ -955,7 +955,7 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
         }
         return;
     default:
-        if (EmitVectorInteger(instruction) || EmitVectorFloat(instruction) || EmitBits(instruction)) return;
+        if (EmitVectorInteger(instruction) || EmitVectorFloat(instruction) || EmitBits(instruction) || EmitX87(instruction)) return;
         throw Unsupported{instruction.mnemonic};
     }
 }

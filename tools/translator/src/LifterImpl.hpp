@@ -233,6 +233,7 @@ struct Lifter::Impl {
     bool EmitVectorInteger(const Instruction& instruction); // LiftVector.cpp
     bool EmitVectorFloat(const Instruction& instruction);   // LiftFloat.cpp
     bool EmitBits(const Instruction& instruction);          // LiftBits.cpp
+    bool EmitX87(const Instruction& instruction);
 
     // Vector helpers (LiftVector.cpp). Registers and memory hold vectors as iN; Lanes views one as
     // N/elementBits lanes of the element type and Flat turns it back.
