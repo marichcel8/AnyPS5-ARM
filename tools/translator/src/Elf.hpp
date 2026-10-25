@@ -55,6 +55,7 @@ public:
     const std::vector<Symbol>& Symbols() const { return symbols; }
     const std::vector<std::string>& Needed() const { return needed; }
     std::vector<std::uint64_t> InitFunctions() const;
+    const std::map<std::uint64_t, std::uint64_t>& FunctionRanges() const { return functionRanges; }
 
     // The bytes of the loaded image at a virtual address, or null outside the file-backed part.
     const std::uint8_t* At(std::uint64_t vaddr, std::uint64_t size) const;
@@ -68,6 +69,7 @@ private:
     std::uint64_t TableSize(std::int64_t osTag, std::int64_t sysvTag) const;
     std::string String(std::uint64_t offset) const;
     void ReadRelocations(std::uint64_t offset, std::uint64_t size);
+    void ReadUnwindTable(std::uint64_t header);
 
     std::vector<std::uint8_t> bytes;
     std::vector<Segment> loads;
@@ -82,6 +84,7 @@ private:
     std::vector<Relocation> relocations;
     std::vector<Symbol> symbols;
     std::vector<std::string> needed;
+    std::map<std::uint64_t, std::uint64_t> functionRanges;
 };
 
 }

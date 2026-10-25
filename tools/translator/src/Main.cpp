@@ -1,5 +1,6 @@
 #include "Elf.hpp"
 #include "Lifter.hpp"
+#include "Profile.hpp"
 
 #include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/StringExtras.h>
@@ -39,10 +40,12 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 #if defined(__APPLE__)
 #include <malloc/malloc.h>
+#include <pthread/qos.h>
 #endif
 
 namespace {
@@ -55,14 +58,34 @@ std::size_t Setting(const char* name, std::size_t fallback) {
     return static_cast<std::size_t>(std::strtoull(text, nullptr, 10));
 }
 
+std::size_t Cores() {
+    return std::max(1u, std::thread::hardware_concurrency());
+}
+
+std::size_t MemoryBudget() {
+    const auto pages = sysconf(_SC_PHYS_PAGES), pageSize = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || pageSize <= 0) return 16384;
+    const auto gigabytes = static_cast<std::size_t>(pages) * static_cast<std::size_t>(pageSize) >> 30;
+    return std::max<std::size_t>(4096, gigabytes * 3072);
+}
+
+bool Unlimited() {
+    const char* text = std::getenv("APS5_TRANSLATOR_JOBS");
+    return text != nullptr && std::string(text) == "max";
+}
+
 struct Options {
-    std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
+    bool unlimited = Unlimited();
+    std::size_t jobs = unlimited ? Cores() : std::max<std::size_t>(1, Setting("APS5_TRANSLATOR_JOBS", Cores()));
     std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 4096);
     std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 2500);
     std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 2500);
     std::size_t large = Setting("APS5_TRANSLATOR_LARGE", 2000);
-    std::size_t budget = Setting("APS5_TRANSLATOR_BUDGET", 16384);
+    std::size_t budget = unlimited ? ~std::size_t{0} / 4 : Setting("APS5_TRANSLATOR_BUDGET", MemoryBudget());
+    std::size_t hot = Setting("APS5_TRANSLATOR_HOT", 1000);
+    bool quick = std::getenv("APS5_TRANSLATOR_TIER") != nullptr && std::string(std::getenv("APS5_TRANSLATOR_TIER")) == "quick";
     bool verbose = std::getenv("APS5_TRANSLATOR_STATS") != nullptr;
+    bool verify = std::getenv("APS5_TRANSLATOR_VERIFY") != nullptr;
 };
 
 void Optimize(llvm::Module& module, llvm::TargetMachine& machine, const std::vector<llvm::Function*>& huge, const std::vector<llvm::Function*>& giant) {
@@ -87,7 +110,8 @@ void Optimize(llvm::Module& module, llvm::TargetMachine& machine, const std::vec
     builder.registerFunctionAnalyses(functions);
     builder.registerLoopAnalyses(loops);
     builder.crossRegisterProxies(loops, functions, cgscc, modules);
-    builder.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2).run(module, modules);
+    const auto defined = std::count_if(module.begin(), module.end(), [](const llvm::Function& function) { return !function.isDeclaration(); });
+    if (static_cast<std::size_t>(defined) > huge.size() + giant.size()) builder.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2).run(module, modules);
     if (huge.empty() && giant.empty()) return;
     llvm::FunctionPassManager light;
     light.addPass(llvm::SROAPass(llvm::SROAOptions::PreserveCFG));
@@ -107,11 +131,11 @@ void Optimize(llvm::Module& module, llvm::TargetMachine& machine, const std::vec
     }
 }
 
-std::unique_ptr<llvm::TargetMachine> Machine() {
+std::unique_ptr<llvm::TargetMachine> Machine(llvm::CodeGenOptLevel level = llvm::CodeGenOptLevel::Default) {
     std::string error;
     const auto* target = llvm::TargetRegistry::lookupTarget(HostTriple, error);
     if (target == nullptr) throw std::runtime_error(error);
-    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(HostTriple, "apple-m1", "", {}, llvm::Reloc::PIC_));
+    return std::unique_ptr<llvm::TargetMachine>(target->createTargetMachine(HostTriple, "apple-m1", "", {}, llvm::Reloc::PIC_, std::nullopt, level));
 }
 
 std::string Hash(const std::vector<llvm::StringRef>& parts) {
@@ -188,7 +212,30 @@ Translator::Statistics LoadStatistics(const std::string& path) {
     return stats;
 }
 
-int EmitLlvm(const Translator::Elf& elf, Translator::Lifter& lifter, const Options& options, const char* path) {
+void Classify(const Translator::Elf& elf, const Translator::Lifter& lifter, const Options& options, const std::set<std::uint64_t>& hot, llvm::Module& module,
+              const std::vector<std::uint64_t>& entries, std::vector<llvm::Function*>& huge, std::vector<llvm::Function*>& giant) {
+    for (const auto entry : entries) {
+        auto* function = module.getFunction(FunctionName(elf, entry));
+        const auto size = lifter.FunctionSize(entry);
+        const bool cold = options.quick && hot.count(entry - elf.ImageBegin()) == 0;
+        if (cold) Translator::Instrument(*function, entry - elf.ImageBegin());
+        if (cold || size > options.giant) giant.push_back(function);
+        else if (size > options.huge) huge.push_back(function);
+        else if (size > options.large) function->addFnAttr(llvm::Attribute::NoInline);
+    }
+}
+
+void EmitProfilePath(llvm::Module& module, const std::string& path) {
+    auto* type = llvm::PointerType::get(module.getContext(), 0);
+    llvm::Constant* value = llvm::ConstantPointerNull::get(type);
+    if (!path.empty()) {
+        auto* text = llvm::ConstantDataArray::getString(module.getContext(), path);
+        value = new llvm::GlobalVariable(module, text->getType(), true, llvm::GlobalValue::PrivateLinkage, text, "aps5_profile_path_text");
+    }
+    new llvm::GlobalVariable(module, type, true, llvm::GlobalValue::ExternalLinkage, value, "aps5_profile_path");
+}
+
+int EmitLlvm(const Translator::Elf& elf, Translator::Lifter& lifter, const Options& options, const std::set<std::uint64_t>& hot, const std::string& profile, const char* path) {
     llvm::LLVMContext context;
     const auto partitions = lifter.Partitions(~std::size_t{0});
     Translator::Statistics stats;
@@ -202,13 +249,8 @@ int EmitLlvm(const Translator::Elf& elf, Translator::Lifter& lifter, const Optio
     module->setTargetTriple(HostTriple);
     module->setDataLayout(machine->createDataLayout());
     std::vector<llvm::Function*> huge, giant;
-    for (const auto entry : partitions.front()) {
-        const auto size = lifter.FunctionSize(entry);
-        auto* function = module->getFunction(FunctionName(elf, entry));
-        if (size > options.giant) giant.push_back(function);
-        else if (size > options.huge) huge.push_back(function);
-        else if (size > options.large) function->addFnAttr(llvm::Attribute::NoInline);
-    }
+    Classify(elf, lifter, options, hot, *module, partitions.front(), huge, giant);
+    EmitProfilePath(*module, profile);
     Optimize(*module, *machine, huge, giant);
     std::error_code code;
     llvm::raw_fd_ostream output(path, code, llvm::sys::fs::OF_None);
@@ -240,17 +282,26 @@ int main(int argc, char** argv) {
         const Translator::Elf elf(argv[1]);
         Translator::Lifter lifter(elf);
         lifter.Discover();
-        if (emitLlvm) return EmitLlvm(elf, lifter, options, argv[2]);
+        const std::chrono::duration<double> discovery = std::chrono::steady_clock::now() - started;
+        const auto& bytes = elf.Bytes();
+        const auto elfKey = Hash({"elf", llvm::StringRef(reinterpret_cast<const char*>(bytes.data()), bytes.size())});
+        auto cache = CacheDirectory(elfKey);
+        std::string profile;
+        if (const char* setting = std::getenv("APS5_TRANSLATOR_PROFILE"); setting != nullptr && *setting != 0) profile = setting;
+        else if (!cache.empty()) profile = cache + "/profile.txt";
+        if (!options.quick) profile.clear();
+        std::set<std::uint64_t> hot;
+        for (const auto& [offset, count] : Translator::ReadProfile(profile)) {
+            if (count >= options.hot) hot.insert(offset);
+        }
+        if (emitLlvm) return EmitLlvm(elf, lifter, options, hot, profile, argv[2]);
 
         const auto partitions = lifter.Partitions(options.partition);
         const bool shared = partitions.size() > 1;
-        const auto& bytes = elf.Bytes();
         const std::string settings = std::to_string(options.partition) + ":" + std::to_string(options.huge) + ":" + std::to_string(options.giant) + ":" +
                                      std::to_string(options.large) + ":" +
-                                     (std::getenv("APS5_TRANSLATOR_ALL_FLAGS") != nullptr ? "flags" : "");
-        const auto elfKey = Hash({"elf", llvm::StringRef(reinterpret_cast<const char*>(bytes.data()), bytes.size())});
+                                     (std::getenv("APS5_TRANSLATOR_ALL_FLAGS") != nullptr ? "flags" : "") + ":" + (options.quick ? "quick:" + profile : "full");
         const auto runKey = Hash({ToolKey(argv[0]), elfKey, settings});
-        auto cache = CacheDirectory(elfKey);
         llvm::SmallString<256> scratch;
         if (cache.empty()) {
             if (llvm::sys::fs::createUniqueDirectory("aps5-translator", scratch)) throw std::runtime_error("cannot create a work directory");
@@ -259,13 +310,17 @@ int main(int argc, char** argv) {
 
         std::vector<std::string> objects(partitions.size());
         std::vector<std::size_t> sizes(partitions.size(), 0);
+        std::vector<std::size_t> costs(partitions.size(), 0);
         std::size_t hugeCount = 0;
         for (std::size_t i = 0; i < partitions.size(); ++i) {
             std::string entries;
             for (const auto entry : partitions[i]) {
-                sizes[i] += lifter.FunctionSize(entry);
-                if (lifter.FunctionSize(entry) > options.huge) ++hugeCount;
-                entries += llvm::utohexstr(entry, true) + ",";
+                const auto size = lifter.FunctionSize(entry);
+                const bool cold = options.quick && hot.count(entry - elf.ImageBegin()) == 0;
+                sizes[i] += size;
+                costs[i] += cold || size > options.giant ? size / 8 : size;
+                if (!cold && size > options.huge) ++hugeCount;
+                entries += llvm::utohexstr(entry, true) + (cold ? "c," : ",");
             }
             llvm::SmallString<256> path(work);
             llvm::sys::path::append(path, Hash({runKey, std::to_string(i), entries}) + ".o");
@@ -283,6 +338,13 @@ int main(int argc, char** argv) {
         std::mutex lock;
         std::size_t next = 0;
         std::atomic<std::size_t> cached{0};
+        std::atomic<std::int64_t> liftTime{0}, optimizeTime{0}, codegenTime{0};
+        auto since = [](std::chrono::steady_clock::time_point& mark) {
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(now - mark).count();
+            mark = now;
+            return elapsed;
+        };
         std::string failure;
         auto translate = [&](std::size_t index) {
             if (llvm::sys::fs::exists(objects[index])) {
@@ -293,22 +355,21 @@ int main(int argc, char** argv) {
                 return;
             }
             const auto begun = std::chrono::steady_clock::now();
+            auto mark = begun;
             llvm::LLVMContext context;
             Translator::Statistics stats;
             auto module = lifter.Lift(context, partitions[index], index == 0, shared, options.huge, stats);
-            if (llvm::verifyModule(*module, &llvm::errs())) throw std::runtime_error("lifted partition " + std::to_string(index) + " does not verify");
-            auto machine = Machine();
+            if (options.verify && llvm::verifyModule(*module, &llvm::errs())) throw std::runtime_error("lifted partition " + std::to_string(index) + " does not verify");
+            const bool cold = options.quick && std::none_of(partitions[index].begin(), partitions[index].end(), [&](std::uint64_t entry) { return hot.count(entry - elf.ImageBegin()) != 0; });
+            auto machine = Machine(cold ? llvm::CodeGenOptLevel::None : llvm::CodeGenOptLevel::Default);
             module->setTargetTriple(HostTriple);
             module->setDataLayout(machine->createDataLayout());
             std::vector<llvm::Function*> huge, giant;
-            for (const auto entry : partitions[index]) {
-                auto* function = module->getFunction(FunctionName(elf, entry));
-                const auto size = lifter.FunctionSize(entry);
-                if (size > options.giant) giant.push_back(function);
-                else if (size > options.huge) huge.push_back(function);
-                else if (size > options.large) function->addFnAttr(llvm::Attribute::NoInline);
-            }
+            Classify(elf, lifter, options, hot, *module, partitions[index], huge, giant);
+            if (index == 0) EmitProfilePath(*module, profile);
+            liftTime += since(mark);
             Optimize(*module, *machine, huge, giant);
+            optimizeTime += since(mark);
             const auto partial = objects[index] + ".part";
             {
                 std::error_code code;
@@ -318,6 +379,7 @@ int main(int argc, char** argv) {
                 if (machine->addPassesToEmitFile(passes, output, nullptr, llvm::CodeGenFileType::ObjectFile)) throw std::runtime_error("the target cannot emit an object file");
                 passes.run(*module);
             }
+            codegenTime += since(mark);
             SaveStatistics(stats, objects[index] + ".txt");
             if (llvm::sys::fs::rename(partial, objects[index])) throw std::runtime_error("cannot write " + objects[index]);
             const std::lock_guard<std::mutex> guard(lock);
@@ -330,16 +392,19 @@ int main(int argc, char** argv) {
         std::condition_variable released;
         std::size_t inFlight = 0;
         auto worker = [&]() {
+#if defined(__APPLE__)
+            pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+#endif
             for (;;) {
                 std::size_t index = 0, cost = 0;
                 {
                     std::unique_lock<std::mutex> guard(lock);
                     released.wait(guard, [&] {
-                        return next >= order.size() || inFlight == 0 || inFlight + std::min(sizes[order[next]], options.budget) <= options.budget;
+                        return next >= order.size() || inFlight == 0 || inFlight + std::min(costs[order[next]], options.budget) <= options.budget;
                     });
                     if (next >= order.size()) return;
                     index = order[next++];
-                    cost = std::min(sizes[index], options.budget);
+                    cost = std::min(costs[index], options.budget);
                     inFlight += cost;
                 }
                 auto release = llvm::make_scope_exit([&] {
@@ -377,6 +442,7 @@ int main(int argc, char** argv) {
         } else {
             std::set<std::string> keep;
             for (const auto& object : objects) keep.insert({object, object + ".txt"});
+            keep.insert(profile);
             std::error_code code;
             for (llvm::sys::fs::directory_iterator it(work, code), end; it != end && !code; it.increment(code)) {
                 if (keep.count(it->path()) == 0) llvm::sys::fs::remove(it->path());
@@ -388,6 +454,10 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "%zu functions, %zu instructions lifted\n", found.functions, total.instructions);
         std::fprintf(stderr, "%zu partitions on %zu threads, %zu cached, %zu huge functions optimized lightly, %.1f s\n", partitions.size(), jobs, cached.load(), hugeCount,
                      took.count());
+        if (options.quick) std::fprintf(stderr, "quick tier: %zu hot functions optimized fully, profile %s\n", hot.size(), profile.empty() ? "(none)" : profile.c_str());
+        if (options.verbose)
+            std::fprintf(stderr, "  discovery %.1f s; over all threads: lifting %.1f s, optimization %.1f s, code generation %.1f s\n", discovery.count(), liftTime.load() / 1e6,
+                         optimizeTime.load() / 1e6, codegenTime.load() / 1e6);
         for (const auto& [what, count] : total.unsupported) std::fprintf(stderr, "  unsupported: %s (%zu)\n", what.c_str(), count);
     } catch (const std::exception& exception) {
         std::fprintf(stderr, "%s\n", exception.what());

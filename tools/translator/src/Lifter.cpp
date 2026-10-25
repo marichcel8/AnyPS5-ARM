@@ -36,6 +36,17 @@ const Instruction& Lifter::Impl::Decode(std::uint64_t address) {
 // targets join this function, except entries of known functions, which are lifted as tail calls.
 void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pending) {
     auto& addresses = functions[entry];
+    const auto& ranges = elf.FunctionRanges();
+    auto range = ranges.upper_bound(entry);
+    if (range != ranges.begin() && std::prev(range)->second > entry) --range;
+    else range = ranges.end();
+    const std::uint64_t begin = range != ranges.end() ? range->first : 0;
+    const std::uint64_t end = range != ranges.end() ? range->second : ~std::uint64_t{0};
+    auto inside = [&](std::uint64_t target) {
+        if (target == entry) return true;
+        if (ranges.count(target) != 0) return false;
+        return target >= begin && target < end;
+    };
     std::vector<std::uint64_t> work{entry};
     while (!work.empty()) {
         auto address = work.back();
@@ -46,7 +57,10 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
             if (instruction.size == 0) break;
             path.push_back(address);
             if (instruction.id == X86_INS_JMP && instruction.x86.op_count == 1 && instruction.Op(0).type == X86_OP_REG) {
-                auto table = JumpTable(path, addresses);
+                auto table = JumpTable(path, addresses, begin, end);
+                const auto kept = std::remove_if(table.targets.begin(), table.targets.end(), [&](std::uint64_t target) { return !inside(target); });
+                if (kept != table.targets.end()) table.bounded = false;
+                table.targets.erase(kept, table.targets.end());
                 for (const auto target : table.targets) {
                     tableTargets[entry].insert(target);
                     work.push_back(target);
@@ -54,7 +68,7 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
                 jumpTables[address] = std::move(table);
             }
             const auto target = instruction.DirectTarget();
-            const bool internal = target && elf.InExecutable(*target) && functions.count(*target) == 0;
+            const bool internal = target && elf.InExecutable(*target) && (*target == entry || functions.count(*target) == 0) && inside(*target);
             if (instruction.id == X86_INS_CALL) {
                 if (target && elf.InExecutable(*target)) pending.push_back(*target);
             } else if (instruction.id == X86_INS_LEA && instruction.Op(1).mem.base == X86_REG_RIP) {
@@ -64,9 +78,11 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
                 if (elf.InExecutable(taken)) pending.push_back(taken);
             } else if (instruction.id == X86_INS_JMP || IsConditionalJump(instruction.id)) {
                 if (internal) work.push_back(*target);
+                else if (target && elf.InExecutable(*target)) pending.push_back(*target);
             }
             if (EndsPath(instruction.id)) break;
             address = instruction.Next();
+            if (address >= end) break;
         }
     }
 }
@@ -77,7 +93,7 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
 // The lea may be hoisted out of a loop, so it is also looked up in the rest of the function. Without
 // the bounds check, entries are taken while they land in executable code near the jump; an extra
 // target only costs translated code, it is never jumped to.
-JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function) {
+JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function, std::uint64_t begin, std::uint64_t end) {
     const auto& jump = decoded.at(path.back());
     const auto jumpReg = RegisterOf(jump.Op(0).reg).index;
     std::optional<std::uint64_t> table;
@@ -105,9 +121,18 @@ JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path,
         if (!table) {
             if (const auto found = tableLea(instruction); found && (*found & 3) == 0) table = found;
         }
-        if (!count && instruction.id == X86_INS_CMP && x86.op_count == 2 && x86.operands[0].type == X86_OP_REG && x86.operands[1].type == X86_OP_IMM &&
-            RegisterOf(x86.operands[0].reg).index == indexReg && x86.operands[1].imm >= 0)
+        if (count || indexReg == ~0u) continue;
+        const bool writesIndex = x86.op_count != 0 && x86.operands[0].type == X86_OP_REG && RegisterOf(x86.operands[0].reg).index == indexReg;
+        if (instruction.id == X86_INS_CMP && x86.op_count == 2 && writesIndex && x86.operands[1].type == X86_OP_IMM && x86.operands[1].imm >= 0) {
             count = static_cast<std::uint64_t>(x86.operands[1].imm) + 1;
+        } else if (instruction.id == X86_INS_AND && x86.op_count == 2 && writesIndex && x86.operands[1].type == X86_OP_IMM && x86.operands[1].imm >= 0 &&
+                   x86.operands[1].imm < 4096) {
+            count = static_cast<std::uint64_t>(x86.operands[1].imm) + 1;
+        } else if (writesIndex && instruction.id != X86_INS_CMP && instruction.id != X86_INS_TEST) {
+            const bool copy = (instruction.id == X86_INS_MOV || instruction.id == X86_INS_MOVZX || instruction.id == X86_INS_MOVSXD) && x86.op_count == 2 &&
+                              x86.operands[1].type == X86_OP_REG;
+            indexReg = copy ? RegisterOf(x86.operands[1].reg).index : ~0u;
+        }
     }
     if (baseReg == ~0u) return {};
     if (!table) {
@@ -130,7 +155,24 @@ JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path,
         std::fprintf(stderr, "jump table at %llx: base reg %u index %u table %llx count %lld\n", (unsigned long long)jump.address, baseReg, indexReg,
                      (unsigned long long)table.value_or(0), count ? (long long)*count : -1ll);
     if (!table) return result;
-    const std::uint64_t limit = count.value_or(256);
+    std::uint64_t limit = count.value_or(256);
+    std::set<std::uint64_t> starts;
+    const bool swept = !count && end != ~std::uint64_t{0} && end - begin <= (1u << 20);
+    if (swept) {
+        for (auto at = begin; at < end;) {
+            const auto& instruction = Decode(at);
+            if (instruction.size == 0) {
+                ++at;
+                continue;
+            }
+            starts.insert(at);
+            if (instruction.id == X86_INS_LEA && instruction.x86.op_count == 2 && instruction.Op(1).mem.base == X86_REG_RIP) {
+                const auto address = instruction.Next() + static_cast<std::uint64_t>(instruction.Op(1).mem.disp);
+                if (address > *table && !elf.InExecutable(address)) limit = std::min(limit, (address - *table) / 4);
+            }
+            at = instruction.Next();
+        }
+    }
     for (std::uint64_t i = 0; i < limit && i < 4096; ++i) {
         const auto* slot = elf.At(*table + i * 4, 4);
         if (slot == nullptr) break;
@@ -139,6 +181,7 @@ JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path,
         const auto target = *table + static_cast<std::uint64_t>(static_cast<std::int64_t>(offset));
         if (!elf.InExecutable(target)) break;
         if (!count && (target + 0x10000 < jump.address || target > jump.address + 0x10000)) break;
+        if (swept && starts.count(target) == 0) break;
         targets.push_back(target);
     }
     result.bounded = count && targets.size() == *count;
@@ -186,6 +229,8 @@ llvm::Value* Lifter::Impl::ReadRegister(unsigned reg) {
         return ReadPart(r.index, r.bits, r.shift);
     case Register::Vector:
         return builder.CreateLoad(Int(r.bits), Field(StateLayout::Ymm + r.index * 32));
+    case Register::Mmx:
+        return builder.CreateLoad(Int(64), Field(StateLayout::X87 + r.index * 8));
     default:
         throw Unsupported{"register operand"};
     }
@@ -201,6 +246,9 @@ void Lifter::Impl::WriteRegister(unsigned reg, llvm::Value* value, bool vex) {
     case Register::Vector:
         builder.CreateStore(Resize(value, r.bits), Field(StateLayout::Ymm + r.index * 32));
         if (vex && r.bits == 128) builder.CreateStore(Const(128, 0), Field(StateLayout::Ymm + r.index * 32 + 16));
+        return;
+    case Register::Mmx:
+        builder.CreateStore(Resize(value, 64), Field(StateLayout::X87 + r.index * 8));
         return;
     default:
         throw Unsupported{"register operand"};
@@ -904,8 +952,42 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
         return;
     }
     switch (id) {
-    case X86_INS_NOP: case X86_INS_ENDBR64: case X86_INS_PAUSE:
+    case X86_INS_NOP: case X86_INS_ENDBR64: case X86_INS_PAUSE: case X86_INS_EMMS:
     case X86_INS_PREFETCH: case X86_INS_PREFETCHW: case X86_INS_PREFETCHT0: case X86_INS_PREFETCHT1: case X86_INS_PREFETCHT2: case X86_INS_PREFETCHNTA:
+        return;
+    case X86_INS_EXTRQ: case X86_INS_INSERTQ: {
+        const bool insert = id == X86_INS_INSERTQ;
+        auto* destination = Read(instruction, 0);
+        const unsigned control = insert ? 2 : 1;
+        llvm::Value* length = nullptr;
+        llvm::Value* index = nullptr;
+        if (x86.op_count > control + 1 && instruction.Op(control).type == X86_OP_IMM) {
+            length = builder.getInt64(static_cast<std::uint64_t>(instruction.Op(control).imm) & 63);
+            index = builder.getInt64(static_cast<std::uint64_t>(instruction.Op(control + 1).imm) & 63);
+        } else {
+            auto* field = Resize(insert ? builder.CreateLShr(Read(instruction, 1), 64) : Read(instruction, 1), 64);
+            length = builder.CreateAnd(field, 63);
+            index = builder.CreateAnd(builder.CreateLShr(field, 8), 63);
+        }
+        auto* mask = builder.CreateSelect(builder.CreateICmpEQ(length, builder.getInt64(0)), builder.getInt64(~std::uint64_t{0}),
+                                          builder.CreateSub(builder.CreateShl(builder.getInt64(1), length), builder.getInt64(1)));
+        auto* low = Resize(destination, 64);
+        llvm::Value* result = nullptr;
+        if (insert) {
+            auto* source = Resize(Read(instruction, 1), 64);
+            result = builder.CreateOr(builder.CreateAnd(low, builder.CreateNot(builder.CreateShl(mask, index))), builder.CreateShl(builder.CreateAnd(source, mask), index));
+        } else {
+            result = builder.CreateAnd(builder.CreateLShr(low, index), mask);
+        }
+        auto* upper = builder.CreateShl(builder.CreateLShr(destination, 64), 64);
+        Write(instruction, 0, builder.CreateOr(upper, Resize(result, 128)));
+        return;
+    }
+    case X86_INS_LDMXCSR: case X86_INS_VLDMXCSR:
+        builder.CreateStore(Load(builder.getInt32Ty(), Address(instruction, x86.operands[0].mem)), Field(StateLayout::Mxcsr));
+        return;
+    case X86_INS_STMXCSR: case X86_INS_VSTMXCSR:
+        Store(builder.CreateLoad(builder.getInt32Ty(), Field(StateLayout::Mxcsr)), Address(instruction, x86.operands[0].mem));
         return;
     case X86_INS_LFENCE: case X86_INS_MFENCE: case X86_INS_SFENCE:
         builder.CreateFence(llvm::AtomicOrdering::SequentiallyConsistent);
@@ -1050,7 +1132,7 @@ void Lifter::Impl::Emit(const Instruction& instruction) {
     case X86_INS_MOVAPS: case X86_INS_MOVUPS: case X86_INS_MOVAPD: case X86_INS_MOVUPD: case X86_INS_MOVDQA: case X86_INS_MOVDQU:
     case X86_INS_LDDQU: case X86_INS_MOVNTDQ: case X86_INS_MOVNTPS: case X86_INS_MOVNTPD: case X86_INS_MOVD: case X86_INS_MOVQ:
     case X86_INS_VMOVAPS: case X86_INS_VMOVUPS: case X86_INS_VMOVAPD: case X86_INS_VMOVUPD: case X86_INS_VMOVDQA: case X86_INS_VMOVDQU:
-    case X86_INS_VMOVD: case X86_INS_VMOVQ:
+    case X86_INS_VMOVD: case X86_INS_VMOVQ: case X86_INS_VMOVNTDQ: case X86_INS_VMOVNTPS: case X86_INS_VMOVNTPD: case X86_INS_MOVNTDQA: case X86_INS_VMOVNTDQA:
         VectorMove(instruction);
         return;
     case X86_INS_PXOR: case X86_INS_XORPS: case X86_INS_XORPD: case X86_INS_PAND: case X86_INS_ANDPS: case X86_INS_ANDPD:
@@ -1159,6 +1241,7 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
             ++stats.instructions;
             if (!builder.GetInsertBlock()->hasTerminator()) {
                 if (const auto next = blocks.find(instruction.Next()); next != blocks.end()) builder.CreateBr(next->second);
+                else if (addresses.count(instruction.Next()) == 0 && lifted.count(instruction.Next()) != 0) TailCall(instruction.Next());
                 else if (addresses.count(instruction.Next()) == 0) Trap(unsupportedRuntime, instruction.Next());
             }
         } catch (const Unsupported& unsupported) {
@@ -1349,6 +1432,7 @@ void Lifter::Discover() {
         if (elf.InExecutable(address)) pending.push_back(address);
     };
     seed(elf.Entry());
+    for (const auto& [begin, end] : elf.FunctionRanges()) seed(begin);
     for (const auto address : elf.InitFunctions()) seed(address);
     for (const auto& symbol : elf.Symbols()) {
         if ((symbol.info & 0xf) == SymbolTypeFunction && symbol.section != 0) seed(symbol.value);
