@@ -64,3 +64,51 @@ _aps5_enter:
     add sp, sp, #192
     ldp x29, x30, [sp], #16
     ret
+
+// aps5_call(GuestState* state, uint64_t target): every translated call or jump to an address the
+// translator could not resolve. A call to the libc setjmp saves the registers of its translated
+// caller, so that aps5_native_restore can later continue there as if this call returned again;
+// everything else goes to aps5_call_impl.
+    .p2align 2
+    .globl _aps5_call
+_aps5_call:
+    adrp x2, _aps5_setjmp_target@PAGE
+    ldr x2, [x2, _aps5_setjmp_target@PAGEOFF]
+    cmp x1, x2
+    b.eq Lsetjmp
+    b _aps5_call_impl
+Lsetjmp:
+    stp x29, x30, [sp, #-16]!
+    bl _aps5_prepare_jump
+    ldp x29, x30, [sp], #16
+    stp x19, x20, [x0, #0]
+    stp x21, x22, [x0, #16]
+    stp x23, x24, [x0, #32]
+    stp x25, x26, [x0, #48]
+    stp x27, x28, [x0, #64]
+    stp x29, x30, [x0, #80]
+    mov x2, sp
+    str x2, [x0, #96]
+    stp d8, d9, [x0, #104]
+    stp d10, d11, [x0, #120]
+    stp d12, d13, [x0, #136]
+    stp d14, d15, [x0, #152]
+    ret
+
+// aps5_native_restore(const uint64_t* registers): continues after the aps5_call that saved them.
+    .p2align 2
+    .globl _aps5_native_restore
+_aps5_native_restore:
+    ldp x19, x20, [x0, #0]
+    ldp x21, x22, [x0, #16]
+    ldp x23, x24, [x0, #32]
+    ldp x25, x26, [x0, #48]
+    ldp x27, x28, [x0, #64]
+    ldp x29, x30, [x0, #80]
+    ldr x2, [x0, #96]
+    mov sp, x2
+    ldp d8, d9, [x0, #104]
+    ldp d10, d11, [x0, #120]
+    ldp d12, d13, [x0, #136]
+    ldp d14, d15, [x0, #152]
+    ret
