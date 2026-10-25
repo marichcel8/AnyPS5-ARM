@@ -22,7 +22,7 @@ extension AppModel {
 
     /// The version of that toolkit, without touching the disk for a downloaded one.
     func engineVersion(for game: Game) -> String? {
-        engineVersion(of: engineChoice(for: game))
+        nativeEngine?.version ?? engineVersion(of: engineChoice(for: game))
     }
 
     func engineVersion(of choice: EngineChoice) -> String? {
