@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -82,6 +83,8 @@ struct WriteBack {
 };
 
 enum class Numeric : std::uint8_t { Float, Uint, Sint };
+
+constexpr std::uint32_t RawPackedFormat = 20;
 
 struct ImageKind {
     Numeric numeric = Numeric::Float;
@@ -421,6 +424,11 @@ struct VulkanDevice::State {
     std::optional<std::size_t> pendingPresent;
     std::uint32_t presentWidth = 0;
     std::uint32_t presentHeight = 0;
+    std::chrono::steady_clock::time_point reportAt{};
+    std::uint64_t reportFrames = 0;
+    std::uint64_t reportDraws = 0;
+    std::uint64_t reportDispatches = 0;
+    Metal::PresenterStats reportStats{};
 
     std::mutex pipelineMutex;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, PipelineEntry, IdentityHash> pipelines;
@@ -762,7 +770,30 @@ struct VulkanDevice::State {
         source.height = presentHeight;
         const auto result = presenter->Present(source);
         if (result.serial != 0) presentSerials[slot] = result.serial;
+        reportPresents();
         return result.pacedMs + result.waitMs;
+    }
+
+    void reportPresents() {
+        const auto now = std::chrono::steady_clock::now();
+        ++reportFrames;
+        const bool first = reportAt == std::chrono::steady_clock::time_point{};
+        if (!first && now - reportAt < std::chrono::seconds(10)) return;
+        const auto stats = presenter->Stats();
+        const auto seconds = first ? 0.0 : std::chrono::duration<double>(now - reportAt).count();
+        const auto presented = stats.presented - reportStats.presented;
+        const auto drawCount = draws.load(std::memory_order_relaxed);
+        const auto dispatchCount = dispatches.load(std::memory_order_relaxed);
+        std::fprintf(stderr, "[metal] present: %llu flips in %.1f s (%.1f fps), %llu presented, %llu suspended, %llu without drawable, %llu upscaled; source %ux%u, refresh %.0f Hz, effective %.1f Hz; %llu draws, %llu dispatches\n",
+                     static_cast<unsigned long long>(reportFrames), seconds, seconds > 0.0 ? static_cast<double>(presented) / seconds : 0.0, static_cast<unsigned long long>(presented),
+                     static_cast<unsigned long long>(stats.suspended - reportStats.suspended), static_cast<unsigned long long>(stats.noDrawable - reportStats.noDrawable),
+                     static_cast<unsigned long long>(stats.upscaled - reportStats.upscaled), presentWidth, presentHeight, stats.refreshHz, stats.effectiveHz,
+                     static_cast<unsigned long long>(drawCount - reportDraws), static_cast<unsigned long long>(dispatchCount - reportDispatches));
+        reportAt = now;
+        reportFrames = 0;
+        reportDraws = drawCount;
+        reportDispatches = dispatchCount;
+        reportStats = stats;
     }
 
     void settleForPresent() {
@@ -825,7 +856,8 @@ struct VulkanDevice::State {
     std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses, std::optional<std::uint32_t> storageMip = std::nullopt) {
         const auto viewKind = ViewKindOf(shape);
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
-        const auto resource = Graphics::DecodeTextureResource(words);
+        auto resource = Graphics::DecodeTextureResource(words);
+        if (const auto* format = Metal::FindFormat(resource.format); numeric && *numeric != Numeric::Float && format != nullptr && format->transform == Metal::TextureTransform::Repack101111) resource.format = RawPackedFormat;
         const auto [found, info, layers] = surfaceFor(resource);
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
         auto& surface = *found;
