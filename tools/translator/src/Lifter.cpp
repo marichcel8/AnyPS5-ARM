@@ -36,6 +36,17 @@ const Instruction& Lifter::Impl::Decode(std::uint64_t address) {
 // targets join this function, except entries of known functions, which are lifted as tail calls.
 void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pending) {
     auto& addresses = functions[entry];
+    const auto& ranges = elf.FunctionRanges();
+    auto range = ranges.upper_bound(entry);
+    if (range != ranges.begin() && std::prev(range)->second > entry) --range;
+    else range = ranges.end();
+    const std::uint64_t begin = range != ranges.end() ? range->first : 0;
+    const std::uint64_t end = range != ranges.end() ? range->second : ~std::uint64_t{0};
+    auto inside = [&](std::uint64_t target) {
+        if (target == entry) return true;
+        if (ranges.count(target) != 0) return false;
+        return target >= begin && target < end;
+    };
     std::vector<std::uint64_t> work{entry};
     while (!work.empty()) {
         auto address = work.back();
@@ -47,6 +58,9 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
             path.push_back(address);
             if (instruction.id == X86_INS_JMP && instruction.x86.op_count == 1 && instruction.Op(0).type == X86_OP_REG) {
                 auto table = JumpTable(path, addresses);
+                const auto kept = std::remove_if(table.targets.begin(), table.targets.end(), [&](std::uint64_t target) { return !inside(target); });
+                if (kept != table.targets.end()) table.bounded = false;
+                table.targets.erase(kept, table.targets.end());
                 for (const auto target : table.targets) {
                     tableTargets[entry].insert(target);
                     work.push_back(target);
@@ -54,7 +68,7 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
                 jumpTables[address] = std::move(table);
             }
             const auto target = instruction.DirectTarget();
-            const bool internal = target && elf.InExecutable(*target) && functions.count(*target) == 0;
+            const bool internal = target && elf.InExecutable(*target) && (*target == entry || functions.count(*target) == 0) && inside(*target);
             if (instruction.id == X86_INS_CALL) {
                 if (target && elf.InExecutable(*target)) pending.push_back(*target);
             } else if (instruction.id == X86_INS_LEA && instruction.Op(1).mem.base == X86_REG_RIP) {
@@ -64,9 +78,11 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
                 if (elf.InExecutable(taken)) pending.push_back(taken);
             } else if (instruction.id == X86_INS_JMP || IsConditionalJump(instruction.id)) {
                 if (internal) work.push_back(*target);
+                else if (target && elf.InExecutable(*target)) pending.push_back(*target);
             }
             if (EndsPath(instruction.id)) break;
             address = instruction.Next();
+            if (address >= end) break;
         }
     }
 }
@@ -1159,6 +1175,7 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
             ++stats.instructions;
             if (!builder.GetInsertBlock()->hasTerminator()) {
                 if (const auto next = blocks.find(instruction.Next()); next != blocks.end()) builder.CreateBr(next->second);
+                else if (addresses.count(instruction.Next()) == 0 && lifted.count(instruction.Next()) != 0) TailCall(instruction.Next());
                 else if (addresses.count(instruction.Next()) == 0) Trap(unsupportedRuntime, instruction.Next());
             }
         } catch (const Unsupported& unsupported) {
@@ -1349,6 +1366,7 @@ void Lifter::Discover() {
         if (elf.InExecutable(address)) pending.push_back(address);
     };
     seed(elf.Entry());
+    for (const auto& [begin, end] : elf.FunctionRanges()) seed(begin);
     for (const auto address : elf.InitFunctions()) seed(address);
     for (const auto& symbol : elf.Symbols()) {
         if ((symbol.info & 0xf) == SymbolTypeFunction && symbol.section != 0) seed(symbol.value);
