@@ -18,7 +18,8 @@ uint32_t APS5_VABI sceAgcAcbAcquireMemGetSize(void) {
     return 32;
 }
 
-uint32_t* APS5_VABI sceAgcAcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src, uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size, uint8_t write_confirm) {
+uint32_t* APS5_VABI sceAgcAcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src, uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size, std::uint64_t write_confirmSlot) {
+    const auto write_confirm = static_cast<uint8_t>(write_confirmSlot);
     return Agc::Command::WriteCopyData(buf, true, dst, dst_cache_policy, dst_address, src, src_cache_policy, src_address_or_immediate, item_size, write_confirm, __func__);
 }
 
@@ -26,7 +27,9 @@ std::uint64_t APS5_VABI sceAgcAcbCopyDataGetSize() {
     return 24;
 }
 
-std::uint32_t* APS5_VABI sceAgcAcbDmaData(CommandBuffer* buf, std::uint8_t dst, std::uint8_t dstCachePolicy, std::uint64_t dstAddress, std::uint8_t src, std::uint8_t srcCachePolicy, std::uint64_t srcAddress, std::uint32_t numBytes, std::uint8_t waitForPrevious, std::uint8_t writeConfirm) {
+std::uint32_t* APS5_VABI sceAgcAcbDmaData(CommandBuffer* buf, std::uint8_t dst, std::uint8_t dstCachePolicy, std::uint64_t dstAddress, std::uint8_t src, std::uint8_t srcCachePolicy, std::uint64_t srcAddress, std::uint32_t numBytes, std::uint64_t waitForPreviousSlot, std::uint64_t writeConfirmSlot) {
+    const auto waitForPrevious = static_cast<std::uint8_t>(waitForPreviousSlot);
+    const auto writeConfirm = static_cast<std::uint8_t>(writeConfirmSlot);
     return Agc::Command::WriteDma(buf, true, 0, dst, dstCachePolicy, dstAddress, src, srcCachePolicy, srcAddress, numBytes, waitForPrevious, writeConfirm, 0, __func__);
 }
 

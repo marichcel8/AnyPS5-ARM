@@ -38,7 +38,7 @@ int APS5_VABI sceUltReaderWriterLockUnlockWrite(void*);
 std::uint64_t APS5_VABI sceUltUlthreadRuntimeGetWorkAreaSize(std::uint32_t, std::uint32_t);
 int APS5_VABI sceUltUlthreadRuntimeCreate(void*, const char*, std::uint32_t, std::uint32_t, void*, const void*, std::uint32_t);
 int APS5_VABI sceUltUlthreadRuntimeDestroy(void*);
-int APS5_VABI sceUltUlthreadCreate(void*, const char*, UltUlthreadEntry, std::uint64_t, void*, std::uint64_t, void*, const void*, std::uint32_t);
+int APS5_VABI sceUltUlthreadCreate(void*, const char*, UltUlthreadEntry, std::uint64_t, void*, std::uint64_t, void*, const void*, std::uint64_t);
 int APS5_VABI sceUltUlthreadJoin(void*, std::int32_t*);
 int APS5_VABI sceUltUlthreadTryJoin(void*, std::int32_t*);
 int APS5_VABI sceUltUlthreadGetSelf(void**);

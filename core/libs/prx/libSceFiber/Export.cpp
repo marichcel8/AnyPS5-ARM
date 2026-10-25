@@ -662,7 +662,8 @@ int32_t APS5_VABI _sceFiberAttachContextAndSwitch(FiberObject* object, void* add
     return SwitchFiber(object, addr_context, size_context, arg_on_run, arg_on_run_out);
 }
 
-int32_t APS5_VABI _sceFiberInitializeWithInternalOptionImpl(FiberObject* object, const char* name, GuestFiberEntry entry, uint64_t arg_on_initialize, void* addr_context, uint64_t size_context, const FiberOptParam* opt_param, uint32_t flags, uint32_t build_version) {
+int32_t APS5_VABI _sceFiberInitializeWithInternalOptionImpl(FiberObject* object, const char* name, GuestFiberEntry entry, uint64_t arg_on_initialize, void* addr_context, uint64_t size_context, const FiberOptParam* opt_param, uint32_t flags, std::uint64_t build_versionSlot) {
+    const auto build_version = static_cast<uint32_t>(build_versionSlot);
     (void)opt_param;
     (void)build_version;
     return InitializeFiber(object, name, entry, arg_on_initialize, addr_context, size_context, flags);

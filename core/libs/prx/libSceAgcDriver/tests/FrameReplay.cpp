@@ -23,7 +23,7 @@
 
 extern "C" {
 std::uint32_t* APS5_VABI sceAgcDcbWriteData(CommandBuffer*, std::uint8_t, std::uint8_t, std::uint64_t, const void*, std::uint32_t, std::uint8_t, std::uint8_t);
-std::uint32_t* APS5_VABI sceAgcDcbDmaData(CommandBuffer*, std::uint8_t, std::uint8_t, std::uint8_t, std::uint64_t, std::uint8_t, std::uint8_t, std::uint64_t, std::uint32_t, std::uint8_t, std::uint8_t, std::uint8_t);
+std::uint32_t* APS5_VABI sceAgcDcbDmaData(CommandBuffer*, std::uint8_t, std::uint8_t, std::uint8_t, std::uint64_t, std::uint8_t, std::uint8_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t, std::uint64_t);
 }
 
 namespace {

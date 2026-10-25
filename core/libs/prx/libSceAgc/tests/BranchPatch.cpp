@@ -8,7 +8,7 @@
 #include <stdexcept>
 
 extern "C" {
-std::uint32_t* APS5_VABI sceAgcCbBranch(CommandBuffer*, std::uint8_t, std::uint8_t, const volatile std::uint64_t*, std::uint64_t, std::uint64_t, std::uint8_t, const volatile std::uint32_t*, std::uint32_t, std::uint8_t, const volatile std::uint32_t*, std::uint32_t);
+std::uint32_t* APS5_VABI sceAgcCbBranch(CommandBuffer*, std::uint8_t, std::uint8_t, const volatile std::uint64_t*, std::uint64_t, std::uint64_t, std::uint8_t, const volatile std::uint32_t*, std::uint64_t, std::uint64_t, const volatile std::uint32_t*, std::uint64_t);
 std::uint32_t APS5_VABI sceAgcCbBranchGetSize();
 int APS5_VABI sceAgcBranchPatchSetCompareAddress(std::uint32_t*, const volatile std::uint64_t*);
 int APS5_VABI sceAgcBranchPatchSetThenTarget(std::uint32_t*, const volatile std::uint32_t*, std::uint32_t);

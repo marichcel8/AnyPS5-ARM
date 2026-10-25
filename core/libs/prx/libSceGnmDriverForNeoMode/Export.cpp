@@ -221,7 +221,8 @@ int APS5_VABI sceGnmDrawIndexIndirect(std::uint32_t* cmdbuf, std::uint32_t size,
     return 0;
 }
 
-int APS5_VABI sceGnmDrawIndexIndirectCountMulti(std::uint32_t* cmdbuf, std::uint32_t size, std::uint32_t dataOffset, std::uint32_t maxCount, std::uint64_t countAddress, std::uint32_t stage, std::uint32_t vertexSgpr, std::uint32_t instanceSgpr, std::uint32_t flags) {
+int APS5_VABI sceGnmDrawIndexIndirectCountMulti(std::uint32_t* cmdbuf, std::uint32_t size, std::uint32_t dataOffset, std::uint32_t maxCount, std::uint64_t countAddress, std::uint32_t stage, std::uint32_t vertexSgpr, std::uint32_t instanceSgpr, std::uint64_t flagsSlot) {
+    const auto flags = static_cast<std::uint32_t>(flagsSlot);
     if (!cmdbuf || size != 0x10 || vertexSgpr >= 0x10 || instanceSgpr >= 0x10 || !IndexedIndirectStage(stage)) return CommandFailed;
     auto* at = Nop(cmdbuf, 2);
     at[0] = Header(0x9d, 9, false, flags & 1);
@@ -278,7 +279,8 @@ int APS5_VABI sceGnmDrawIndirect(std::uint32_t* cmdbuf, std::uint32_t size, std:
     return 0;
 }
 
-int APS5_VABI sceGnmDrawIndirectCountMulti(std::uint32_t* cmdbuf, std::uint32_t size, std::uint32_t dataOffset, std::uint32_t maxCount, std::uint64_t countAddress, std::uint32_t stage, std::uint32_t vertexSgpr, std::uint32_t instanceSgpr, std::uint32_t flags) {
+int APS5_VABI sceGnmDrawIndirectCountMulti(std::uint32_t* cmdbuf, std::uint32_t size, std::uint32_t dataOffset, std::uint32_t maxCount, std::uint64_t countAddress, std::uint32_t stage, std::uint32_t vertexSgpr, std::uint32_t instanceSgpr, std::uint64_t flagsSlot) {
+    const auto flags = static_cast<std::uint32_t>(flagsSlot);
     if (!cmdbuf || size != 0x10 || !ValidIndirect(stage, vertexSgpr, instanceSgpr)) return CommandFailed;
     auto* at = Nop(cmdbuf, 2);
     at[0] = Header(0x9c, 9, false, flags & 1);

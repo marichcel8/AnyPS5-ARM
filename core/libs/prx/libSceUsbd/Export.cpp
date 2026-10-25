@@ -274,7 +274,8 @@ void APS5_VABI sceUsbdFillBulkTransfer(UsbdTransfer* transfer, void* deviceHandl
     transfer->callback = callback;
 }
 
-void APS5_VABI sceUsbdFillIsoTransfer(UsbdTransfer* transfer, void* deviceHandle, std::uint8_t endpoint, std::uint8_t* buffer, std::int32_t length, std::int32_t numIsoPackets, UsbdTransferCallback callback, void* userData, std::uint32_t timeout) {
+void APS5_VABI sceUsbdFillIsoTransfer(UsbdTransfer* transfer, void* deviceHandle, std::uint8_t endpoint, std::uint8_t* buffer, std::int32_t length, std::int32_t numIsoPackets, UsbdTransferCallback callback, void* userData, std::uint64_t timeoutSlot) {
+    const auto timeout = static_cast<std::uint32_t>(timeoutSlot);
     if (transfer == nullptr) throw std::runtime_error(std::string(__func__) + ": null transfer");
     transfer->deviceHandle = deviceHandle;
     transfer->endpoint = endpoint;

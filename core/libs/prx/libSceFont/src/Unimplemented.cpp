@@ -447,7 +447,8 @@ int APS5_VABI sceFontGraphicsDrawupFillTextureImageObject(FontGraphicsFrame* fra
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsDrawupFillTexturePatternObject(FontGraphicsFrame* frame, const void* data, std::uint32_t dataSize, std::uint32_t firstMode, std::uint32_t secondMode, std::int32_t firstCount, std::int32_t firstLayout, std::int32_t secondLayout, std::int32_t secondCount, FontGraphicsFill** fill) {
+int APS5_VABI sceFontGraphicsDrawupFillTexturePatternObject(FontGraphicsFrame* frame, const void* data, std::uint32_t dataSize, std::uint32_t firstMode, std::uint32_t secondMode, std::int32_t firstCount, std::int32_t firstLayout, std::int32_t secondLayout, std::uint64_t secondCountSlot, FontGraphicsFill** fill) {
+    const auto secondCount = static_cast<std::int32_t>(secondCountSlot);
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
