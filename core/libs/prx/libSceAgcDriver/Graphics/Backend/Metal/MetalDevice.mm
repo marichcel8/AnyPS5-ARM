@@ -1934,7 +1934,20 @@ auto VulkanDevice::PendingLabel(std::uint64_t, std::size_t, std::uint64_t, Graph
 
 auto VulkanDevice::OpenWriteOverlaps(std::uint64_t, std::size_t) const -> bool { return false; }
 
-auto VulkanDevice::RecordedWritesSettled(std::uint64_t, std::size_t) const -> bool { return state->lastSerial <= state->device->CompletedSerial(Queue) && state->recordedSinceSubmit == 0; }
+auto VulkanDevice::RecordedWritesSettled(std::uint64_t, std::size_t) const -> bool {
+    auto& s = *state;
+    if (s.sync == nullptr) return true;
+    std::lock_guard lock(s.mutex);
+    s.reap();
+    return s.completions.empty() && s.recordedSinceSubmit == 0;
+}
+
+auto VulkanDevice::SettleCompletions() -> void {
+    auto& s = *state;
+    if (s.sync == nullptr) return;
+    std::lock_guard lock(s.mutex);
+    if (!s.completions.empty()) s.drain(s.completions.rbegin()->first);
+}
 
 auto VulkanDevice::StoresPendingOver(std::uint64_t, std::size_t) const -> bool { return false; }
 
