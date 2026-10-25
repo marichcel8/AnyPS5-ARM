@@ -489,6 +489,8 @@ if(APPLE AND ANYPS5_GPU_BACKEND STREQUAL "Metal")
     target_link_libraries(libSceAgcDriver PRIVATE agc_metal agc_metal_textures agc_metal_draw agc_metal_render_translate)
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     set_target_properties(libSceAgcDriver PROPERTIES OBJCXX_STANDARD 20 OBJCXX_STANDARD_REQUIRED ON OBJCXX_EXTENSIONS OFF)
+endif()
+if(APPLE)
     target_link_options(libSceAgcDriver PRIVATE
             "$<$<STREQUAL:$<TARGET_PROPERTY:SDL2-static,TYPE>,STATIC_LIBRARY>:LINKER:-force_load,$<TARGET_FILE:SDL2-static>>")
 endif()
