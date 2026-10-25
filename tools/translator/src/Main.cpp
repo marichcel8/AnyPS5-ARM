@@ -53,11 +53,11 @@ std::size_t Setting(const char* name, std::size_t fallback) {
 
 struct Options {
     std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
-    std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 8192);
+    std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 4096);
     std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 2500);
     std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 2500);
     std::size_t large = Setting("APS5_TRANSLATOR_LARGE", 2000);
-    std::size_t budget = Setting("APS5_TRANSLATOR_BUDGET", 16000);
+    std::size_t budget = Setting("APS5_TRANSLATOR_BUDGET", 16384);
     bool verbose = std::getenv("APS5_TRANSLATOR_STATS") != nullptr;
 };
 
@@ -277,7 +277,7 @@ int main(int argc, char** argv) {
         }
         Translator::Statistics total;
         std::mutex lock;
-        std::atomic<std::size_t> next{0};
+        std::size_t next = 0;
         std::atomic<std::size_t> cached{0};
         std::string failure;
         auto translate = [&](std::size_t index) {
@@ -326,12 +326,16 @@ int main(int argc, char** argv) {
         std::condition_variable released;
         std::size_t inFlight = 0;
         auto worker = [&]() {
-            for (std::size_t at; (at = next++) < order.size();) {
-                const auto index = order[at];
-                const auto cost = std::min(sizes[index], options.budget);
+            for (;;) {
+                std::size_t index = 0, cost = 0;
                 {
                     std::unique_lock<std::mutex> guard(lock);
-                    released.wait(guard, [&] { return inFlight == 0 || inFlight + cost <= options.budget; });
+                    released.wait(guard, [&] {
+                        return next >= order.size() || inFlight == 0 || inFlight + std::min(sizes[order[next]], options.budget) <= options.budget;
+                    });
+                    if (next >= order.size()) return;
+                    index = order[next++];
+                    cost = std::min(sizes[index], options.budget);
                     inFlight += cost;
                 }
                 auto release = llvm::make_scope_exit([&] {
