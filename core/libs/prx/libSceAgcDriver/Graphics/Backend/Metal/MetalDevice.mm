@@ -174,6 +174,7 @@ struct Waker {
 enum class Numeric : std::uint8_t { Float, Uint, Sint };
 
 constexpr std::uint32_t RawPackedFormat = 20;
+constexpr std::uint32_t ReleaseMemOpcode = 0x49;
 
 struct ImageKind {
     Numeric numeric = Numeric::Float;
@@ -1907,7 +1908,7 @@ auto VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::b
     auto& s = *state;
     if (s.sync == nullptr || bytes.empty() || bytes.size() > Metal::Sync::MaxLabelBytes || address % 4 != 0 || bytes.size() % 4 != 0) return 4;
     std::lock_guard lock(s.mutex);
-    if (!GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes.size(), true)) return 3;
+    if (GuestMemory::CurrentPacket().opcode != ReleaseMemOpcode || !GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes.size(), true)) return 3;
     auto* completion = s.afterRecorded();
     if (completion == nullptr) {
         s.labelsOnCpu.fetch_add(1, std::memory_order_relaxed);
