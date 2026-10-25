@@ -6,7 +6,9 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#if defined(__x86_64__)
 #include <immintrin.h>
+#endif
 #include <mutex>
 #include <stdexcept>
 #include <string>
@@ -16,6 +18,26 @@
 #include "ComputeProgress.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/GuestArena.hpp"
+
+namespace {
+
+std::uint64_t ReadTicks() {
+#if defined(__x86_64__)
+    return __rdtsc();
+#else
+    return __builtin_arm_rsr64("cntvct_el0");
+#endif
+}
+
+void SpinHint() {
+#if defined(__x86_64__)
+    _mm_pause();
+#else
+    __builtin_arm_yield();
+#endif
+}
+
+}
 
 extern "C" {
 int APS5_VABI scePthreadAttrInit(PthreadAttr* attr);
@@ -637,17 +659,17 @@ bool RunOne(Manager& manager, std::unique_lock<std::mutex>& guard) {
 void* APS5_VABI WorkerEntry(void* argument) {
     Manager& manager = *static_cast<Manager*>(argument);
     currentWorker = &manager;
-    std::uint64_t lastWork = __rdtsc();
+    std::uint64_t lastWork = ReadTicks();
     std::unique_lock guard(manager.lock);
     while (manager.running) {
         if (RunOne(manager, guard)) {
-            lastWork = __rdtsc();
+            lastWork = ReadTicks();
             continue;
         }
-        const bool spinning = manager.pendingInvocations != 0 && __rdtsc() - lastWork < manager.spinTicks;
+        const bool spinning = manager.pendingInvocations != 0 && ReadTicks() - lastWork < manager.spinTicks;
         if (spinning || manager.sleepingWorkers >= manager.workerCount - manager.persistentThreads) {
             guard.unlock();
-            _mm_pause();
+            SpinHint();
             guard.lock();
             continue;
         }
