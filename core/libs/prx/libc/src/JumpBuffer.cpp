@@ -60,5 +60,10 @@ void APS5_VABI longjmp_nid_postfix(void*, int) {
     NotImplemented_nid_no_patch("longjmp outside translated guest code");
 }
 
+void Aps5JumpTargets_nid_no_patch(void** setjmpTarget, void** longjmpTarget) {
+    *setjmpTarget = reinterpret_cast<void*>(&setjmp_nid_postfix);
+    *longjmpTarget = reinterpret_cast<void*>(&longjmp_nid_postfix);
+}
+
 }
 #endif

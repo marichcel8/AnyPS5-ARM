@@ -211,8 +211,13 @@ JumpRecord& PrepareJump(GuestState* state, std::uint64_t buffer) {
 
 void InstallRedirect() {
     tracing = std::getenv("APS5_NATIVE_TRACE") != nullptr;
-    setjmpTarget = reinterpret_cast<std::uint64_t>(dlsym(RTLD_DEFAULT, "gNQ1V2vfXDE"));
-    longjmpTarget = reinterpret_cast<std::uint64_t>(dlsym(RTLD_DEFAULT, "lKEN2IebgJ0"));
+    if (auto* targets = reinterpret_cast<void (*)(void**, void**)>(dlsym(RTLD_DEFAULT, "Aps5JumpTargets_nid_no_patch"))) {
+        void* jumpSet = nullptr;
+        void* jumpLong = nullptr;
+        targets(&jumpSet, &jumpLong);
+        setjmpTarget = reinterpret_cast<std::uint64_t>(jumpSet);
+        longjmpTarget = reinterpret_cast<std::uint64_t>(jumpLong);
+    }
     struct sigaction action {};
     action.sa_sigaction = Redirect;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
