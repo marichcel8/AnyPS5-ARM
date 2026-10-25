@@ -282,4 +282,22 @@ bool Lifter::Impl::EmitVectorFloat(const Instruction& instruction) {
     return false;
 }
 
+void Lifter::Impl::HalfFloat(const Instruction& instruction) {
+    auto* half = builder.getHalfTy();
+    if (instruction.id == X86_INS_VCVTPH2PS) {
+        const unsigned bits = instruction.Bits(0);
+        const unsigned lanes = bits / 32;
+        auto* source = Lanes(Resize(Read(instruction, 1), lanes * 16), half);
+        Write(instruction, 0, Flat(builder.CreateFPExt(source, llvm::FixedVectorType::get(builder.getFloatTy(), lanes))), true);
+        return;
+    }
+    const auto control = static_cast<unsigned>(instruction.Op(2).imm);
+    if ((control & 4) == 0 && (control & 3) != 0) throw Unsupported{"vcvtps2ph rounding"};
+    const unsigned lanes = instruction.Bits(1) / 32;
+    auto* source = Lanes(Read(instruction, 1), builder.getFloatTy());
+    auto* result = Flat(builder.CreateFPTrunc(source, llvm::FixedVectorType::get(half, lanes)));
+    if (instruction.Memory(0)) Write(instruction, 0, result);
+    else Write(instruction, 0, Resize(result, 128), true);
+}
+
 }

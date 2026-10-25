@@ -41,6 +41,10 @@
 #include <thread>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <malloc/malloc.h>
+#endif
+
 namespace {
 
 const llvm::Triple HostTriple("arm64-apple-macosx13.0.0");
@@ -339,6 +343,9 @@ int main(int argc, char** argv) {
                     inFlight += cost;
                 }
                 auto release = llvm::make_scope_exit([&] {
+#if defined(__APPLE__)
+                    malloc_zone_pressure_relief(nullptr, 0);
+#endif
                     {
                         const std::lock_guard<std::mutex> guard(lock);
                         inFlight -= cost;
