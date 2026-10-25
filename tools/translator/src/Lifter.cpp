@@ -121,9 +121,18 @@ JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path,
         if (!table) {
             if (const auto found = tableLea(instruction); found && (*found & 3) == 0) table = found;
         }
-        if (!count && instruction.id == X86_INS_CMP && x86.op_count == 2 && x86.operands[0].type == X86_OP_REG && x86.operands[1].type == X86_OP_IMM &&
-            RegisterOf(x86.operands[0].reg).index == indexReg && x86.operands[1].imm >= 0)
+        if (count || indexReg == ~0u) continue;
+        const bool writesIndex = x86.op_count != 0 && x86.operands[0].type == X86_OP_REG && RegisterOf(x86.operands[0].reg).index == indexReg;
+        if (instruction.id == X86_INS_CMP && x86.op_count == 2 && writesIndex && x86.operands[1].type == X86_OP_IMM && x86.operands[1].imm >= 0) {
             count = static_cast<std::uint64_t>(x86.operands[1].imm) + 1;
+        } else if (instruction.id == X86_INS_AND && x86.op_count == 2 && writesIndex && x86.operands[1].type == X86_OP_IMM && x86.operands[1].imm >= 0 &&
+                   x86.operands[1].imm < 4096) {
+            count = static_cast<std::uint64_t>(x86.operands[1].imm) + 1;
+        } else if (writesIndex && instruction.id != X86_INS_CMP && instruction.id != X86_INS_TEST) {
+            const bool copy = (instruction.id == X86_INS_MOV || instruction.id == X86_INS_MOVZX || instruction.id == X86_INS_MOVSXD) && x86.op_count == 2 &&
+                              x86.operands[1].type == X86_OP_REG;
+            indexReg = copy ? RegisterOf(x86.operands[1].reg).index : ~0u;
+        }
     }
     if (baseReg == ~0u) return {};
     if (!table) {

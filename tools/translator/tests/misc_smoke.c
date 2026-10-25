@@ -60,11 +60,24 @@ static void flags(void) {
     same(25, carry, 0);
 }
 
+static u64 jump(u64 selector) {
+    u64 result;
+    __asm__ volatile("xor %%ecx, %%ecx\n\tcmp $1, %%ecx\n\tcmp $2, %1\n\tja 9f\n\tmov %k1, %%ecx\n\tlea table%=(%%rip), %%rdx\n\t"
+                     "movslq (%%rdx,%%rcx,4), %%rcx\n\tadd %%rdx, %%rcx\n\tjmp *%%rcx\n"
+                     "0:\n\tmov $10, %0\n\tjmp 8f\n1:\n\tmov $11, %0\n\tjmp 8f\n2:\n\tmov $12, %0\n\tjmp 8f\n9:\n\tmov $99, %0\n8:\n"
+                     "\t.section .rodata\n\t.p2align 2\ntable%=:\n\t.long 0b - table%=, 1b - table%=, 2b - table%=\n\t.previous"
+                     : "=&r"(result) : "r"(selector) : "rcx", "rdx", "cc");
+    return result;
+}
+
 static void tables(void) {
     static const char table[] = "abcdef";
     u64 al = 3;
     __asm__ volatile("xlatb" : "+a"(al) : "b"(table) : "memory");
     same(30, (i64)(al & 0xff), 'd');
+    static volatile u64 selectors[2] = {2, 7};
+    same(31, (i64)jump(selectors[0]), 12);
+    same(32, (i64)jump(selectors[1]), 99);
 }
 
 static void frames(void) {
