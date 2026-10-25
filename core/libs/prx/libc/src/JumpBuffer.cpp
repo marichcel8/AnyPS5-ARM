@@ -46,4 +46,24 @@ asm(".text\n"
     "    ldmxcsr 64(%rdi)\n"
     "    fldcw 68(%rdi)\n"
     "    jmp *0(%rdi)\n");
+#elif defined(__aarch64__)
+// Translated guest code reaches these two through aps5_call, which the translator runtime
+// (tools/translator/runtime/Runtime.cpp) recognizes them by address: it saves the native registers of
+// the translated caller for setjmp and resumes them for longjmp. Any other caller has no guest state.
+extern "C" {
+
+int APS5_VABI setjmp_nid_postfix(void*) {
+    NotImplemented_nid_no_patch("setjmp outside translated guest code");
+}
+
+void APS5_VABI longjmp_nid_postfix(void*, int) {
+    NotImplemented_nid_no_patch("longjmp outside translated guest code");
+}
+
+void Aps5JumpTargets_nid_no_patch(void** setjmpTarget, void** longjmpTarget) {
+    *setjmpTarget = reinterpret_cast<void*>(&setjmp_nid_postfix);
+    *longjmpTarget = reinterpret_cast<void*>(&longjmp_nid_postfix);
+}
+
+}
 #endif

@@ -17,6 +17,7 @@
 #include <thread>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
+#include <unordered_map>
 
 // Emitted by the translator: the guest image (its lowest segment at offset 0), its size, the table
 // of translated functions sorted by guest offset, the guest entry point and the PT_TLS layout.
@@ -51,6 +52,8 @@ extern const char* const aps5_profile_path;
 
 void aps5_host_bridge(GuestState* state, std::uint64_t target);
 void aps5_enter();
+[[noreturn]] void aps5_native_restore(const std::uint64_t* registers);
+extern std::uint64_t aps5_setjmp_target;
 }
 
 namespace {
@@ -62,6 +65,23 @@ constexpr std::uint64_t StackGuard = 0x5a17c0de2b6e4d91ull;
 thread_local GuestState* threadState = nullptr;
 // The state of the guest call into the host that is running on this thread, for variadic exports.
 thread_local GuestState* bridgedState = nullptr;
+
+// A setjmp that may still be jumped to. The guest's 96-byte jmp_buf holds the x86-64 state in the
+// layout libc used under Rosetta (return address, rbx, rsp, rbp, r12-r15, mxcsr, x87 control word)
+// plus a marker; the native registers of the translated caller of setjmp live here, keyed by the
+// buffer's address.
+constexpr std::uint64_t JumpMagic = 0x6a6d70c0de5a17b1ull;
+constexpr std::size_t JumpMagicWord = 9;
+constexpr std::size_t JumpPurgeSize = 64;
+
+struct JumpRecord {
+    std::uint64_t native[24];
+    std::uint64_t guestRsp;
+    GuestState* bridged;
+};
+
+thread_local std::unordered_map<std::uint64_t, JumpRecord> jumpRecords;
+std::uint64_t longjmpTarget = 0;
 
 struct sigaction previousBus {}, previousSegv {};
 // APS5_NATIVE_TRACE: report each redirected host call into guest code.
@@ -198,8 +218,59 @@ void StartProfile() {
     }).detach();
 }
 
+// Fills the guest jmp_buf for the setjmp call whose return address is at rsp, and leaves the state as
+// the first return of setjmp: rax 0, return address popped. Records older than rsp belong to frames
+// that have returned, which can no longer be jumped to.
+JumpRecord& PrepareJump(GuestState* state, std::uint64_t buffer) {
+    const auto rsp = state->gpr[Rsp];
+    if (jumpRecords.size() >= JumpPurgeSize) {
+        for (auto it = jumpRecords.begin(); it != jumpRecords.end();) it = it->second.guestRsp < rsp ? jumpRecords.erase(it) : std::next(it);
+    }
+    auto& record = jumpRecords[buffer];
+    record.guestRsp = rsp + 8;
+    record.bridged = bridgedState;
+    std::uint64_t words[10] = {};
+    std::memcpy(&words[0], reinterpret_cast<const void*>(rsp), 8);
+    words[1] = state->gpr[Rbx];
+    words[2] = rsp + 8;
+    words[3] = state->gpr[Rbp];
+    for (unsigned i = 0; i < 4; ++i) words[4 + i] = state->gpr[R12 + i];
+    std::memcpy(reinterpret_cast<std::uint8_t*>(&words[8]), &state->mxcsr, 4);
+    std::memcpy(reinterpret_cast<std::uint8_t*>(&words[8]) + 4, &state->x87Control, 2);
+    words[JumpMagicWord] = JumpMagic;
+    std::memcpy(reinterpret_cast<void*>(buffer), words, sizeof(words));
+    state->gpr[Rax] = 0;
+    state->gpr[Rsp] = rsp + 8;
+    return record;
+}
+
+[[noreturn]] void GuestLongjmp(GuestState* state) {
+    const auto buffer = state->gpr[Rdi];
+    const auto value = static_cast<std::uint32_t>(state->gpr[Rsi]);
+    std::uint64_t words[10];
+    std::memcpy(words, reinterpret_cast<const void*>(buffer), sizeof(words));
+    const auto found = jumpRecords.find(buffer);
+    if (found == jumpRecords.end() || words[JumpMagicWord] != JumpMagic || found->second.guestRsp != words[2]) Fail("longjmp to a jmp_buf without a live setjmp at", buffer);
+    state->gpr[Rbx] = words[1];
+    state->gpr[Rsp] = words[2];
+    state->gpr[Rbp] = words[3];
+    for (unsigned i = 0; i < 4; ++i) state->gpr[R12 + i] = words[4 + i];
+    std::memcpy(&state->mxcsr, reinterpret_cast<const std::uint8_t*>(&words[8]), 4);
+    std::memcpy(&state->x87Control, reinterpret_cast<const std::uint8_t*>(&words[8]) + 4, 2);
+    state->gpr[Rax] = value != 0 ? value : 1;
+    bridgedState = found->second.bridged;
+    aps5_native_restore(found->second.native);
+}
+
 void InstallRedirect() {
     tracing = std::getenv("APS5_NATIVE_TRACE") != nullptr;
+    if (auto* targets = reinterpret_cast<void (*)(void**, void**)>(dlsym(RTLD_DEFAULT, "Aps5JumpTargets_nid_no_patch"))) {
+        void* jumpSet = nullptr;
+        void* jumpLong = nullptr;
+        targets(&jumpSet, &jumpLong);
+        aps5_setjmp_target = reinterpret_cast<std::uint64_t>(jumpSet);
+        longjmpTarget = reinterpret_cast<std::uint64_t>(jumpLong);
+    }
     struct sigaction action {};
     action.sa_sigaction = Redirect;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
@@ -212,20 +283,29 @@ void InstallRedirect() {
 
 extern "C" {
 
+std::uint64_t aps5_setjmp_target = 0;
+
+// Called by aps5_call (HostBridge.S) for a guest setjmp: fills the guest jmp_buf and returns the
+// area where the native registers of the translated caller are saved.
+std::uint64_t* aps5_prepare_jump(GuestState* state) {
+    return PrepareJump(state, state->gpr[Rdi]).native;
+}
+
 // A guest call or jump whose target the translator could not resolve statically. The caller has
 // pushed the guest return address; a translated callee pops it with its ret, a host callee does not.
-void aps5_call(GuestState* state, std::uint64_t target) {
+void aps5_call_impl(GuestState* state, std::uint64_t target) {
     if (const auto* function = Find(target)) {
         function->code(state);
         return;
     }
     if (target >= ImageBase() && target - ImageBase() < aps5_guest_image_size) {
         Dl_info self {};
-        dladdr(reinterpret_cast<void*>(&aps5_call), &self);
+        dladdr(reinterpret_cast<void*>(&aps5_call_impl), &self);
         std::fprintf(stderr, "[translator] from translated code at %p (executable offset 0x%llx)\n", __builtin_return_address(0),
                      static_cast<unsigned long long>(reinterpret_cast<std::uint64_t>(__builtin_return_address(0)) - reinterpret_cast<std::uint64_t>(self.dli_fbase)));
         Fail("call into untranslated guest code at", target);
     }
+    if (target == longjmpTarget) GuestLongjmp(state);
     auto* outer = bridgedState;
     bridgedState = state;
     aps5_host_bridge(state, target);
