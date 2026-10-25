@@ -549,6 +549,7 @@ struct VulkanDevice::State {
     id<MTL4ArgumentTable> scanoutTable = nil;
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
+    std::array<double, 5> presentMs{};
     std::uint64_t reportDraws = 0;
     std::uint64_t reportDispatches = 0;
     Metal::PresenterStats reportStats{};
@@ -1098,10 +1099,17 @@ struct VulkanDevice::State {
         source.height = presentHeight;
         const auto scanned = presentAfter;
         presentAfter = 0;
+        const auto began = std::chrono::steady_clock::now();
         if (scanned != 0) device->WaitOnQueue(Queue, Queue, scanned);
         const auto result = presenter->Present(source);
+        const auto presented = std::chrono::steady_clock::now();
         if (result.serial != 0) presentSerials[slot] = result.serial;
         if (scanned != 0 && !device->WaitSerial(Queue, scanned, WaitTimeoutMs)) throw std::runtime_error("AGC graphics: Metal scanout did not finish in time");
+        const auto waited = std::chrono::steady_clock::now();
+        presentMs[0] += std::chrono::duration<double, std::milli>(presented - began).count();
+        presentMs[1] += std::chrono::duration<double, std::milli>(waited - presented).count();
+        presentMs[2] += result.pacedMs;
+        presentMs[3] += result.waitMs;
         reportPresents();
         return result.pacedMs + result.waitMs;
     }
@@ -1124,6 +1132,8 @@ struct VulkanDevice::State {
                      static_cast<unsigned long long>(drawCount - reportDraws), static_cast<unsigned long long>(dispatchCount - reportDispatches), static_cast<unsigned long long>(hookSubmits - reportSubmits), static_cast<unsigned long long>(hookWaits - reportWaits),
                      static_cast<unsigned long long>(labels[0] - reportLabels[0]), static_cast<unsigned long long>(labels[1] - reportLabels[1]), static_cast<unsigned long long>(labels[2] - reportLabels[2]),
                      static_cast<unsigned long long>((snapshotBytes - reportSnapshotBytes) / 1024));
+        if (reportFrames != 0u) std::fprintf(stderr, "[metal] present per flip: %.2f ms Present call (paced %.2f ms, drawable wait %.2f ms), %.2f ms wait for scanout serial\n", presentMs[0] / static_cast<double>(reportFrames), presentMs[2] / static_cast<double>(reportFrames), presentMs[3] / static_cast<double>(reportFrames), presentMs[1] / static_cast<double>(reportFrames));
+        presentMs = {};
         reportSnapshotBytes = snapshotBytes;
         reportLabels = labels;
         reportAt = now;
