@@ -33,7 +33,7 @@ public:
     void Discover();
     std::vector<std::vector<std::uint64_t>> Partitions(std::size_t instructions) const;
     std::size_t FunctionSize(std::uint64_t entry) const;
-    std::unique_ptr<llvm::Module> Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, Statistics& stats) const;
+    std::unique_ptr<llvm::Module> Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, std::size_t promoteLimit, Statistics& stats) const;
     const Statistics& Stats() const { return stats; }
 
     struct Program;

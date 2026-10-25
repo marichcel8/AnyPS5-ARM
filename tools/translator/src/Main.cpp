@@ -1,6 +1,7 @@
 #include "Elf.hpp"
 #include "Lifter.hpp"
 
+#include <llvm/ADT/ScopeExit.h>
 #include <llvm/ADT/StringExtras.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
@@ -17,13 +18,13 @@
 #include <llvm/Support/SHA256.h>
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Support/thread.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/Transforms/Scalar/ADCE.h>
-#include <llvm/Transforms/Scalar/DeadStoreElimination.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
+#include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
-#include <llvm/Transforms/InstCombine/InstCombine.h>
 
 #include <algorithm>
 #include <atomic>
@@ -32,6 +33,7 @@
 #include <cstdlib>
 #include <exception>
 #include <memory>
+#include <condition_variable>
 #include <mutex>
 #include <numeric>
 #include <set>
@@ -52,9 +54,10 @@ std::size_t Setting(const char* name, std::size_t fallback) {
 struct Options {
     std::size_t jobs = Setting("APS5_TRANSLATOR_JOBS", std::clamp(std::thread::hardware_concurrency(), 1u, 4u));
     std::size_t partition = Setting("APS5_TRANSLATOR_PARTITION", 8192);
-    std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 8000);
-    std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 10000);
+    std::size_t huge = Setting("APS5_TRANSLATOR_HUGE", 5000);
+    std::size_t giant = Setting("APS5_TRANSLATOR_GIANT", 5000);
     std::size_t large = Setting("APS5_TRANSLATOR_LARGE", 2000);
+    std::size_t budget = Setting("APS5_TRANSLATOR_BUDGET", 24000);
     bool verbose = std::getenv("APS5_TRANSLATOR_STATS") != nullptr;
 };
 
@@ -83,13 +86,10 @@ void Optimize(llvm::Module& module, llvm::TargetMachine& machine, const std::vec
     builder.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2).run(module, modules);
     if (huge.empty() && giant.empty()) return;
     llvm::FunctionPassManager light;
-    light.addPass(llvm::EarlyCSEPass(true));
-    light.addPass(llvm::InstCombinePass());
+    light.addPass(llvm::SROAPass(llvm::SROAOptions::PreserveCFG));
+    light.addPass(llvm::EarlyCSEPass(false));
     light.addPass(llvm::SimplifyCFGPass());
-    light.addPass(llvm::DSEPass());
-    light.addPass(llvm::EarlyCSEPass(true));
     light.addPass(llvm::ADCEPass());
-    light.addPass(llvm::SimplifyCFGPass());
     for (auto* function : huge) {
         function->removeFnAttr(llvm::Attribute::OptimizeNone);
         functions.invalidate(*function, llvm::PreservedAnalyses::none());
@@ -188,7 +188,7 @@ int EmitLlvm(const Translator::Elf& elf, Translator::Lifter& lifter, const Optio
     llvm::LLVMContext context;
     const auto partitions = lifter.Partitions(~std::size_t{0});
     Translator::Statistics stats;
-    auto module = lifter.Lift(context, partitions.front(), true, false, stats);
+    auto module = lifter.Lift(context, partitions.front(), true, false, options.huge, stats);
     if (llvm::verifyModule(*module, &llvm::errs())) {
         module->print(llvm::errs(), nullptr);
         std::fprintf(stderr, "lifted module does not verify\n");
@@ -271,6 +271,10 @@ int main(int argc, char** argv) {
         std::iota(order.begin(), order.end(), 0);
         std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return sizes[a] > sizes[b]; });
 
+        if (options.verbose) {
+            for (std::size_t i = 0; i < std::min<std::size_t>(5, order.size()); ++i)
+                std::fprintf(stderr, "  largest partition %zu: %zu functions, %zu instructions\n", order[i], partitions[order[i]].size(), sizes[order[i]]);
+        }
         Translator::Statistics total;
         std::mutex lock;
         std::atomic<std::size_t> next{0};
@@ -287,7 +291,7 @@ int main(int argc, char** argv) {
             const auto begun = std::chrono::steady_clock::now();
             llvm::LLVMContext context;
             Translator::Statistics stats;
-            auto module = lifter.Lift(context, partitions[index], index == 0, shared, stats);
+            auto module = lifter.Lift(context, partitions[index], index == 0, shared, options.huge, stats);
             if (llvm::verifyModule(*module, &llvm::errs())) throw std::runtime_error("lifted partition " + std::to_string(index) + " does not verify");
             auto machine = Machine();
             module->setTargetTriple(HostTriple);
@@ -319,10 +323,26 @@ int main(int argc, char** argv) {
                 std::fprintf(stderr, "  partition %zu: %zu functions, %zu instructions, %.1f s\n", index, partitions[index].size(), sizes[index], took.count());
             }
         };
+        std::condition_variable released;
+        std::size_t inFlight = 0;
         auto worker = [&]() {
             for (std::size_t at; (at = next++) < order.size();) {
+                const auto index = order[at];
+                const auto cost = std::min(sizes[index], options.budget);
+                {
+                    std::unique_lock<std::mutex> guard(lock);
+                    released.wait(guard, [&] { return inFlight == 0 || inFlight + cost <= options.budget; });
+                    inFlight += cost;
+                }
+                auto release = llvm::make_scope_exit([&] {
+                    {
+                        const std::lock_guard<std::mutex> guard(lock);
+                        inFlight -= cost;
+                    }
+                    released.notify_all();
+                });
                 try {
-                    translate(order[at]);
+                    translate(index);
                 } catch (const std::exception& exception) {
                     const std::lock_guard<std::mutex> guard(lock);
                     if (failure.empty()) failure = exception.what();
@@ -331,9 +351,8 @@ int main(int argc, char** argv) {
             }
         };
         const auto jobs = std::min(options.jobs, partitions.size());
-        std::vector<std::thread> threads;
-        for (std::size_t i = 1; i < jobs; ++i) threads.emplace_back(worker);
-        worker();
+        std::vector<llvm::thread> threads;
+        for (std::size_t i = 0; i < jobs; ++i) threads.emplace_back(std::optional<unsigned>(256u << 20), worker);
         for (auto& thread : threads) thread.join();
         if (!failure.empty()) throw std::runtime_error(failure);
 

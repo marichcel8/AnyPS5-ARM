@@ -336,21 +336,21 @@ llvm::Value* Lifter::Impl::Pop() {
 // native frames, so guest code that rewrites its return address is not supported.
 void Lifter::Impl::CallGuest(std::uint64_t target, std::uint64_t returnAddress) {
     Push(Host(returnAddress));
-    if (const auto found = lifted.find(target); found != lifted.end()) builder.CreateCall(found->second, {state});
-    else builder.CreateCall(callRuntime, {state, Host(target)});
+    if (const auto found = lifted.find(target); found != lifted.end()) builder.CreateCall(found->second, {guest});
+    else builder.CreateCall(callRuntime, {guest, Host(target)});
 }
 
 void Lifter::Impl::CallIndirect(llvm::Value* target, std::uint64_t returnAddress) {
     Push(Host(returnAddress));
-    builder.CreateCall(callRuntime, {state, target});
+    builder.CreateCall(callRuntime, {guest, target});
 }
 
 // A jump out of the function: the callee returns to this function's caller, which is a call
 // followed by a return here. LLVM emits it as an arm64 tail branch.
 void Lifter::Impl::TailCall(std::uint64_t target) {
     llvm::CallInst* call = nullptr;
-    if (const auto found = lifted.find(target); found != lifted.end()) call = builder.CreateCall(found->second, {state});
-    else call = builder.CreateCall(callRuntime, {state, Host(target)});
+    if (const auto found = lifted.find(target); found != lifted.end()) call = builder.CreateCall(found->second, {guest});
+    else call = builder.CreateCall(callRuntime, {guest, Host(target)});
     call->setTailCall();
     builder.CreateRetVoid();
 }
@@ -372,7 +372,7 @@ llvm::BasicBlock* Lifter::Impl::Dispatch() {
     auto* cases = builder.CreateSwitch(offset, outside, static_cast<unsigned>(branchTargets.size()));
     for (const auto address : branchTargets) cases->addCase(builder.getInt64(address - imageBegin), blocks.at(address));
     builder.SetInsertPoint(outside);
-    builder.CreateCall(callRuntime, {state, dispatchTarget})->setTailCall();
+    builder.CreateCall(callRuntime, {guest, dispatchTarget})->setTailCall();
     builder.CreateRetVoid();
     return dispatch;
 }
@@ -398,7 +398,7 @@ void Lifter::Impl::JumpIndirect(llvm::Value* target) {
 }
 
 void Lifter::Impl::Trap(llvm::FunctionCallee callee, std::uint64_t address) {
-    builder.CreateCall(callee, {state, Host(address)});
+    builder.CreateCall(callee, {guest, Host(address)});
     builder.CreateUnreachable();
 }
 
@@ -1001,12 +1001,19 @@ std::set<std::uint64_t> Lifter::Impl::Leaders(std::uint64_t entry, const std::se
 void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_t>& addresses, Statistics& stats) {
     current = lifted.at(entry);
     currentEntry = entry;
-    state = current->getArg(0);
+    guest = current->getArg(0);
     blocks.clear();
     branchTargets.clear();
     dispatch = nullptr;
     dispatchTarget = nullptr;
     auto* prologue = NewBlock("entry");
+    builder.SetInsertPoint(prologue);
+    llvm::AllocaInst* shadow = nullptr;
+    if (addresses.size() <= promoteLimit) {
+        shadow = builder.CreateAlloca(llvm::ArrayType::get(builder.getInt8Ty(), StateLayout::Size));
+        shadow->setAlignment(llvm::Align(16));
+    }
+    state = shadow != nullptr ? static_cast<llvm::Value*>(shadow) : guest;
     for (const auto address : addresses) {
         const auto& instruction = decoded.at(address);
         const auto target = instruction.DirectTarget();
@@ -1051,6 +1058,69 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
         }
     }
     deadFlags = 0;
+    if (shadow != nullptr) PromoteState(shadow, prologue);
+}
+
+void Lifter::Impl::PromoteState(llvm::AllocaInst* shadow, llvm::BasicBlock* prologue) {
+    std::map<std::uint64_t, std::uint64_t> ranges;
+    bool whole = false;
+    auto note = [&](std::uint64_t offset, llvm::Type* type) {
+        const auto bits = type->getPrimitiveSizeInBits().getFixedValue();
+        if (bits == 0 || bits % 8 != 0) {
+            whole = true;
+            return;
+        }
+        auto& end = ranges[offset];
+        end = std::max<std::uint64_t>(end, offset + bits / 8);
+    };
+    auto access = [&](llvm::Value* pointer, std::uint64_t offset) {
+        for (auto* user : pointer->users()) {
+            if (auto* load = llvm::dyn_cast<llvm::LoadInst>(user)) note(offset, load->getType());
+            else if (auto* store = llvm::dyn_cast<llvm::StoreInst>(user); store != nullptr && store->getPointerOperand() == pointer) note(offset, store->getValueOperand()->getType());
+            else whole = true;
+        }
+    };
+    std::vector<llvm::User*> users(shadow->user_begin(), shadow->user_end());
+    for (auto* user : users) {
+        auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user);
+        auto* index = gep != nullptr && gep->getNumIndices() == 1 ? llvm::dyn_cast<llvm::ConstantInt>(gep->getOperand(1)) : nullptr;
+        if (index != nullptr) access(gep, index->getZExtValue());
+        else if (gep == nullptr) note(0, llvm::isa<llvm::LoadInst>(user) ? user->getType() : llvm::cast<llvm::StoreInst>(user)->getValueOperand()->getType());
+        else whole = true;
+    }
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
+    if (whole) intervals.emplace_back(0, StateLayout::Size);
+    for (const auto& [begin, end] : ranges) {
+        if (whole) break;
+        if (!intervals.empty() && begin <= intervals.back().second) intervals.back().second = std::max(intervals.back().second, end);
+        else intervals.emplace_back(begin, end);
+    }
+    auto copy = [&](llvm::Instruction* before, llvm::Value* to, llvm::Value* from) {
+        builder.SetInsertPoint(before);
+        for (const auto& [begin, end] : intervals) {
+            builder.CreateMemCpy(builder.CreateConstInBoundsGEP1_64(builder.getInt8Ty(), to, begin), llvm::Align(1),
+                                 builder.CreateConstInBoundsGEP1_64(builder.getInt8Ty(), from, begin), llvm::Align(1), end - begin);
+        }
+    };
+    std::vector<llvm::CallInst*> calls;
+    std::vector<llvm::ReturnInst*> returns;
+    for (auto& block : *current) {
+        for (auto& instruction : block) {
+            if (auto* call = llvm::dyn_cast<llvm::CallInst>(&instruction); call != nullptr && llvm::is_contained(call->args(), guest)) calls.push_back(call);
+            else if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(&instruction)) returns.push_back(ret);
+        }
+    }
+    std::set<llvm::ReturnInst*> leaving;
+    for (auto* call : calls) {
+        copy(call, guest, state);
+        auto* next = call->getNextNode();
+        if (auto* ret = llvm::dyn_cast<llvm::ReturnInst>(next)) leaving.insert(ret);
+        else if (!llvm::isa<llvm::UnreachableInst>(next)) copy(next, state, guest);
+    }
+    for (auto* ret : returns) {
+        if (leaving.count(ret) == 0) copy(ret, guest, state);
+    }
+    copy(prologue->getTerminator(), state, guest);
 }
 
 // The guest image: the loaded segments at their offsets from the lowest one, with each 8-byte slot a
@@ -1203,8 +1273,10 @@ std::vector<std::vector<std::uint64_t>> Lifter::Partitions(std::size_t instructi
     return partitions;
 }
 
-std::unique_ptr<llvm::Module> Lifter::Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, Statistics& partitionStats) const {
+std::unique_ptr<llvm::Module> Lifter::Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, std::size_t promoteLimit,
+                                           Statistics& partitionStats) const {
     Impl lifter(elf, context, *program);
+    lifter.promoteLimit = promoteLimit;
     auto module = std::make_unique<llvm::Module>("guest", context);
     lifter.module = module.get();
     auto& builder = lifter.builder;

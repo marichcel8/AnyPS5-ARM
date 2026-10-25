@@ -169,6 +169,7 @@ struct Lifter::Impl {
     std::map<std::uint64_t, std::uint8_t> DeadFlags(std::uint64_t entry, const std::set<std::uint64_t>& addresses);
     std::set<std::uint64_t> Leaders(std::uint64_t entry, const std::set<std::uint64_t>& addresses) const;
     void Discard(llvm::BasicBlock* block, llvm::Instruction* last, std::size_t keepBlocks);
+    void PromoteState(llvm::AllocaInst* shadow, llvm::BasicBlock* prologue);
     llvm::BasicBlock* Dispatch();
 
     // Values
@@ -261,6 +262,8 @@ struct Lifter::Impl {
     llvm::Function* current = nullptr;
     std::uint64_t currentEntry = 0;
     llvm::Value* state = nullptr;
+    llvm::Value* guest = nullptr;
+    std::size_t promoteLimit = ~std::size_t{0};
     std::uint64_t currentAddress = 0;
     std::uint8_t deadFlags = 0;
     std::map<std::uint64_t, llvm::BasicBlock*> blocks;
