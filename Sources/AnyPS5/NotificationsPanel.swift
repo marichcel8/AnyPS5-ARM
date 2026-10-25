@@ -109,6 +109,8 @@ extension AppModel {
     /// The gateway's notification events: the list and badge follow; a new one the launcher does
     /// not announce otherwise gets a toast while it is in front.
     func notificationEvent(_ event: TogetherNotificationEvent) {
+        // A parent answered or changed something: the limits are read again.
+        if case .new(let note, _) = event, note.kindName.hasPrefix("family_") { refreshFamily() }
         withAnimation(Motion.overlay) { social.notifications.apply(event) }
         guard case .new(let note, _) = event, !note.read, note.kind.toastsOnItsOwn, NSApp.isActive, overlay != .notifications else { return }
         show([notificationText(note), notificationDetail(note)].compactMap { $0 }.joined(separator: " · "), symbol: Self.notificationSymbol(note.kind))
@@ -130,7 +132,7 @@ extension AppModel {
         case .lfgRequest: return FP.format(.notifLfgRequest, name, notificationGame(note))
         case .lfgAccepted: return FP.format(.notifLfgAccepted, name, notificationGame(note))
         case .warning: return TS.text(.notifWarning)
-        case .other: return TS.text(.notifOther)
+        case .other: return familyNotificationText(note) ?? TS.text(.notifOther)
         }
     }
 

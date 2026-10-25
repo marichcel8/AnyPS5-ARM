@@ -5,8 +5,14 @@ import SwiftUI
 /// Draws the launcher's screens into PNG files offscreen: no window opens, nothing is saved.
 @MainActor
 enum PreviewRenderer {
-    static let size = CGSize(width: 1600, height: 900)
+    /// ANYPS5_PREVIEW_SIZE=<width>x<height> draws the screens at another window size.
+    static let size: CGSize = {
+        let parts = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_SIZE"]?.split(separator: "x").compactMap { Double($0) } ?? []
+        return parts.count == 2 ? CGSize(width: parts[0], height: parts[1]) : CGSize(width: 1600, height: 900)
+    }()
     static var stills: [Theme: NSImage] = [:]
+    /// The hint drawn as if the pointer were over it.
+    static var hintHover: Command?
 
     /// The game ANYPS5_PREVIEW_SELECT picks: the first title ID in it.
     static var selectedTitle: String? {
@@ -46,16 +52,23 @@ enum PreviewRenderer {
         preferences.theme = .cosmic
         preferences.gameArtwork = true
         let still = BackgroundView.still(theme: .cosmic, width: Int(size.width), height: Int(size.height), time: 260)
-        render(preferences, found, root, still, output.appendingPathComponent("home-artwork.png"))
-        render(preferences, found, root, still, output.appendingPathComponent("home-actions.png")) { model in model.focus = .actions(0) }
+        render(preferences, found, root, still, output.appendingPathComponent("home-artwork.png")) { model in signedIn(model) }
+        render(preferences, found, root, still, output.appendingPathComponent("home-actions.png")) { model in signedIn(model); model.focus = .actions(0) }
+        // The pointer over a whole pill (Select) and over one glyph of another (→ of Move).
+        for (name, command) in [("hints-hover-select", Command.select), ("hints-hover-right", .right)] {
+            hintHover = command
+            render(preferences, found, root, still, output.appendingPathComponent("\(name).png")) { model in signedIn(model) }
+            hintHover = nil
+        }
         render(preferences, found, root, still, output.appendingPathComponent("home-unlocking.png")) { model in
-            if let game = model.selectedGame { model.previewProgress(game, step: .copy, fraction: 0.4) }
+            signedIn(model)
+            if let game = model.selectedGame { model.previewProgress(game, step: .relink, fraction: 0.54) }
         }
         render(preferences, found, root, still, output.appendingPathComponent("starting.png")) { model in
             if let game = model.selectedGame { model.previewStarting(game) }
         }
-        render(preferences, found, root, still, output.appendingPathComponent("game-settings.png")) { model in model.overlay = .gameSettings; model.panelInRows = true; model.panelRow = 1 }
-        render(preferences, found, root, still, output.appendingPathComponent("controls.png")) { model in model.overlay = .controls; model.panelInRows = true; model.panelRow = 1 }
+        render(preferences, found, root, still, output.appendingPathComponent("game-settings.png")) { model in signedIn(model); model.overlay = .gameSettings; model.panelInRows = true; model.panelRow = 1 }
+        render(preferences, found, root, still, output.appendingPathComponent("controls.png")) { model in signedIn(model); model.overlay = .controls; model.panelInRows = true; model.panelRow = 1 }
         render(preferences, found, root, still, output.appendingPathComponent("controls-game.png")) { model in
             model.previewGameControls([.cross: ["Jump"], .circle: ["Cancel", "Drop"], .square: ["Interact primary"], .triangle: ["Meow"], .r2: ["Sprint"],
                                        .leftStickUp: ["Move forward"], .options: ["Open menu"]])
@@ -257,7 +270,7 @@ enum PreviewRenderer {
                                                  viewers: viewers, invited: []),
                                links: ["f1": .init(state: .connected, roundTrip: 38, sendRate: 9_000_000, relayed: false, framesPerSecond: 60, frameHeight: 720),
                                        "f2": .init(state: .connected, roundTrip: 71, sendRate: 4_000_000, relayed: true, framesPerSecond: 60, frameHeight: 720)])
-            model.overlay = .friends; model.panelInRows = true; model.panelRow = 4
+            model.overlay = .friends; model.panelInRows = true; model.panelRow = 5
         }
         render(preferences, found, root, still, output.appendingPathComponent("friends-share-invite.png")) { model in
             model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: nil)
@@ -274,15 +287,15 @@ enum PreviewRenderer {
         }
         render(preferences, found, root, still, output.appendingPathComponent("controls-capture.png")) { model in model.overlay = .controls; model.panelInRows = true; model.panelRow = 3; model.capturing = .square }
         render(preferences, found, root, still, output.appendingPathComponent("pairing.png")) { model in model.previewPairing(PairingRequest(id: UUID(), deviceName: "Pixel 8", code: "4821")) }
-        render(preferences, found, root, still, output.appendingPathComponent("home-phone.png")) { model in model.previewPhone("Pixel 8", latency: 9) }
+        render(preferences, found, root, still, output.appendingPathComponent("home-phone.png")) { model in signedIn(model); model.previewPhone("Pixel 8", latency: 9) }
         render(preferences, found, root, still, output.appendingPathComponent("home-phone-connecting.png")) { model in model.previewPhoneConnecting("Pixel 8") }
         render(preferences, found, root, still, output.appendingPathComponent("home-phones.png")) { model in
             model.previewPhones([PhoneBadge(id: "a", name: "Pixel 8", number: 1), PhoneBadge(id: "b", name: "Galaxy", number: 2), PhoneBadge(id: "c", name: "iPhone", number: nil)])
         }
-        render(preferences, found, root, still, output.appendingPathComponent("advanced.png")) { model in model.overlay = .advanced; model.panelInRows = true; model.panelRow = 4 }
+        render(preferences, found, root, still, output.appendingPathComponent("advanced.png")) { model in signedIn(model); model.overlay = .advanced; model.panelInRows = true; model.panelRow = 4 }
         render(preferences, found, root, still, output.appendingPathComponent("update-choice.png")) { model in model.overlay = .updateChoice; model.panelInRows = true; model.panelRow = 0 }
         renderCrashReport(preferences, found, root, still, output)
-        render(preferences, found, root, still, output.appendingPathComponent("home-trophies.png")) { model in model.focus = .actions(1) }
+        render(preferences, found, root, still, output.appendingPathComponent("home-trophies.png")) { model in signedIn(model); model.focus = .actions(1) }
         render(preferences, found, root, still, output.appendingPathComponent("trophies.png")) { model in model.overlay = .trophies; model.trophyIndex = 1 }
         render(preferences, found, root, still, output.appendingPathComponent("trophies-r1.png")) { model in model.overlay = .trophies; model.trophyIndex = 5; model.switchGame(1) }
         render(preferences, found, root, still, output.appendingPathComponent("game-settings-r1.png")) { model in model.overlay = .gameSettings; model.panelInRows = true; model.panelRow = 1; model.switchGame(1) }
@@ -295,7 +308,40 @@ enum PreviewRenderer {
             model.overlay = .settings
             model.panelCategory = model.panelCategories().firstIndex { $0.id == "about" } ?? 0
             model.panelInRows = true
-            model.panelRow = 2
+            model.panelRow = 3
+        }
+        // On the Nightly channel, a nightly offered: the channel row selected.
+        do {
+            var nightly = preferences
+            nightly.updateChannel = Updates.Channel.nightly.rawValue
+            render(nightly, found, root, still, output.appendingPathComponent("about-nightly.png")) { model in
+                model.previewUpdate(Updates.Release(tag: "v0.2.17-arm-nightly.20261025.1", version: "0.2.17-nightly.20261025.1",
+                                                    page: URL(string: "https://github.com/utkuhalis/AnyPS5-ARM/releases/tag/v0.2.17-arm-nightly.20261025.1")!,
+                                                    download: nil, size: nil, prerelease: true), progress: nil)
+                model.overlay = .settings
+                model.panelCategory = model.panelCategories().firstIndex { $0.id == "about" } ?? 0
+                model.panelInRows = true
+                model.panelRow = 2
+            }
+        }
+        // The profile picture: cut from a game's artwork, on the top bar, in Settings and in the crop.
+        if let art = (found.first { $0.background != nil }?.background).flatMap({ try? Data(contentsOf: $0) }), let source = ProfilePicture.read(art),
+           let png = ProfilePicture.png(source, crop: ProfilePicture.crop(width: source.width, height: source.height, zoom: 1.6, offset: CGPoint(x: 0.2, y: -0.3))) {
+            let picture = NSImage(data: png)
+            render(preferences, found, root, still, output.appendingPathComponent("profile-topbar.png")) { model in signedIn(model); model.profilePicture = picture }
+            render(preferences, found, root, still, output.appendingPathComponent("profile-settings.png")) { model in
+                signedIn(model)
+                model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: "https://anytogether.test/api/v1/avatars/0.jpg")
+                model.profilePicture = picture
+                model.overlay = .settings
+                model.panelCategory = model.panelCategories().firstIndex { $0.id == "behaviour" } ?? 0
+                model.panelInRows = true
+                model.panelRow = 1
+            }
+            render(preferences, found, root, still, output.appendingPathComponent("profile-crop.png")) { model in
+                signedIn(model)
+                model.previewCrop(source, zoom: 1.6, offset: CGPoint(x: 0.2, y: -0.3))
+            }
         }
         renderEngines(preferences, found, root, still, output)
         render(preferences, found, root, still, output.appendingPathComponent("gallery.png")) { model in model.open(.gallery); model.galleryIndex = 1 }
@@ -313,6 +359,7 @@ enum PreviewRenderer {
         }
         SocialPreviews.run(preferences, found, root, still, output)
         DiscoverPreviews.run(preferences, found, root, still, output)
+        BroadcastPreviews.run(preferences, found, root, still, output)
         print("rendered into \(output.path)")
     }
 
@@ -459,6 +506,26 @@ enum PreviewRenderer {
         }
     }
 
+    /// Signed in to AnyTogether as Robin, as the home screen looks on most days: friends online,
+    /// unread messages and notifications on the top bar.
+    static func signedIn(_ model: AppModel) {
+        let title = model.games.first?.titleID ?? "PPSA01234"
+        model.togetherUser = SocialPreviews.me
+        model.togetherConnected = true
+        model.togetherFriends = [
+            TogetherFriend(userId: "f1", handle: "mira", displayName: "Mira", avatar: nil, presence: .init(state: "in_game", titleId: title, since: nil)),
+            TogetherFriend(userId: "f2", handle: "sol", displayName: "Sol", avatar: nil, presence: .init(state: "online", titleId: nil, since: nil)),
+            TogetherFriend(userId: "f3", handle: "kenji", displayName: "Kenji", avatar: nil, presence: nil),
+        ]
+        let robin = TogetherPerson(userId: "u1", handle: "robin", displayName: "Robin", avatar: nil)
+        let sol = TogetherPerson(userId: "f2", handle: "sol", displayName: "Sol", avatar: nil)
+        model.inbox = TogetherInbox(me: "u1", conversations: [
+            TogetherConversation(id: "c2", kind: "direct", title: nil, members: [robin, sol], lastSeq: 3, readSeq: 1, unread: 2,
+                                 lastMessage: TogetherMessage(id: "k3", conversationId: "c2", seq: 3, authorId: "f2", text: "Party tonight?", createdAt: Date()), updatedAt: Date()),
+        ])
+        model.social.notifications.load(TogetherNotificationPage(notifications: [], unread: 3, more: false))
+    }
+
     static func render(_ preferences: Preferences, _ games: [Game], _ root: URL, _ still: NSImage?, _ file: URL, configure: (AppModel) -> Void = { _ in }) {
         // ANYPS5_PREVIEW_ONLY=party,messages draws only the screens whose file names start so.
         if let only = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_ONLY"]?.split(separator: ","), !only.contains(where: { file.lastPathComponent.hasPrefix($0) }) { return }
@@ -472,6 +539,7 @@ enum PreviewRenderer {
             .environmentObject(model)
             .environment(\.stillBackground, still)
             .environment(\.themeStills, stills)
+            .environment(\.hintHover, hintHover)
             .frame(width: size.width, height: size.height)
         let renderer = ImageRenderer(content: view)
         renderer.scale = 1

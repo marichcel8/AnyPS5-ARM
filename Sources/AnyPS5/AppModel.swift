@@ -24,6 +24,8 @@ struct Preferences: Codable, Equatable {
     var musicVolume: Int?
     /// nil checks GitHub for a newer launcher, as true does.
     var checkUpdates: Bool?
+    /// Which releases the update check offers (Updates.Channel); nil is Stable.
+    var updateChannel: String?
     var hideWhilePlaying = false
     /// The party's voice sends only while ⌥V is held; nil means off (open microphone).
     var pushToTalk: Bool?
@@ -126,6 +128,8 @@ enum Overlay: Equatable {
     case lfgPost
     /// One game's hub: who plays it now, posts, public share plays and parties, its players.
     case gameHub
+    /// The profile picture being cut square.
+    case cropPicture
 }
 
 struct Toast: Identifiable, Equatable {
@@ -282,10 +286,11 @@ final class AppModel: ObservableObject {
         designs = themes.all
         if persists {
             togetherUser = together.user
+            DispatchQueue.main.async { [weak self] in self?.startFamily() }
             if togetherUser != nil { DispatchQueue.main.async { [weak self] in self?.startTogetherSocket() } }
         }
         apply()
-        if persists { loadEngines() }
+        if persists { loadEngines(); loadProfilePicture() }
         if persists {
             AppModel.opener = { [weak self] urls in self?.open(urls) }
             AppModel.beforeQuit = { [weak self] in self?.leaveTogetherOnQuit() }
@@ -374,6 +379,21 @@ final class AppModel: ObservableObject {
 
     static var runningVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev" }
 
+    var updateChannel: Updates.Channel { preferences.updateChannel.flatMap(Updates.Channel.init(rawValue:)) ?? .stable }
+
+    /// Settings → About → Update Channel: the new channel is asked at once. Nightly offers its
+    /// newest build; Stable offers its release only when it is newer than this version, so going
+    /// back to Stable never installs an older launcher.
+    func setUpdateChannel(_ channel: Updates.Channel) {
+        guard channel != updateChannel else { return }
+        preferences.updateChannel = channel == .stable ? nil : channel.rawValue
+        availableUpdate = nil
+        guard updateProgress == nil else { return }
+        // A check on its way asks again for the new channel when it ends.
+        guard !checkingUpdates else { return }
+        lookUpUpdate(told: true)
+    }
+
     func checkForUpdate() {
         guard persists, preferences.checkUpdates ?? true, updateProgress == nil, !checkingUpdates else { return }
         lookUpUpdate(told: false)
@@ -391,10 +411,13 @@ final class AppModel: ObservableObject {
 
     private func lookUpUpdate(told: Bool) {
         let current = AppModel.runningVersion
+        let channel = updateChannel
         checkingUpdates = true
         Task { @MainActor in
-            let found = await Updates.lookup(current: current)
+            let found = await Updates.lookup(current: current, channel: channel)
             self.checkingUpdates = false
+            // The channel changed meanwhile: this answer is the other channel's.
+            if channel != self.updateChannel { return self.lookUpUpdate(told: true) }
             switch found {
             case .newer(let release):
                 self.lastUpdateCheck = Date()
@@ -404,7 +427,12 @@ final class AppModel: ObservableObject {
             case .current:
                 self.lastUpdateCheck = Date()
                 self.availableUpdate = nil
-                if told { self.show(T.format(.launcherUpToDate, current), symbol: "checkmark.circle.fill") }
+                // On Stable after a nightly: this version stays until a newer release.
+                if told, channel == .stable, Updates.Version(current)?.isNightly == true {
+                    self.show(T.format(.updateChannelStays, current), symbol: "checkmark.circle.fill")
+                } else if told {
+                    self.show(T.format(.launcherUpToDate, current), symbol: "checkmark.circle.fill")
+                }
             case .failed:
                 if told { self.show(T.text(.updateCheckFailed), symbol: "exclamationmark.triangle.fill") }
             }
@@ -463,6 +491,10 @@ final class AppModel: ObservableObject {
     lazy var togetherSync = TogetherSync(client: together, deviceName: Host.current().localizedName ?? "Mac", model: AppModel.machineModel)
     /// When the running game started, for the play session AnyTogether keeps.
     var sessionStart: Date?
+    /// Family limits on this Mac, and the watch over play time (FamilyGate.swift).
+    @Published var family = FamilyStanding.free
+    lazy var familyCache = persists ? FamilyCache() : FamilyCache(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-family"), defaults: UserDefaults(suiteName: "AnyPS5-preview-family") ?? .standard)
+    let familyWatch = FamilyWatch()
     @Published var togetherFriends: [TogetherFriend] = []
     @Published var togetherRequests = TogetherRequests(incoming: [], outgoing: [])
     var friendHandle = ""
@@ -475,6 +507,11 @@ final class AppModel: ObservableObject {
     var profileReturn: ProfileReturn?
     /// The user's own profile with its privacy, and the edits typed in Settings → AnyTogether.
     @Published var togetherProfile: TogetherOwnProfile?
+    /// The profile picture (ProfilePicture.file), the crop open on a new one, and an upload or
+    /// download of AnyTogether's on its way.
+    @Published var profilePicture: NSImage?
+    @Published var pictureCrop: PictureCrop?
+    @Published var pictureBusy = false
     var profileDraft = ProfileDraft()
     /// Messages: the conversations and threads, the row selected on the left, whether the thread
     /// has the focus (a quick reply, or the field at the end), and whether the field is typed in.
@@ -788,6 +825,7 @@ final class AppModel: ObservableObject {
     // MARK: Playing
 
     func primaryAction(_ game: Game) {
+        if familyPrimaryAction(game) { return }
         switch state(of: game) {
         case .installed(let outdated): outdated ? open(.updateChoice) : play(game)
         case .locked, .failed: unlock(game)
@@ -802,7 +840,7 @@ final class AppModel: ObservableObject {
     /// detailed logging on for this start only.
     func play(_ game: Game, trace: Bool = false) {
         guard root != nil, starting == nil, running == nil, syncing == nil else { return }
-        syncSaves(game) { self.start(game, trace: trace) }
+        familyGate(game) { self.syncSaves(game) { self.start(game, trace: trace) } }
     }
 
     private func start(_ game: Game, trace: Bool = false) {
@@ -837,6 +875,7 @@ final class AppModel: ObservableObject {
                     self.running = (game, app)
                     self.lastSessions[game.id]?.pid = app.processIdentifier
                     self.sessionStart = Date()
+                    self.familyGameStarted()
                     self.watchTrophies(game)
                     self.watchForExit(of: app.processIdentifier)
                     self.watchForWindow(of: app)
@@ -993,6 +1032,11 @@ final class AppModel: ObservableObject {
         }
     }
 
+    // MARK: Broadcasting
+
+    /// Live to Twitch, YouTube or an RTMP server (Broadcaster.swift, BroadcastPanel.swift).
+    lazy var broadcaster: Broadcaster = makeBroadcaster()
+
     // MARK: Clips
 
     let clipRecorder = ClipRecorder()
@@ -1027,6 +1071,7 @@ final class AppModel: ObservableObject {
     /// Create, ⌥F12 or the phone: the last seconds of the game playing go to the gallery.
     func saveClip() {
         guard let game = running?.game else { return }
+        guard familyAllows(.mediaSharing) else { return TrophyBanner.shared.notice(FS.refusal(.mediaSharing), detail: "", symbol: "hand.raised.fill", sounds: preferences.sounds) }
         guard preferences.clips == true else {
             return TrophyBanner.shared.notice(T.text(.clipsOff), detail: T.text(.clipsOffDetail), symbol: "record.circle", sounds: preferences.sounds)
         }
@@ -1131,7 +1176,9 @@ final class AppModel: ObservableObject {
         self.running = nil
         if let start = sessionStart { recordPlay(running.game, from: start) }
         sessionStart = nil
+        familyGameEnded()
         clipRecorder.stop()
+        broadcaster.stop()
         gameWindowShown = false
         updateRemotePlay()
         followSharePlay()
@@ -1181,6 +1228,7 @@ final class AppModel: ObservableObject {
                 if !NSApp.isActive {
                     TrophyBanner.shared.notice(T.format(.phoneConnected, name), detail: T.text(.phoneConnectedDetail), symbol: "iphone.gen3", sounds: self.preferences.sounds)
                 }
+                self.tellPhoneBroadcast(self.broadcaster.phase.active)
                 self.phoneLibrary = nil
                 self.phoneLookSent = nil
                 self.phoneActivity = nil
@@ -1384,6 +1432,9 @@ final class AppModel: ObservableObject {
         case .command("capture"):
             // Create on the phone's pad: a clip of the game, the game staying in front.
             saveClip()
+        case .command("broadcastStart"), .command("broadcastStop"):
+            // Go live and Stop broadcast in the phone's PS menu.
+            phoneBroadcast(message == .command(name: "broadcastStart"))
         case .command(let name):
             let commands: [String: Command] = ["left": .left, "right": .right, "up": .up, "down": .down, "select": .select, "back": .back, "options": .options,
                                                "l1": .previousGame, "r1": .nextGame]

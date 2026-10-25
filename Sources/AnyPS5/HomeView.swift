@@ -125,7 +125,7 @@ struct TopBar: View {
             HStack(spacing: 10 * scale) {
                 // Signed in to AnyTogether: the avatar and name others see.
                 let name = model.togetherUser?.displayName ?? model.preferences.profileName
-                ProfileAvatar(url: model.togetherUser?.avatar, name: name, size: 36 * scale, glow: false)
+                ProfileAvatar(url: model.togetherUser?.avatar, name: name, size: 36 * scale, glow: false, picture: model.profilePicture)
                 Text(name).font(.display(16 * scale, .medium)).foregroundStyle(.white.opacity(0.9))
             }
             Clock()
@@ -262,7 +262,7 @@ struct GameTile: View {
                 Circle().fill(model.accent).frame(width: size * 0.09, height: size * 0.09).padding(size * 0.07).shadow(color: model.accent, radius: 6)
             }
         case .installed:
-            EmptyView()
+            FamilyTileBadge(game: game, size: size)
         }
     }
 }
@@ -308,7 +308,8 @@ struct HeroInfo: View {
                 .minimumScaleFactor(0.6)
                 .shadow(color: .black.opacity(0.35), radius: 12)
             HStack(spacing: 16 * scale) {
-                ConsoleButton(title: primaryTitle(state), symbol: primarySymbol(state), focused: model.focus == .actions(0) && model.overlay == nil, prominent: true, minWidth: 210) {
+                let family = model.familyPrimary(game, state)
+                ConsoleButton(title: family?.title ?? primaryTitle(state), symbol: family?.symbol ?? primarySymbol(state), focused: model.focus == .actions(0) && model.overlay == nil, prominent: true, minWidth: 210) {
                     model.focus = .actions(0)
                     model.primaryAction(game)
                 }
@@ -610,6 +611,9 @@ extension AppModel {
             return panelCommand(command)
         case .profile:
             profileCommand(command)
+            return true
+        case .cropPicture:
+            cropCommand(command)
             return true
         case .messages:
             messagesCommand(command)
