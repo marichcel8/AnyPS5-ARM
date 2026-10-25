@@ -757,6 +757,10 @@ struct VulkanDevice::State {
                 }
                 request.label = "AnyPS5 guest compute";
                 request.priority = Metal::CompilePriority::Urgent;
+                if (Trace()) {
+                    std::fprintf(stderr, "[metal] compute pipeline %016llx%016llx:\n%.*s\n", static_cast<unsigned long long>(identity.high), static_cast<unsigned long long>(identity.low), static_cast<int>(source->size()), source->data());
+                    for (const auto& constant : request.constants) std::fprintf(stderr, "[metal] function constant %u = 0x%x\n", constant.index, constant.value);
+                }
                 ticket = compiler->Compute(request);
                 pipelines.emplace(identity, PipelineEntry{std::move(source), ticket});
                 pipelinesCreated.fetch_add(1, std::memory_order_relaxed);
@@ -879,7 +883,7 @@ struct VulkanDevice::State {
         if (scanned != 0) device->WaitOnQueue(Queue, Queue, scanned);
         const auto result = presenter->Present(source);
         if (result.serial != 0) presentSerials[slot] = result.serial;
-        drain(scanned);
+        if (scanned != 0 && !device->WaitSerial(Queue, scanned, WaitTimeoutMs)) throw std::runtime_error("AGC graphics: Metal scanout did not finish in time");
         reportPresents();
         return result.pacedMs + result.waitMs;
     }
