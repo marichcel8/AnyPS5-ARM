@@ -389,8 +389,6 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     EmitFlow(state);
     if (geometry) CheckGeometry(state);
     if (!compute && !geometry && (state.features & (Lds | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
-    if (!compute && !geometry && program.WaveSize() == 64u && (state.features & (Lane | Wave | Permute)) != 0u) throw MslUnsupported("MSL backend: a wave64 vertex or pixel program uses SIMD-group operations, which need two guest lanes per thread");
-    if (stage == IrShaderStage::Vertex && (state.features & (Lane | Wave)) != 0u) throw MslUnsupported("MSL backend: SIMD-group operations in vertex functions are not emitted");
 
     std::string declarations;
     const auto declare = [&](std::string_view text) {
