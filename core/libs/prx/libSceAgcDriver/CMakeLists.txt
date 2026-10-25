@@ -415,6 +415,9 @@ set(agcDriverVulkanSources
 set(agcDriverMetalSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Null/NullBackend.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/Backend/Metal/MetalDevice.mm
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/FrameCapture.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/FrameRecorder.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Screenshot.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/ColorTargetLayout.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestSamplerResource.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/GuestTextureResource.cpp

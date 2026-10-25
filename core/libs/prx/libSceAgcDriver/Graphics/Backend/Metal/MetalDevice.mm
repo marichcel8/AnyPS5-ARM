@@ -1820,6 +1820,20 @@ auto VulkanDevice::ReplayComputePipeline(const ShaderRecompiler::RecompileResult
 
 auto VulkanDevice::WaitForPipelineJournalReplay() -> void {}
 
+auto VulkanDevice::SavePipelineCache() -> void {}
+
+auto VulkanDevice::SealPassWriteOnly() -> void {}
+
+auto VulkanDevice::AcquireRealImage() -> bool { return false; }
+
+auto VulkanDevice::QueueRealFrame() -> void {}
+
+auto VulkanDevice::WaitRecordedFor(std::uint64_t serial, std::uint64_t timeoutNanos) -> bool {
+    if (serial == 0 || state->device == nullptr) return true;
+    const auto milliseconds = std::min<std::uint64_t>((timeoutNanos + 999999u) / 1000000u, WaitTimeoutMs);
+    return state->device->WaitSerial(Queue, serial, static_cast<std::uint32_t>(milliseconds));
+}
+
 auto VulkanDevice::ComputePipelinesCreated() const -> std::uint64_t { return state->pipelinesCreated.load(std::memory_order_relaxed); }
 
 auto VulkanDevice::startJournalReplay() -> void {}
