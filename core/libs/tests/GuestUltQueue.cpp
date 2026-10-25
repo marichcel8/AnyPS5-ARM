@@ -15,7 +15,7 @@ int APS5_VABI sceUltInitialize();
 int APS5_VABI sceUltFinalize();
 std::uint64_t APS5_VABI sceUltWaitingQueueResourcePoolGetWorkAreaSize(std::uint32_t, std::uint32_t);
 std::uint64_t APS5_VABI sceUltQueueDataResourcePoolGetWorkAreaSize(std::uint32_t, std::uint64_t, std::uint32_t);
-int APS5_VABI sceUltQueueDataResourcePoolCreate(void*, const char*, std::uint32_t, std::uint64_t, std::uint32_t, void*, void*, const void*, std::uint32_t);
+int APS5_VABI sceUltQueueDataResourcePoolCreate(void*, const char*, std::uint32_t, std::uint64_t, std::uint32_t, void*, void*, const void*, std::uint64_t);
 int APS5_VABI sceUltQueueDataResourcePoolDestroy(void*);
 int APS5_VABI sceUltQueueCreate(void*, const char*, std::uint64_t, void*, void*, const void*, std::uint32_t);
 int APS5_VABI sceUltQueueDestroy(void*);

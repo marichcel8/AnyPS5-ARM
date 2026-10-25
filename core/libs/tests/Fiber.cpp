@@ -26,7 +26,7 @@ std::int32_t APS5_VABI sceFiberStartContextSizeCheck(std::uint32_t);
 std::int32_t APS5_VABI sceFiberStopContextSizeCheck(void);
 std::int32_t APS5_VABI _sceFiberAttachContextAndRun(FiberObject*, void*, std::uint64_t, std::uint64_t, std::uint64_t*);
 std::int32_t APS5_VABI _sceFiberAttachContextAndSwitch(FiberObject*, void*, std::uint64_t, std::uint64_t, std::uint64_t*);
-std::int32_t APS5_VABI _sceFiberInitializeWithInternalOptionImpl(FiberObject*, const char*, Entry, std::uint64_t, void*, std::uint64_t, const void*, std::uint32_t, std::uint32_t);
+std::int32_t APS5_VABI _sceFiberInitializeWithInternalOptionImpl(FiberObject*, const char*, Entry, std::uint64_t, void*, std::uint64_t, const void*, std::uint32_t, std::uint64_t);
 }
 
 static void Require(bool value, const char* what) {

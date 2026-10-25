@@ -15,8 +15,8 @@ int APS5_VABI sceGnmDrawIndirect(std::uint32_t*, std::uint32_t, std::uint32_t, s
 int APS5_VABI sceGnmDrawIndexIndirect(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
 int APS5_VABI sceGnmDrawIndirectMulti(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
 int APS5_VABI sceGnmDrawIndexIndirectMulti(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
-int APS5_VABI sceGnmDrawIndirectCountMulti(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
-int APS5_VABI sceGnmDrawIndexIndirectCountMulti(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+int APS5_VABI sceGnmDrawIndirectCountMulti(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t);
+int APS5_VABI sceGnmDrawIndexIndirectCountMulti(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t, std::uint64_t);
 int APS5_VABI sceGnmComputeWaitSemaphore(std::uint32_t*, std::uint32_t, std::uint64_t, std::uint32_t);
 int APS5_VABI sceGnmComputeWaitOnAddress(std::uint32_t*, std::uint32_t, std::uint64_t, std::uint32_t, std::uint32_t, std::uint32_t);
 int APS5_VABI sceGnmSetVgtControl(std::uint32_t*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);

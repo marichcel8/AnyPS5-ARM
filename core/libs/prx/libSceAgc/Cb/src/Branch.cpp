@@ -8,7 +8,10 @@
 
 extern "C" {
 
-std::uint32_t* APS5_VABI sceAgcCbBranch(CommandBuffer* buf, std::uint8_t mode, std::uint8_t compareFunction, const volatile std::uint64_t* compareAddress, std::uint64_t mask, std::uint64_t reference, std::uint8_t cachePolicy1, const volatile std::uint32_t* buffer1, std::uint32_t sizeInDwords1, std::uint8_t cachePolicy2, const volatile std::uint32_t* buffer2, std::uint32_t sizeInDwords2) {
+std::uint32_t* APS5_VABI sceAgcCbBranch(CommandBuffer* buf, std::uint8_t mode, std::uint8_t compareFunction, const volatile std::uint64_t* compareAddress, std::uint64_t mask, std::uint64_t reference, std::uint8_t cachePolicy1, const volatile std::uint32_t* buffer1, std::uint64_t sizeInDwords1Slot, std::uint64_t cachePolicy2Slot, const volatile std::uint32_t* buffer2, std::uint64_t sizeInDwords2Slot) {
+    const auto sizeInDwords1 = static_cast<std::uint32_t>(sizeInDwords1Slot);
+    const auto cachePolicy2 = static_cast<std::uint8_t>(cachePolicy2Slot);
+    const auto sizeInDwords2 = static_cast<std::uint32_t>(sizeInDwords2Slot);
     Agc::Command::CheckBits(mode, 3, __func__);
     Agc::Command::CheckBits(compareFunction, 7, __func__);
     Agc::Command::CheckBits(cachePolicy1, 3, __func__);

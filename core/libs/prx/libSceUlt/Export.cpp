@@ -545,7 +545,8 @@ std::uint64_t APS5_VABI sceUltQueueDataResourcePoolGetWorkAreaSize(std::uint32_t
     return static_cast<std::uint64_t>(numData) * dataSize + nodeArea;
 }
 
-int APS5_VABI sceUltQueueDataResourcePoolCreate(void* pool, const char* name, std::uint32_t numData, std::uint64_t dataSize, std::uint32_t numQueueObject, void* waitingQueueResourcePool, void* workArea, const void* optParam, std::uint32_t buildVersion) {
+int APS5_VABI sceUltQueueDataResourcePoolCreate(void* pool, const char* name, std::uint32_t numData, std::uint64_t dataSize, std::uint32_t numQueueObject, void* waitingQueueResourcePool, void* workArea, const void* optParam, std::uint64_t buildVersionSlot) {
+    const auto buildVersion = static_cast<std::uint32_t>(buildVersionSlot);
     (void)name;
     (void)optParam;
     (void)buildVersion;
@@ -795,7 +796,8 @@ int APS5_VABI sceUltUlthreadRuntimeCreate(void* runtime, const char* name, std::
     return ULT_OK;
 }
 
-int APS5_VABI sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthreadEntry entry, std::uint64_t arg, void* context, std::uint64_t sizeContext, void* runtime, const void* optParam, std::uint32_t buildVersion) {
+int APS5_VABI sceUltUlthreadCreate(void* ulthread, const char* name, UltUlthreadEntry entry, std::uint64_t arg, void* context, std::uint64_t sizeContext, void* runtime, const void* optParam, std::uint64_t buildVersionSlot) {
+    const auto buildVersion = static_cast<std::uint32_t>(buildVersionSlot);
     (void)context;
     (void)sizeContext;
     (void)optParam;

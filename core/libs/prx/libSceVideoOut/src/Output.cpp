@@ -53,7 +53,8 @@ int ValidateVideoOutOutputMode_nid_no_patch(uint64_t mode, const VideoOutOutputO
 static int validateOutputConfig(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
     if (!VideoOutDriver::Get().HasConfig(handle) || !VideoOutDriver::Get().IsOpen(handle)) return VIDEO_OUT_ERROR_INVALID_HANDLE;
     if (reservedPtr != nullptr || reserved != 0) return VIDEO_OUT_ERROR_INVALID_VALUE;
-    return ValidateVideoOutOutputMode_nid_no_patch(mode, options, VideoOutDriver::Get().GetDisplayRefreshRate());
+    auto& driver = VideoOutDriver::Get();
+    return ValidateVideoOutOutputMode_nid_no_patch(mode, options, driver.SupportsHighFrameRate() ? 120 : driver.GetDisplayRefreshRate());
 }
 
 static void validateOpenParam(const void* param) {
