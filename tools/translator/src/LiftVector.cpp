@@ -39,7 +39,7 @@ llvm::Value* Lifter::Impl::Flat(llvm::Value* vector) {
 // pick returns -1 for a zero element.
 llvm::Value* Lifter::Impl::LaneShuffle(llvm::Value* a, llvm::Value* b, unsigned elementBits, const std::function<int(unsigned, unsigned)>& pick) {
     const auto bits = static_cast<unsigned>(a->getType()->getPrimitiveSizeInBits().getFixedValue());
-    const unsigned count = bits / elementBits, perLane = 128 / elementBits;
+    const unsigned count = bits / elementBits, perLane = std::min(bits, 128u) / elementBits;
     std::vector<int> mask;
     std::vector<llvm::Constant*> keep;
     bool zeroes = false;
@@ -250,7 +250,7 @@ bool Lifter::Impl::EmitVectorInteger(const Instruction& instruction) {
         }));
         return true;
     }
-    if (op == "pshufd" || op == "pshuflw" || op == "pshufhw") {
+    if (op == "pshufd" || op == "pshuflw" || op == "pshufhw" || op == "pshufw") {
         const auto control = Immediate(instruction);
         auto* source = Read(instruction, 1);
         if (op == "pshufd") {

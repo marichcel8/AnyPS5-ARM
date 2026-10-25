@@ -66,7 +66,7 @@ struct JumpTableTargets {
 };
 
 struct Register {
-    enum Kind { Invalid, Gpr, Vector, Rip } kind = Invalid;
+    enum Kind { Invalid, Gpr, Vector, Mmx, Rip } kind = Invalid;
     unsigned index = 0;
     unsigned bits = 0;
     unsigned shift = 0;
@@ -93,6 +93,7 @@ inline Register RegisterOf(unsigned reg) {
     }
     if (reg >= X86_REG_XMM0 && reg <= X86_REG_XMM15) return {Register::Vector, reg - X86_REG_XMM0, 128, 0};
     if (reg >= X86_REG_YMM0 && reg <= X86_REG_YMM15) return {Register::Vector, reg - X86_REG_YMM0, 256, 0};
+    if (reg >= X86_REG_MM0 && reg <= X86_REG_MM7) return {Register::Mmx, reg - X86_REG_MM0, 64, 0};
     if (reg == X86_REG_RIP) return {Register::Rip, 0, 64, 0};
     return {};
 }

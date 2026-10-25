@@ -209,6 +209,13 @@ static void simd(void) {
     fields[1] = 4 | 60 << 8;
     __asm__ volatile("movdqu %1, %%xmm0\n\tmovdqu %2, %%xmm1\n\tinsertq %%xmm1, %%xmm0\n\tmovdqu %%xmm0, %0" : "=m"(result) : "m"(zero), "m"(fields) : "xmm0", "xmm1");
     same(37, (i64)result[0], 0x3000000000000000ll);
+    static const u16 small[4] = {1, 2, 3, 4}, tens[4] = {10, 20, 30, 40};
+    u16 mixed[4], reversed[4];
+    __asm__ volatile("movq %2, %%mm0\n\tmovq %3, %%mm1\n\tpaddw %%mm1, %%mm0\n\tpunpckhwd %%mm1, %%mm0\n\tmovq %%mm0, %0\n\t"
+                     "pshufw $0x1b, %%mm0, %%mm2\n\tmovq %%mm2, %1\n\temms"
+                     : "=m"(mixed), "=m"(reversed) : "m"(small), "m"(tens) : "mm0", "mm1", "mm2");
+    same(38, mixed[0] == 33 && mixed[1] == 30 && mixed[2] == 44 && mixed[3] == 40, 1);
+    same(39, reversed[0] == 40 && reversed[1] == 44 && reversed[2] == 30 && reversed[3] == 33, 1);
 }
 
 void _start(void* block) {

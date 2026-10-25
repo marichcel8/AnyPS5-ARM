@@ -229,6 +229,8 @@ llvm::Value* Lifter::Impl::ReadRegister(unsigned reg) {
         return ReadPart(r.index, r.bits, r.shift);
     case Register::Vector:
         return builder.CreateLoad(Int(r.bits), Field(StateLayout::Ymm + r.index * 32));
+    case Register::Mmx:
+        return builder.CreateLoad(Int(64), Field(StateLayout::X87 + r.index * 8));
     default:
         throw Unsupported{"register operand"};
     }
@@ -244,6 +246,9 @@ void Lifter::Impl::WriteRegister(unsigned reg, llvm::Value* value, bool vex) {
     case Register::Vector:
         builder.CreateStore(Resize(value, r.bits), Field(StateLayout::Ymm + r.index * 32));
         if (vex && r.bits == 128) builder.CreateStore(Const(128, 0), Field(StateLayout::Ymm + r.index * 32 + 16));
+        return;
+    case Register::Mmx:
+        builder.CreateStore(Resize(value, 64), Field(StateLayout::X87 + r.index * 8));
         return;
     default:
         throw Unsupported{"register operand"};
