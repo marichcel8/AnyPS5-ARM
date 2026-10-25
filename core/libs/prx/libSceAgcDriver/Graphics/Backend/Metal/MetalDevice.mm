@@ -527,7 +527,6 @@ struct VulkanDevice::State {
     std::unordered_map<Metal::CompileKey, std::shared_ptr<Metal::RenderPipeline>, Metal::CompileKeyHash> drawPipelines;
 
     void* window = nullptr;
-    SDL_MetalView view = nullptr;
     std::unique_ptr<Metal::Presenter> presenter;
     std::array<id<MTLTexture>, PresentSlots> presentTextures{};
     std::array<std::uint64_t, PresentSlots> presentSerials{};
@@ -592,12 +591,6 @@ struct VulkanDevice::State {
             id<MTLTexture> retired = texture;
             texture = nil;
             device->RetireAllocation((__bridge void*)retired, {});
-        }
-        if (view != nullptr) {
-            const auto destroy = [](void* context) { SDL_Metal_DestroyView(static_cast<SDL_MetalView>(context)); };
-            if (pthread_main_np() != 0) destroy(view);
-            else dispatch_async_f(dispatch_get_main_queue(), view, destroy);
-            view = nullptr;
         }
         for (auto& texture : nullTextures) {
             if (texture == nil) continue;
@@ -1001,23 +994,14 @@ struct VulkanDevice::State {
         return (__bridge id<MTLComputePipelineState>)ticket->ProductAs<Metal::CompiledPipeline>()->native;
     }
 
-    void attachWindow(void* sdlWindow) {
-        struct Request {
-            SDL_Window* window;
-            SDL_MetalView view;
-            void* layer;
-        } request{static_cast<SDL_Window*>(sdlWindow), nullptr, nullptr};
-        Aps5RunOnMainThread_nid_no_patch([](void* context) {
-            auto& item = *static_cast<Request*>(context);
-            item.view = SDL_Metal_CreateView(item.window);
-            if (item.view != nullptr) item.layer = SDL_Metal_GetLayer(item.view);
-        }, &request);
-        view = request.view;
-        if (request.layer == nullptr) throw std::runtime_error(std::string("AGC graphics: SDL_Metal_CreateView failed: ") + SDL_GetError());
+    void attachWindow(const PresentationWindow& target) {
+        if (target.createSurface == nullptr) throw std::runtime_error("AGC graphics: the presentation window has no Metal layer provider");
+        const auto layer = reinterpret_cast<void*>(target.createSurface(target.context, nullptr));
+        if (layer == nullptr) throw std::runtime_error("AGC graphics: the video output could not create a Metal layer for its window");
         std::string failure;
-        presenter = Metal::Presenter::Create(*device, request.layer, Metal::PresenterOptions::FromEnvironment(), &failure);
+        presenter = Metal::Presenter::Create(*device, layer, Metal::PresenterOptions::FromEnvironment(), &failure);
         if (presenter == nullptr) throw std::runtime_error("AGC graphics: Metal presenter could not be created: " + failure);
-        window = sdlWindow;
+        window = target.context;
     }
 
     void stagePresent(std::uint32_t width, std::uint32_t height, std::span<const std::byte> bgra) {
@@ -1805,7 +1789,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         s.fault = s.device->NewSharedBuffer(ShaderRecompiler::BdaAbi::FaultBufferBytes, "AnyPS5 fault buffer");
         if (!s.fault) throw std::runtime_error("AGC graphics: Metal fault buffer could not be allocated");
         std::memset(s.fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
-        if (window != nullptr && window->context != nullptr) s.attachWindow(window->context);
+        if (window != nullptr && window->context != nullptr) s.attachWindow(*window);
         {
             std::lock_guard lock(State::targetsMutex());
             State::targets().push_back(&s);

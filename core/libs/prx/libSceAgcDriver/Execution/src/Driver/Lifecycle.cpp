@@ -60,19 +60,22 @@ void PrintFailure(std::exception_ptr error) {
 
 constexpr std::uint64_t DriverMemoryAddress = 0xfe0000000ull + GuestArena::GuestAddressOffset;
 constexpr std::size_t DriverMemoryBytes = 2u << 20u;
-constexpr std::uint64_t FsTableAddress = DriverMemoryAddress + 0x40000ull;
+constexpr std::uint64_t FsTableOffset = 0x40000ull;
 constexpr std::uint64_t FsTableSlotBytes = 16u;
 constexpr std::uint64_t FsTableSlots = 6u;
 constexpr std::uint64_t FsRoutineRecords = 8u;
 constexpr std::uint64_t FsRoutineRecordBytes = 16u;
 constexpr std::uint64_t FsRoutineTableBytes = FsRoutineRecords * FsRoutineRecordBytes;
-constexpr std::uint64_t FsRoutineTableAddress = FsTableAddress + FsTableSlots * FsTableSlotBytes;
-constexpr std::uint64_t FsRoutineAddress = FsRoutineTableAddress + FsRoutineTableBytes;
+constexpr std::uint64_t FsRoutineTableOffset = FsTableOffset + FsTableSlots * FsTableSlotBytes;
+constexpr std::uint64_t FsRoutineOffset = FsRoutineTableOffset + FsRoutineTableBytes;
 constexpr std::uint32_t ScalarSetpcB64LinkS14 = 0xbe80200eu;
 constexpr std::uint32_t ScalarEndProgram = 0xbf810000u;
 constexpr std::uint64_t FsTableDword3 = 0x5204u;
 
 std::atomic<bool> driverMemoryMapped{false};
+std::uint64_t driverMemoryBase = DriverMemoryAddress;
+
+std::uint64_t FsTableAddress() { return driverMemoryBase + FsTableOffset; }
 
 void MapDriverMemory() {
     void* mapped;
@@ -85,25 +88,34 @@ void MapDriverMemory() {
     // table is left out and FS table calls stay unlinked.
     mach_vm_address_t address = DriverMemoryAddress;
     if (const auto result = mach_vm_allocate(mach_task_self(), &address, DriverMemoryBytes, VM_FLAGS_FIXED); result != KERN_SUCCESS) {
-        std::fprintf(stderr, "[gpu] the AGC FS table at 0x%llx cannot be mapped (mach_vm_allocate %d); FS table calls stay unlinked\n", static_cast<unsigned long long>(DriverMemoryAddress), result);
-        return;
+        address = 0;
+        if (const auto fallback = mach_vm_allocate(mach_task_self(), &address, DriverMemoryBytes, VM_FLAGS_ANYWHERE); fallback != KERN_SUCCESS) {
+            std::fprintf(stderr, "[gpu] the AGC FS table cannot be mapped (mach_vm_allocate %d at 0x%llx, %d anywhere); FS table calls stay unlinked\n", result, static_cast<unsigned long long>(DriverMemoryAddress), fallback);
+            return;
+        }
     }
     mapped = reinterpret_cast<void*>(address);
 #else
     mapped = mmap(reinterpret_cast<void*>(DriverMemoryAddress), DriverMemoryBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (mapped == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map the AGC driver memory");
 #endif
+#ifdef __APPLE__
+    driverMemoryBase = reinterpret_cast<std::uint64_t>(mapped);
+#else
     if (reinterpret_cast<std::uint64_t>(mapped) != DriverMemoryAddress) throw std::runtime_error("the AGC driver memory was not mapped at its fixed address");
-    auto* routineTable = reinterpret_cast<std::uint64_t*>(FsRoutineTableAddress);
+#endif
+    const auto fsRoutineTableAddress = driverMemoryBase + FsRoutineTableOffset;
+    const auto fsRoutineAddress = driverMemoryBase + FsRoutineOffset;
+    auto* routineTable = reinterpret_cast<std::uint64_t*>(fsRoutineTableAddress);
     for (std::uint64_t record = 0; record < FsRoutineRecords; ++record) {
-        routineTable[record * 2u] = FsRoutineAddress;
+        routineTable[record * 2u] = fsRoutineAddress;
         routineTable[record * 2u + 1u] = 0u;
     }
-    auto* routine = reinterpret_cast<std::uint32_t*>(FsRoutineAddress);
+    auto* routine = reinterpret_cast<std::uint32_t*>(fsRoutineAddress);
     routine[0] = ScalarSetpcB64LinkS14;
     routine[1] = ScalarEndProgram;
-    auto* slot = reinterpret_cast<std::uint64_t*>(FsTableAddress);
-    slot[0] = (FsRoutineTableAddress & 0xffffffffffffull) | 16ull << 48u;
+    auto* slot = reinterpret_cast<std::uint64_t*>(FsTableAddress());
+    slot[0] = (fsRoutineTableAddress & 0xffffffffffffull) | 16ull << 48u;
     slot[1] = FsTableDword3 << 32u | FsRoutineRecords;
 #ifndef _WIN32
     GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(mapped, DriverMemoryBytes);
@@ -377,5 +389,5 @@ extern "C" void* AgcDriverStaticTable_nid_postfix() {
     static_cast<void>(AgcDriver::DriverDetail::Driver::Get());
     if (!AgcDriver::DriverDetail::driverMemoryMapped.load(std::memory_order_acquire))
         throw std::runtime_error("the AGC static table at 0xfe0040000 is not mapped: this host cannot map the AGC driver memory at its fixed address");
-    return reinterpret_cast<void*>(AgcDriver::DriverDetail::FsTableAddress);
+    return reinterpret_cast<void*>(AgcDriver::DriverDetail::FsTableAddress());
 }

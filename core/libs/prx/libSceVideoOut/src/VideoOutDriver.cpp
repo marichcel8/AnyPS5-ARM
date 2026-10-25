@@ -89,6 +89,16 @@ std::vector<const char*> windowExtensions(SDL_Window* window) {
 }
 
 // The window's surface and size are taken on the main thread, which macOS requires of window calls.
+#ifdef ANYPS5_GPU_BACKEND_METAL
+VkSurfaceKHR createWindowSurface(void* context, VkInstance) {
+    return OnMainThread([&] {
+        const auto view = SDL_Metal_CreateView(static_cast<SDL_Window*>(context));
+        void* layer = view != nullptr ? SDL_Metal_GetLayer(view) : nullptr;
+        if (layer == nullptr) throw std::runtime_error(std::string("SDL_Metal_CreateView failed: ") + SDL_GetError());
+        return reinterpret_cast<VkSurfaceKHR>(layer);
+    });
+}
+#else
 VkSurfaceKHR createWindowSurface(void* context, VkInstance instance) {
     return OnMainThread([&] {
         VkSurfaceKHR surface = VK_NULL_HANDLE;
@@ -96,6 +106,7 @@ VkSurfaceKHR createWindowSurface(void* context, VkInstance instance) {
         return surface;
     });
 }
+#endif
 
 #ifdef __APPLE__
 // macOS hands a fully covered window's layer a drawable only about once a second, which would hold every flip.
