@@ -160,7 +160,7 @@ struct Lifter::Impl {
 
     const Instruction& Decode(std::uint64_t address);
     void Explore(std::uint64_t entry, std::deque<std::uint64_t>& pending);
-    JumpTableTargets JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function);
+    JumpTableTargets JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function, std::uint64_t begin, std::uint64_t end);
 
     void EmitImage(Statistics& stats);
     void DeclareImage();

@@ -57,7 +57,7 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
             if (instruction.size == 0) break;
             path.push_back(address);
             if (instruction.id == X86_INS_JMP && instruction.x86.op_count == 1 && instruction.Op(0).type == X86_OP_REG) {
-                auto table = JumpTable(path, addresses);
+                auto table = JumpTable(path, addresses, begin, end);
                 const auto kept = std::remove_if(table.targets.begin(), table.targets.end(), [&](std::uint64_t target) { return !inside(target); });
                 if (kept != table.targets.end()) table.bounded = false;
                 table.targets.erase(kept, table.targets.end());
@@ -93,7 +93,7 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
 // The lea may be hoisted out of a loop, so it is also looked up in the rest of the function. Without
 // the bounds check, entries are taken while they land in executable code near the jump; an extra
 // target only costs translated code, it is never jumped to.
-JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function) {
+JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path, const std::set<std::uint64_t>& function, std::uint64_t begin, std::uint64_t end) {
     const auto& jump = decoded.at(path.back());
     const auto jumpReg = RegisterOf(jump.Op(0).reg).index;
     std::optional<std::uint64_t> table;
@@ -155,7 +155,24 @@ JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path,
         std::fprintf(stderr, "jump table at %llx: base reg %u index %u table %llx count %lld\n", (unsigned long long)jump.address, baseReg, indexReg,
                      (unsigned long long)table.value_or(0), count ? (long long)*count : -1ll);
     if (!table) return result;
-    const std::uint64_t limit = count.value_or(256);
+    std::uint64_t limit = count.value_or(256);
+    std::set<std::uint64_t> starts;
+    const bool swept = !count && end != ~std::uint64_t{0} && end - begin <= (1u << 20);
+    if (swept) {
+        for (auto at = begin; at < end;) {
+            const auto& instruction = Decode(at);
+            if (instruction.size == 0) {
+                ++at;
+                continue;
+            }
+            starts.insert(at);
+            if (instruction.id == X86_INS_LEA && instruction.x86.op_count == 2 && instruction.Op(1).mem.base == X86_REG_RIP) {
+                const auto address = instruction.Next() + static_cast<std::uint64_t>(instruction.Op(1).mem.disp);
+                if (address > *table && !elf.InExecutable(address)) limit = std::min(limit, (address - *table) / 4);
+            }
+            at = instruction.Next();
+        }
+    }
     for (std::uint64_t i = 0; i < limit && i < 4096; ++i) {
         const auto* slot = elf.At(*table + i * 4, 4);
         if (slot == nullptr) break;
@@ -164,6 +181,7 @@ JumpTableTargets Lifter::Impl::JumpTable(const std::vector<std::uint64_t>& path,
         const auto target = *table + static_cast<std::uint64_t>(static_cast<std::int64_t>(offset));
         if (!elf.InExecutable(target)) break;
         if (!count && (target + 0x10000 < jump.address || target > jump.address + 0x10000)) break;
+        if (swept && starts.count(target) == 0) break;
         targets.push_back(target);
     }
     result.bounded = count && targets.size() == *count;

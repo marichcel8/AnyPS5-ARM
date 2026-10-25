@@ -70,6 +70,18 @@ static u64 jump(u64 selector) {
     return result;
 }
 
+static u64 bits(u64 first, u64 second) {
+    u64 result;
+    __asm__ volatile("tzcnt %k1, %%ecx\n\tlea one%=(%%rip), %%rdx\n\tmovslq (%%rdx,%%rcx,4), %%rcx\n\tadd %%rdx, %%rcx\n\tjmp *%%rcx\n"
+                     "0:\n\tmov $1, %0\n\tjmp 5f\n1:\n\tmov $2, %0\n\tjmp 5f\n2:\n\tmov $3, %0\n5:\n"
+                     "\ttzcnt %k2, %%ecx\n\tlea two%=(%%rip), %%rdx\n\tmovslq (%%rdx,%%rcx,4), %%rcx\n\tadd %%rdx, %%rcx\n\tjmp *%%rcx\n"
+                     "6:\n\tadd $10, %0\n\tjmp 8f\n7:\n\tadd $20, %0\n\tjmp 8f\n3:\n\tadd $30, %0\n8:\n"
+                     "\t.section .rodata\n\t.p2align 2\none%=:\n\t.long 0b - one%=, 1b - one%=, 2b - one%=\n"
+                     "two%=:\n\t.long 6b - two%=, 7b - two%=, 3b - two%=\n\t.previous"
+                     : "=&r"(result) : "r"(first), "r"(second) : "rcx", "rdx", "cc");
+    return result;
+}
+
 static void tables(void) {
     static const char table[] = "abcdef";
     u64 al = 3;
@@ -78,6 +90,8 @@ static void tables(void) {
     static volatile u64 selectors[2] = {2, 7};
     same(31, (i64)jump(selectors[0]), 12);
     same(32, (i64)jump(selectors[1]), 99);
+    static volatile u64 masks[2] = {4, 2};
+    same(33, (i64)bits(masks[0], masks[1]), 23);
 }
 
 static void frames(void) {
