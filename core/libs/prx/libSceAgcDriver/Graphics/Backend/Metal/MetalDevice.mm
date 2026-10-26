@@ -2085,7 +2085,6 @@ struct VulkanDevice::State {
             std::uint64_t ldsAddress = 0;
             if (shader.workgroupMemoryDwords != 0) {
                 if (!ldsStageOpen || ldsStage.bytes < ldsBytes) {
-                    if (ldsStageOpen) staged.push_back(ldsStage);
                     ldsStage = device->NewPrivateBuffer(ldsBytes, "AnyPS5 workgroup memory");
                     if (!ldsStage) throw std::runtime_error("AGC graphics: Metal workgroup memory buffer could not be allocated");
                     ldsStageOpen = true;
