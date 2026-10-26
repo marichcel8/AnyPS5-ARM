@@ -172,7 +172,7 @@ std::string TextureType(const ImageResource& image, const std::string& scalar = 
     const auto shape = ShapeOf(image.dimension);
     std::string name(shape.texture);
     if (image.depthCompare) {
-        if (image.dimension == RdnaImageDimension::Dim1D || image.dimension == RdnaImageDimension::Dim1DArray || image.dimension == RdnaImageDimension::Dim3D) throw MslUnsupported("MSL backend: depth comparison on 1D or 3D images has no Metal depth texture type");
+        if (image.dimension == RdnaImageDimension::Dim3D) throw MslUnsupported("MSL backend: depth comparison on 3D images has no Metal depth texture type");
         name = shape.multisampled ? (shape.arrayed ? "depth2d_ms_array" : "depth2d_ms") : (shape.arrayed ? "depth2d_array" : "depth2d");
     }
     const char* access = "sample";
@@ -460,12 +460,12 @@ std::optional<std::string> ConstantOffset(const Access& access, const SampleLayo
     const auto* value = access.address.Argument(argument)->Resolve();
     if (!value->HasImmediate()) return std::nullopt;
     const auto bits = value->ImmediateU32();
-    std::string text = shape.spatial == 1u ? "" : (shape.spatial == 2u ? "int2(" : "int3(");
+    std::string text = shape.spatial == 3u ? "int3(" : "int2(";
     for (std::uint32_t index = 0; index < shape.spatial; ++index) {
         const auto field = (bits >> (index * 8u)) & 0x3fu;
         text += (index == 0u ? "" : ", ") + std::to_string(static_cast<std::int32_t>(field ^ 0x20u) - 0x20);
     }
-    return shape.spatial == 1u ? text : text + ")";
+    return shape.spatial == 1u ? text + ", 0)" : text + ")";
 }
 
 std::string PackedOffset(const Access& access, const SampleLayout& layout, const Shape& shape) {
@@ -899,9 +899,9 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     }
 
     const bool hasOffset = layout.offset != NoComponent;
-    if (hasOffset && shape.spatial == 1u) throw MslUnsupported("MSL backend: texel offsets on 1D images have no Metal sample option");
     const auto constantOffset = hasOffset ? ConstantOffset(access, layout, shape) : std::nullopt;
-    const bool foldOffset = hasOffset && FoldsTexelOffsets(sampler) && ResourceMaterializer::UnnormalizedSampleMismatch(image) == nullptr;
+    if (hasOffset && shape.spatial == 1u && (!constantOffset || SamplesBaseLevelIfUnnormalized(sampler))) throw MslUnsupported("MSL backend: a texel offset on a 1D image needs a constant offset and a sampler that is not unnormalized");
+    const bool foldOffset = hasOffset && shape.spatial != 1u && FoldsTexelOffsets(sampler) && ResourceMaterializer::UnnormalizedSampleMismatch(image) == nullptr;
     if (hasOffset && !constantOffset && !foldOffset) throw MslUnsupported("MSL backend: a texel offset that is not constant has no Metal sample option");
 
     const auto call = [&](const std::string& coord, const std::string& layer, const std::string& opts, const std::optional<std::string>& offset) {
