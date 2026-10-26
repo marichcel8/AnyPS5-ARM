@@ -799,15 +799,16 @@ struct VulkanDevice::State {
         dirtySurfaces.clear();
     }
 
-    void writebackOverlapping(std::uint64_t address, std::uint64_t bytes, const CachedSurface* self) {
-        if (dirtySurfaces.empty() || bytes == 0) return;
+    bool writebackOverlapping(std::uint64_t address, std::uint64_t bytes, const CachedSurface* self) {
+        if (dirtySurfaces.empty() || bytes == 0) return false;
         std::vector<CachedSurface*> hit;
         for (auto* surface : dirtySurfaces) {
             if (surface != self && surface->guestAddress < address + bytes && address < surface->guestAddress + surface->guestBytes) hit.push_back(surface);
         }
-        if (hit.empty()) return;
+        if (hit.empty()) return false;
         encodeWritebacks(hit);
         std::erase_if(dirtySurfaces, [](const CachedSurface* surface) { return !surface->dirty; });
+        return true;
     }
 
     void flush(bool settleSurfaces = true) {
@@ -838,6 +839,7 @@ struct VulkanDevice::State {
             for (auto& write : pendingWrites) {
                 if (write.serial == 0) write.serial = serial;
             }
+            for (const auto* surface : dirtySurfaces) noteWrite(surface->guestAddress, surface->guestBytes);
             recordedSinceSubmit = 0;
             ++epoch;
         }
@@ -978,6 +980,10 @@ struct VulkanDevice::State {
     void flushFor(std::uint64_t address, std::size_t bytes) {
         std::lock_guard lock(mutex);
         reap();
+        if (!encodingNow && writebackOverlapping(address, bytes, nullptr)) {
+            flush();
+            ++hookSubmits;
+        }
         const auto end = address + bytes;
         bool open = false;
         std::uint64_t wait = 0;
@@ -1946,6 +1952,7 @@ auto VulkanDevice::WaitIdle() -> void {
     auto& s = *state;
     if (s.sync == nullptr) return;
     std::lock_guard lock(s.mutex);
+    s.writebackDirty();
     s.flush();
     s.drain(s.lastSerial);
 }
