@@ -290,6 +290,7 @@ void BufferAtomic(State& state, const IrValue& inst) {
         Line(state, "device atomic_uint* " + pointer + " = aps5_buffer_atomic(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ", " + Pc(inst) + ");");
     }
     Line(state, "if (" + pointer + " != nullptr) " + result + " = aps5_atomic(" + pointer + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ");");
+    if (!mem.gpuDescriptor) Line(state, "else " + result + " = aps5_buffer_peek(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ");");
     Close(state);
     Close(state);
     StopCheck(state);
