@@ -673,6 +673,8 @@ static bool HasNonDirectoryPrefix(const std::filesystem::path& native) {
 
 int File::DuplicateFrom(int fd, int start) {
 #ifdef _WIN32
+    GuestResourceLimit openFileLimit{};
+    if (getrlimit_nid_postfix(8, &openFileLimit) == 0 && start >= openFileLimit.rlim_cur) return PosixFailure(GUEST_EINVAL);
     std::vector<int> below;
     int duplicate;
     while ((duplicate = dup_nid_postfix(fd)) >= 0 && duplicate < start) below.push_back(duplicate);

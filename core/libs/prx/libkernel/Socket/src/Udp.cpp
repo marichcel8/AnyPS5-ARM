@@ -43,6 +43,7 @@
 #include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/RandomDevice.hpp"
+#include "prx/libkernel/File/include/SharedMemory.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 #include "prx/libkernel/Socket/include/SocketConnect.hpp"
@@ -1821,6 +1822,12 @@ int APS5_VABI sendfile_nid_postfix(int file, int descriptor, std::int64_t offset
     if (offset < 0) return Fail(22);
     if (headers && (!SendfileIovecs(headers->headers, headers->headerCount) || !SendfileIovecs(headers->trailers, headers->trailerCount)))
         return Fail(22);
+    std::int64_t sent = 0;
+    const auto finish = [&](int error) {
+        if (sbytes) *sbytes = sent;
+        return error ? Fail(error) : 0;
+    };
+    if (DescriptorIsOpen_nid_no_patch(file) && !File::IsVnode(file) && !File::IsSharedMemoryDescriptor_nid_no_patch(file)) return finish(22);
     std::vector<char> chunk;
     try {
         chunk.resize(0x10000);
@@ -1834,11 +1841,6 @@ int APS5_VABI sendfile_nid_postfix(int file, int descriptor, std::int64_t offset
     std::uint64_t remaining = length ? length : UINT64_MAX;
     auto received = read(offset, remaining);
     if (received == -9) return Fail(9);
-    std::int64_t sent = 0;
-    const auto finish = [&](int error) {
-        if (sbytes) *sbytes = sent;
-        return error ? Fail(error) : 0;
-    };
     if (received < 0) return finish(received == -21 || received == -29 ? 22 : static_cast<int>(-received));
     const auto socket = Lookup(descriptor);
     if (!socket) return finish(*__error_nid_postfix());
