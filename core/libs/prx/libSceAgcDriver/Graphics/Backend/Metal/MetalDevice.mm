@@ -2111,7 +2111,7 @@ auto VulkanDevice::NoteRecipe(RecipeEvent, RecipeKind) -> void {}
 
 auto VulkanDevice::NoteDrawRecipeMiss(DrawRecipePrecheck) -> void {}
 
-auto VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>*) -> void {
+auto VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>*, const DrawTraceContext*) -> void {
     state->draw(graphics, draw, shaders, snapshots);
 }
 
@@ -2119,7 +2119,7 @@ auto VulkanDevice::KnownDrawRejection(const Graphics::State& graphics, std::span
 
 auto VulkanDevice::ColorMetadataPass(const Graphics::ColorMetadataPass&) -> void {}
 
-auto VulkanDevice::DrawFromRecipe(const Graphics::State&, const Pm4::DrawParameters&, std::span<const Graphics::CompiledShader>, std::span<const Graphics::GuestMemorySnapshot>, const std::shared_ptr<const DrawRecipe>&) -> RecipeOutcome { return RecipeOutcome::Rebuild; }
+auto VulkanDevice::DrawFromRecipe(const Graphics::State&, const Pm4::DrawParameters&, std::span<const Graphics::CompiledShader>, std::span<const Graphics::GuestMemorySnapshot>, const std::shared_ptr<const DrawRecipe>&, const DrawTraceContext*) -> RecipeOutcome { return RecipeOutcome::Rebuild; }
 
 auto VulkanDevice::DrawIndirectSupport() const -> IndirectDrawSupport { return {false, false, false}; }
 

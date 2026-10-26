@@ -13,6 +13,8 @@
 #include "prx/libSceAgc/DcbState/include/ContextState.hpp"
 #include "prx/libSceAgc/DcbFlow/include/Sync.hpp"
 #include "prx/libSceAgc/DcbFlow/include/Control.hpp"
+#include "prx/libSceAgc/DcbFlow/include/Memory.hpp"
+#include "prx/libSceAgc/DcbDraw/include/Stats.hpp"
 #include "prx/libSceAgc/DcbDraw/include/Instancing.hpp"
 #include "prx/libSceAgc/DcbDraw/include/IndexBuffer.hpp"
 #include "prx/libSceAgc/DcbDraw/include/DrawIndexed.hpp"
