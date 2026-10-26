@@ -794,6 +794,11 @@ final class AppModel: ObservableObject {
         update(game) { $0.controls = nil }
     }
 
+    /// The pixel height of the main display, for the output resolution "display".
+    static var mainDisplayPixelHeight: Int? {
+        CGDisplayCopyDisplayMode(CGMainDisplayID()).map { $0.pixelHeight }
+    }
+
     func resolutionChoices(for game: Game) -> [String] {
         guard let toolkit = toolkit(for: game), let patches = GamePatches.load(titleID: game.titleID, from: toolkit.patches) else { return [] }
         return patches.resolution?.choices ?? []
@@ -926,7 +931,7 @@ final class AppModel: ObservableObject {
         let written = (try? settings.writeInputFile(to: inputFile)) != nil
         let screenshots = screenshotsFolder
         try? FileManager.default.createDirectory(at: screenshots, withIntermediateDirectories: true)
-        configuration.environment = settings.environment(launcherLanguage: preferences.language.consoleLanguage, inputFile: written ? inputFile : nil, screenshots: screenshots, fonts: gameFontsFolder(), trace: trace)
+        configuration.environment = settings.environment(launcherLanguage: preferences.language.consoleLanguage, inputFile: written ? inputFile : nil, screenshots: screenshots, fonts: gameFontsFolder(), trace: trace, displayHeight: Self.mainDisplayPixelHeight)
             .merging(remote?.bridgeEnvironment ?? [:]) { _, phone in phone }
             .merging(OnlinePlayHost.environment(for: game, client: together, engineBuild: engineBuild(for: game))) { _, online in online }
             // Where the engine's online bridge finds the AnyTogether game session, once there is one.

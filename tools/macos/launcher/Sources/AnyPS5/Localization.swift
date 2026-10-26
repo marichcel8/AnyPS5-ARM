@@ -42,7 +42,7 @@ enum T {
         case locked, ready, updateAvailable, failed, starting, startingText, running
         case stepUnwrap, stepRelink, stepCopy, stepBundle, stepFinish
         case titleID, version, size, status, folder
-        case gameSettings, resolution, resolutionDefault, display, windowed, fullscreen, windowSize, vsync, on, off
+        case gameSettings, resolution, resolutionDefault, outputResolution, outputResolutionDetail, outputGame, outputDisplay, display, windowed, fullscreen, windowSize, vsync, on, off
         case overlay, overlayOff, overlayTopLeft, overlayTopRight, overlayBottomLeft, overlayBottomRight, overlayStyle, overlayMinimal, overlayDetailed, frameGeneration, frameGenerationDetail, frameGenerationLowPower, linkNoGame, folderNoGames, useGamesFolder, useGamesFolderDetail, useGamesFolderConfirm, copyLink, linkCopied, saveSync, saveSyncDetail, saveSyncNoFolder, syncFolder, syncFolderICloud, syncFolderNone, savesSyncedFrom, saveSyncFailed, clips, clipsDetail, clipLength, seconds, clipsNeedPermission, clipsNeedPermissionDetail, clipsOff, clipsOffDetail, clipSaved, clipSavedDetail, clipFailed, lowPowerTitle, lowPowerFrameGeneration, lowPowerRefresh, gameLanguage, followLauncher
         case reinstall, showInFinder, openLog, uninstall, clearShaderCache, uninstallConfirm, uninstallDone, cacheCleared
         case appearance, theme, accent, background, backgroundTheme, backgroundImage, backgroundVideo, chooseFile, gameArtwork
@@ -383,6 +383,10 @@ enum T {
         .gameSettings: "Oyun Ayarları",
         .resolution: "Çözünürlük",
         .resolutionDefault: "Oyunun varsayılanı",
+        .outputResolution: "Çıkış çözünürlüğü",
+        .outputResolutionDetail: "Oyun 4K çizer; düşük değer daha hızlıdır. Bir sonraki açılışta geçerli olur.",
+        .outputGame: "Oyunun boyutu (4K)",
+        .outputDisplay: "Ekranın kendi çözünürlüğü",
         .display: "Görüntü",
         .windowed: "Pencere",
         .fullscreen: "Tam Ekran",
@@ -967,6 +971,10 @@ enum T {
         .gameSettings: "Game Settings",
         .resolution: "Resolution",
         .resolutionDefault: "Game default",
+        .outputResolution: "Output resolution",
+        .outputResolutionDetail: "Games draw at 4K; a lower value is faster. Applies the next time the game starts.",
+        .outputGame: "Game's size (4K)",
+        .outputDisplay: "Display's own resolution",
         .display: "Display",
         .windowed: "Window",
         .fullscreen: "Full Screen",

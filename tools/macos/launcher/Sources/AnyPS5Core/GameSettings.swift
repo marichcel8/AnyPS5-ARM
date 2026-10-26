@@ -23,6 +23,10 @@ public struct GameSettings: Codable, Equatable, Sendable {
 
     /// A WIDTHxHEIGHT the title's patches can set, nil for the title's default.
     public var resolution: String?
+    /// The height in pixels the engine renders the picture at (APS5_OUTPUT_HEIGHT): the games draw
+    /// a 3840x2160 output, a smaller one makes that draw cheaper. nil keeps the game's size, 0 is
+    /// the display's own height.
+    public var outputHeight: Int?
     public var fullscreen = false
     /// The share of the display the window takes, in percent.
     public var windowSize = 75
@@ -56,7 +60,7 @@ public struct GameSettings: Codable, Equatable, Sendable {
     /// The environment a game starts with; `inputFile` is the anyps5-input.ini written for it,
     /// `screenshots` and `fonts` the launcher's folders for F12 screenshots and system fonts;
     /// `trace` turns detailed logging on for this start even when the setting is off.
-    public func environment(launcherLanguage: Int, inputFile: URL? = nil, screenshots: URL? = nil, fonts: URL? = nil, trace: Bool = false) -> [String: String] {
+    public func environment(launcherLanguage: Int, inputFile: URL? = nil, screenshots: URL? = nil, fonts: URL? = nil, trace: Bool = false, displayHeight: Int? = nil) -> [String: String] {
         var environment: [String: String] = [
             "ANYPS5_FULLSCREEN": fullscreen ? "1" : "0",
             "ANYPS5_WINDOW_SIZE": String(min(100, max(30, windowSize))),
@@ -69,6 +73,7 @@ public struct GameSettings: Codable, Equatable, Sendable {
             environment["ANYPS5_OVERLAY_STYLE"] = style.rawValue
         }
         if let resolution { environment["APS5_RESOLUTION"] = resolution }
+        if let outputHeight, let height = outputHeight == 0 ? displayHeight : outputHeight, height >= 144 { environment["APS5_OUTPUT_HEIGHT"] = String(height) }
         if let inputFile { environment["ANYPS5_INPUT_CONFIG"] = inputFile.path }
         if let screenshots { environment["ANYPS5_SCREENSHOTS"] = screenshots.path }
         if let fonts { environment["ANYPS5_SYSTEM_FONTS"] = fonts.path }

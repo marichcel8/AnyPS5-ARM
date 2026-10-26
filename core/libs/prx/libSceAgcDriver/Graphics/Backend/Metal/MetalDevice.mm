@@ -44,6 +44,7 @@
 #include <map>
 #include <mutex>
 #include <thread>
+#include <cmath>
 #include <optional>
 #include <set>
 #include <span>
@@ -114,6 +115,16 @@ struct ScanoutParams {
 bool GpuScanout(const DisplayBuffer& buffer) {
     static const bool disabled = std::getenv("APS5_METAL_CPU_SCANOUT") != nullptr;
     return !disabled && buffer.dccAddress == 0 && !DisplayHalfFloat(buffer.pixelFormat) && !DisplayPq(buffer.pixelFormat) && DisplayTexelBytes(buffer.pixelFormat) == 4u && buffer.tilingMode <= 1u;
+}
+
+std::uint32_t OutputHeightLimit() {
+    static const std::uint32_t limit = [] {
+        const char* text = std::getenv("APS5_OUTPUT_HEIGHT");
+        if (text == nullptr) return 0u;
+        const auto value = std::strtoul(text, nullptr, 10);
+        return value >= 144ul && value <= 16384ul ? static_cast<std::uint32_t>(value) : 0u;
+    }();
+    return limit;
 }
 
 bool cpuProfileEnabled() {
@@ -240,6 +251,9 @@ struct CachedSurface {
     bool dirty = false;
     std::uint64_t drawnFrame = 0;
     bool scanned = false;
+    bool scaled = false;
+    float scaleX = 1.0f;
+    float scaleY = 1.0f;
 };
 
 struct SurfaceRef {
@@ -827,6 +841,8 @@ struct VulkanDevice::State {
     std::map<SamplerKey, id<MTLSamplerState>> samplers;
     std::array<id<MTLTexture>, 4> nullTextures{};
     std::vector<CachedSurface*> dirtySurfaces;
+    std::map<std::uint64_t, std::array<std::uint32_t, 2>> scanoutSizes;
+    std::map<std::uint64_t, bool> scaleRefused;
     std::vector<DepthSurface*> dirtyDepths;
     std::vector<std::pair<const float*, std::size_t>> depthProbes;
     std::map<DepthKey, DepthSurface> depthSurfaces;
@@ -1586,12 +1602,13 @@ struct VulkanDevice::State {
             if (surface.guestAddress != buffer.address || scanoutFrames - surface.drawnFrame > 2u) continue;
             id<MTLTexture> texture = (__bridge id<MTLTexture>)surface.texture.texture;
             std::uint32_t redLow = 0;
-            if (texture == nil || (texture.textureType != MTLTextureType2D && texture.textureType != MTLTextureType2DArray) || texture.sampleCount != 1 || texture.width != buffer.width || texture.height != buffer.height || !DirectScanoutFormat(texture.pixelFormat, redLow)) continue;
+            if (texture == nil || (texture.textureType != MTLTextureType2D && texture.textureType != MTLTextureType2DArray) || texture.sampleCount != 1 || (!surface.scaled && (texture.width != buffer.width || texture.height != buffer.height)) || !DirectScanoutFormat(texture.pixelFormat, redLow)) continue;
             if (found != nullptr && found->drawnFrame > surface.drawnFrame) continue;
             found = &surface;
             textureRedLow = redLow;
         }
         if (found == nullptr) {
+            if (std::any_of(surfaces.begin(), surfaces.end(), [&](const auto& entry) { return entry.second.scaled && entry.second.guestAddress == buffer.address; })) scaleRefused[buffer.address] = true;
             if (directDeclined++ < 3u || directDeclined % 1200u == 0u) {
                 std::fprintf(stderr, "[metal] direct scanout declined (#%llu): display buffer %llx %ux%u tiling %u format %llx; surfaces:", static_cast<unsigned long long>(directDeclined), static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height, static_cast<unsigned>(buffer.tilingMode), static_cast<unsigned long long>(buffer.pixelFormat));
                 std::size_t listed = 0;
@@ -1613,8 +1630,10 @@ struct VulkanDevice::State {
             texture = (__bridge id<MTLTexture>)viewOf(*found, view).texture;
         }
         found->scanned = true;
+        const auto outWidth = static_cast<std::uint32_t>(texture.width);
+        const auto outHeight = static_cast<std::uint32_t>(texture.height);
         const std::uint32_t swap = textureRedLow != (DisplayRedLow(buffer.pixelFormat) ? 1u : 0u) ? 1u : 0u;
-        const auto slot = presentTarget(buffer.width, buffer.height);
+        const auto slot = presentTarget(outWidth, outHeight);
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         [scanoutTable setAddress:uploadBytes(&swap, sizeof(swap)) atIndex:0];
@@ -1622,7 +1641,7 @@ struct VulkanDevice::State {
         [scanoutTable setTexture:presentTextures[slot].gpuResourceID atIndex:1];
         [compute setComputePipelineState:scanoutTexturePipeline];
         [compute setArgumentTable:scanoutTable];
-        [compute dispatchThreads:MTLSizeMake(buffer.width, buffer.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+        [compute dispatchThreads:MTLSizeMake(outWidth, outHeight, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
         ++encodedDispatches;
         ++cbScanouts;
         flush(false);
@@ -1638,6 +1657,7 @@ struct VulkanDevice::State {
         auto state = scanout();
         registry->Refresh();
         begin();
+        if (const auto limit = OutputHeightLimit(); limit != 0u && buffer.height > limit && !scaleRefused.contains(buffer.address) && GpuScanout(buffer)) scanoutSizes[buffer.address] = {buffer.width, buffer.height};
         if (stageDirectScanout(buffer)) return;
         writebackDirty();
         const auto source = resolve(buffer.address, bytes, false, {});
@@ -1860,17 +1880,35 @@ struct VulkanDevice::State {
         info.shaderWrite = true;
         info.renderTarget = format != nullptr && !format->blockCompressed;
         info.label = "AnyPS5 guest texture";
+        std::optional<std::array<std::uint32_t, 2>> scaledSize;
+        if (const auto limit = OutputHeightLimit(); limit != 0u && info.renderTarget && info.kind == Metal::TextureKind::Tex2DArray && layers == 1u && info.mipLevels == 1u && info.samples == 1u && !scaleRefused.contains(resource.baseAddress)) {
+            const auto known = scanoutSizes.find(resource.baseAddress);
+            if (known != scanoutSizes.end() && known->second[0] == info.width && known->second[1] == info.height && info.height > limit) {
+                scaledSize = std::array<std::uint32_t, 2>{std::max<std::uint32_t>(1u, static_cast<std::uint32_t>((static_cast<std::uint64_t>(info.width) * limit + info.height / 2u) / info.height)), limit};
+            }
+        }
         const SurfaceKey key{resource.baseAddress,
-                             static_cast<std::uint64_t>(resource.format) | static_cast<std::uint64_t>(info.kind) << 32u | static_cast<std::uint64_t>(resource.tileMode) << 40u,
+                             static_cast<std::uint64_t>(resource.format) | static_cast<std::uint64_t>(info.kind) << 32u | static_cast<std::uint64_t>(resource.tileMode) << 40u | (scaledSize ? 1ull << 62u : 0ull),
                              static_cast<std::uint64_t>(info.width) | static_cast<std::uint64_t>(info.height) << 32u,
                              static_cast<std::uint64_t>(layers) | static_cast<std::uint64_t>(info.mipLevels) << 32u,
                              static_cast<std::uint64_t>(resource.pipeBankXor) | static_cast<std::uint64_t>(info.samples) << 32u};
         auto found = surfaces.find(key);
         if (found == surfaces.end()) {
             std::string failure;
-            auto created = textureManager().Create(info, &failure);
+            auto createInfo = info;
+            if (scaledSize) {
+                createInfo.width = (*scaledSize)[0];
+                createInfo.height = (*scaledSize)[1];
+            }
+            auto created = textureManager().Create(createInfo, &failure);
             if (!created) throw std::runtime_error("AGC graphics: Metal texture could not be created: " + failure);
             found = surfaces.emplace(key, CachedSurface{created, {}}).first;
+            if (scaledSize) {
+                found->second.scaled = true;
+                found->second.scaleX = static_cast<float>((*scaledSize)[0]) / static_cast<float>(info.width);
+                found->second.scaleY = static_cast<float>((*scaledSize)[1]) / static_cast<float>(info.height);
+                std::fprintf(stderr, "[metal] output scaling: display buffer %llx rendered at %ux%u instead of %ux%u\n", static_cast<unsigned long long>(resource.baseAddress), (*scaledSize)[0], (*scaledSize)[1], info.width, info.height);
+            }
         }
         return {&found->second, info, layers};
     }
@@ -1888,13 +1926,13 @@ struct VulkanDevice::State {
     }
 
     bool needsUpload(const std::vector<ImageUse>& uses) const {
-        return std::any_of(uses.begin(), uses.end(), [&](const ImageUse& use) { return !use.surface->dirty && use.surface->validEpoch != epoch; });
+        return std::any_of(uses.begin(), uses.end(), [&](const ImageUse& use) { return !use.surface->dirty && !use.surface->scaled && use.surface->validEpoch != epoch; });
     }
 
     void encodeUploads(id<MTL4ComputeCommandEncoder> compute, const std::vector<ImageUse>& uses) {
         for (const auto& use : uses) {
             auto& surface = *use.surface;
-            if (surface.dirty || surface.validEpoch == epoch) continue;
+            if (surface.dirty || surface.scaled || surface.validEpoch == epoch) continue;
             surface.validEpoch = epoch;
             if (Trace()) std::fprintf(stderr, "[metal] upload: guest %016llx device %016llx, %ux%u, tile %u, format %u\n", static_cast<unsigned long long>(use.resource.baseAddress), static_cast<unsigned long long>(use.address), use.resource.width, use.resource.height, static_cast<unsigned>(use.resource.tileMode), use.resource.format);
             textures->EncodeUpload((__bridge void*)compute, surface.texture, use.resource, use.address, textures->DefaultUploadPath());
@@ -2183,6 +2221,11 @@ struct VulkanDevice::State {
                 for (const auto& use : uses) {
                     if (!use.written || std::find(stored.begin(), stored.end(), use.surface) != stored.end()) continue;
                     stored.push_back(use.surface);
+                    if (use.surface->scaled) {
+                        if (!scaleRefused[use.resource.baseAddress]) std::fprintf(stderr, "[metal] output scaling disabled for %llx: a compute shader writes the display buffer\n", static_cast<unsigned long long>(use.resource.baseAddress));
+                        scaleRefused[use.resource.baseAddress] = true;
+                        continue;
+                    }
                     textures->EncodeWriteback((__bridge void*)compute, use.surface->texture, use.resource, use.address);
                 }
             }
@@ -2619,7 +2662,7 @@ struct VulkanDevice::State {
             if (!reuse) {
                 loads = uses;
                 for (auto& [surface, resource] : targets) {
-                    if (surface->dirty) continue;
+                    if (surface->dirty || surface->scaled) continue;
                     surface->resource = resource;
                     surface->address = resolve(resource.baseAddress, Graphics::DescribeSurface(resource).guestBytes, true, {}, surface);
                     loads.push_back({surface, resource, surface->address, false});
@@ -2638,6 +2681,22 @@ struct VulkanDevice::State {
             lap(4);
 
             auto dynamic = translated.dynamic;
+            for (const auto& [surface, resource] : targets) {
+                if (!surface->scaled) continue;
+                auto& v = dynamic.viewport;
+                v.originX *= surface->scaleX;
+                v.originY *= surface->scaleY;
+                v.width *= surface->scaleX;
+                v.height *= surface->scaleY;
+                auto& r = dynamic.scissor;
+                const auto x1 = static_cast<std::uint32_t>(std::ceil(static_cast<double>(r.x + std::min<std::uint64_t>(r.width, 0xffffffffull - r.x)) * surface->scaleX));
+                const auto y1 = static_cast<std::uint32_t>(std::ceil(static_cast<double>(r.y + std::min<std::uint64_t>(r.height, 0xffffffffull - r.y)) * surface->scaleY));
+                r.x = static_cast<std::uint32_t>(static_cast<double>(r.x) * surface->scaleX);
+                r.y = static_cast<std::uint32_t>(static_cast<double>(r.y) * surface->scaleY);
+                r.width = x1 > r.x ? x1 - r.x : 0u;
+                r.height = y1 > r.y ? y1 - r.y : 0u;
+                break;
+            }
             if (Trace() && depth != nullptr) std::fprintf(stderr, "[metal] draw depth: viewport %.1f,%.1f %.1fx%.1f znear %f zfar %f clip %d remap mode %u scale %f offset %f test %d write %d compare %d\n", dynamic.viewport.originX, dynamic.viewport.originY, dynamic.viewport.width, dynamic.viewport.height, dynamic.viewport.znear, dynamic.viewport.zfar, static_cast<int>(dynamic.depthClip), static_cast<unsigned>(graphics.depthRemap.mode), graphics.depthRemap.scale, graphics.depthRemap.offset, graphics.depthTest ? 1 : 0, graphics.depthWrite ? 1 : 0, static_cast<int>(graphics.depthCompare));
             dynamic.scissor.x = std::min(dynamic.scissor.x, passWidth);
             dynamic.scissor.y = std::min(dynamic.scissor.y, passHeight);
@@ -2674,9 +2733,10 @@ struct VulkanDevice::State {
                 surface->validEpoch = epoch;
                 surface->drawnFrame = scanoutFrames;
                 if (surface->dirty) continue;
-                surface->dirty = true;
                 surface->guestAddress = resource.baseAddress;
                 surface->guestBytes = Graphics::DescribeSurface(resource).guestBytes;
+                if (surface->scaled) continue;
+                surface->dirty = true;
                 dirtySurfaces.push_back(surface);
             }
             if (depth != nullptr && (graphics.depthWrite || (stencil && graphics.stencilTest)) && !depth->dirty && graphics.depth->samples == 1u) markDepthDirty(*depth, *graphics.depth);
