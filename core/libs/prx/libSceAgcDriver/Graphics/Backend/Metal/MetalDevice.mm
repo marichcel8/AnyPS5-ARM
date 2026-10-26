@@ -656,6 +656,8 @@ struct VulkanDevice::State {
     std::uint32_t cbDispatches = 0;
     std::uint32_t cbWritebacks = 0;
     std::uint32_t cbScanouts = 0;
+    std::uint32_t cbUploads = 0;
+    std::uint64_t cbMovedBytes = 0;
     std::string cbLastDraw;
     std::uint64_t lastSerial = 0;
     const char* resolvedBy = "";
@@ -928,6 +930,7 @@ struct VulkanDevice::State {
         cbWritebacks += static_cast<std::uint32_t>(surfaces.size());
         for (auto* surface : surfaces) {
             textures->EncodeWriteback((__bridge void*)compute, surface->texture, surface->resource, surface->address);
+            cbMovedBytes += surface->guestBytes;
             surface->dirty = false;
         }
         [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
@@ -959,12 +962,13 @@ struct VulkanDevice::State {
             endCompute();
             sync->EncodeLabels(open);
             if (gpuTimeEnabled()) {
-                char tag[96];
-                std::snprintf(tag, sizeof(tag), "draws %u, passes %u, dispatches %u, writebacks %u, scanouts %u", cbDraws, cbPasses, cbDispatches, cbWritebacks, cbScanouts);
+                char tag[160];
+                std::snprintf(tag, sizeof(tag), "draws %u, passes %u, dispatches %u, writebacks %u, uploads %u, scanouts %u, %llu MB moved", cbDraws, cbPasses, cbDispatches, cbWritebacks, cbUploads, cbScanouts, static_cast<unsigned long long>(cbMovedBytes >> 20u));
                 device->TagNextSubmit(std::string(tag) + ", " + cbLastDraw);
                 cbLastDraw.clear();
             }
-            cbDraws = cbPasses = cbDispatches = cbWritebacks = cbScanouts = 0;
+            cbDraws = cbPasses = cbDispatches = cbWritebacks = cbScanouts = cbUploads = 0;
+            cbMovedBytes = 0;
             const auto serial = sync->Submit(&open, 1);
             open = {};
             if (chunk != nullptr) sealing.push_back(chunk);
@@ -1540,6 +1544,8 @@ struct VulkanDevice::State {
             if (surface.dirty || surface.validEpoch == epoch) continue;
             surface.validEpoch = epoch;
             textures->EncodeUpload((__bridge void*)compute, surface.texture, use.resource, use.address, textures->DefaultUploadPath());
+            ++cbUploads;
+            cbMovedBytes += Graphics::DescribeSurface(use.resource).guestBytes;
         }
     }
 
