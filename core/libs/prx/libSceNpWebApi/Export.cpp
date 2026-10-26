@@ -1,4 +1,5 @@
 #include "prx/libSceNetCtl/include/Online.hpp"
+#include "prx/libSceNpWebApi/include/Api.hpp"
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include <cstddef>

@@ -58,6 +58,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/Module.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/DynamicLoader.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/ModuleInfo.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Module/src/Tls.cpp
         ${LIBS_INCLUDE_DIR}/nid/src/NidCompute.cpp
         ${LIBS_INCLUDE_DIR}/nid/src/Sha1.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Aio/src/Aio.cpp
@@ -572,6 +573,16 @@ if(BUILD_TESTING)
         set_tests_properties(guest_kernel_stack_protect PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_tls_get_addr_tests ${LIBS_INCLUDE_DIR}/tests/GuestTlsGetAddr.cpp)
+    target_include_directories(guest_tls_get_addr_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_tls_get_addr_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_tls_get_addr_tests)
+    add_test(NAME guest_tls_get_addr COMMAND guest_tls_get_addr_tests)
+    set_tests_properties(guest_tls_get_addr PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_tls_get_addr PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_thread_self_tests ${LIBS_INCLUDE_DIR}/tests/GuestThreadSelf.cpp)
     target_include_directories(guest_thread_self_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_thread_self_tests PRIVATE libkernel libc)
@@ -1079,12 +1090,6 @@ if(BUILD_TESTING)
         set_tests_properties(guest_exception_handler PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
-    if(APPLE)
-        add_test_executable(guest_tls_get_addr_tests ${LIBS_INCLUDE_DIR}/tests/GuestTlsGetAddr.cpp)
-        target_include_directories(guest_tls_get_addr_tests PRIVATE ${LIBS_INCLUDE_DIR})
-        target_link_libraries(guest_tls_get_addr_tests PRIVATE libkernel libc)
-        add_test(NAME guest_tls_get_addr COMMAND guest_tls_get_addr_tests)
-    endif()
     if(NOT WIN32)
         add_test_executable(guest_raise_exception_posix_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseExceptionPosix.cpp)
         target_include_directories(guest_raise_exception_posix_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -1455,9 +1460,10 @@ if(BUILD_TESTING)
     target_link_libraries(guest_socket_options_tests PRIVATE libkernel libc)
     configure_windows_unwind(guest_socket_options_tests)
     add_test(NAME guest_socket_options COMMAND guest_socket_options_tests)
-    set_tests_properties(guest_socket_options PROPERTIES TIMEOUT 30)
+    add_test(NAME guest_socket_options_multicast COMMAND guest_socket_options_tests multicast)
+    set_tests_properties(guest_socket_options guest_socket_options_multicast PROPERTIES TIMEOUT 30)
     if(WIN32)
-        set_tests_properties(guest_socket_options PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_socket_options guest_socket_options_multicast PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_socket_stream_options_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketStreamOptions.cpp)

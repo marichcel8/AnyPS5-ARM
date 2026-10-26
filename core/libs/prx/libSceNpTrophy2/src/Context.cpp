@@ -1,3 +1,4 @@
+#include "prx/libSceNpTrophy2/include/Api.hpp"
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -77,8 +78,6 @@ int APS5_VABI sceNpTrophy2UnregisterUnlockCallback() {
     return SCE_NP_TROPHY2_OK;
 }
 
-
-// No trophy carries a reward, so there is no reward icon.
 int APS5_VABI sceNpTrophy2GetRewardIcon(int context, int handle, int reward_id, void* buffer, size_t* size) {
     (void)context;
     (void)handle;

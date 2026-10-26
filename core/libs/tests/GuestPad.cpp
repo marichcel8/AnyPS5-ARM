@@ -16,44 +16,6 @@
 #include <thread>
 #include <utility>
 
-extern "C" {
-int APS5_VABI scePadOpen_nid_postfix(int, int, int, const void*);
-int APS5_VABI scePadOpenExt(int, int, int, const void*);
-int APS5_VABI scePadClose_nid_postfix(int);
-int APS5_VABI scePadGetHandle(int, int, int);
-int APS5_VABI scePadSetVibrationTriggerEffectWeakWhileEmbeddedMicInUse(bool);
-int APS5_VABI scePadSetVibrationMode(int, int);
-int APS5_VABI scePadInit_nid_postfix(void);
-int APS5_VABI scePadUnknown_n3kSX62fgNo();
-int APS5_VABI scePadRead_nid_postfix(int, PadData*, int);
-int APS5_VABI scePadReadExt(int, PadData*, int);
-int APS5_VABI scePadReadState(int, PadData*);
-int APS5_VABI scePadSetTiltCorrectionState(int, bool);
-int APS5_VABI scePadResetOrientation(int);
-int APS5_VABI scePadSetAngularVelocityDeadbandState(int, bool);
-int APS5_VABI scePadSetAngularVelocityBiasCorrectionState(int, bool);
-int APS5_VABI scePadIsRemoteController(int, bool*);
-int APS5_VABI scePadGetFeatureReport(int);
-int APS5_VABI scePadSetFeatureReport(int);
-int APS5_VABI scePadOutputReport(int);
-int APS5_VABI scePadVrControllerGetDeviceInformation(int, void*);
-int APS5_VABI scePadVrControllerRead(int, void*, int);
-int APS5_VABI scePadGetAccessibilityControllerState(int, std::uint32_t*);
-bool APS5_VABI scePadIsDS4Connected(std::int32_t);
-bool APS5_VABI scePadIsBlasterConnected(std::int32_t);
-bool APS5_VABI scePadIsMoveConnected(std::int32_t);
-int APS5_VABI scePadGetControllerInformation(int, PadControllerInformation*);
-int APS5_VABI scePadDeviceClassParseData(int, const PadData*, PadDeviceClassData*);
-int APS5_VABI scePadDeviceClassGetExtendedInformation(int, PadDeviceClassExtendedInformation*);
-int APS5_VABI scePadSetVibration(int, const PadVibrationParam*);
-int APS5_VABI scePadGetExtControllerInformation(int, void*);
-int APS5_VABI scePadResetLightBar(int);
-int APS5_VABI scePadSetLightBar(int, const PadLightBarParam*);
-int APS5_VABI scePadSetMotionSensorState(int, bool);
-int APS5_VABI scePadGetControllerType(int, std::int32_t*);
-int APS5_VABI scePadGetInfo_nid_postfix(PadInfo*);
-}
-
 static void Require(bool value) { if (!value) std::abort(); }
 
 static void CheckInputCommands() {
@@ -318,8 +280,8 @@ static void CheckReadStateHandle(int handle) {
     Require(scePadReadState(handle + 1, &data) == PAD_ERROR_INVALID_HANDLE);
     Require(scePadRead_nid_postfix(0, &data, 1) == PAD_ERROR_INVALID_HANDLE);
     Require(scePadReadState(handle, &data) == PAD_OK);
-    Require(scePadReadExt(handle + 1, &data, 1) == PAD_ERROR_INVALID_HANDLE);
-    Require(scePadReadExt(handle, &data, 1) == 1);
+    Require(scePadReadExt(handle + 1, reinterpret_cast<PadDataExtended*>(&data), 1) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadReadExt(handle, reinterpret_cast<PadDataExtended*>(&data), 1) == 1);
     Require(scePadRead_nid_postfix(handle, nullptr, 1) == PAD_ERROR_INVALID_ARG);
     Require(scePadRead_nid_postfix(handle, &data, 0) == PAD_ERROR_INVALID_ARG);
     Require(scePadRead_nid_postfix(handle, &data, -1) == PAD_ERROR_INVALID_ARG);
@@ -353,11 +315,11 @@ static void CheckAngularVelocityFilters(int handle) {
 static void CheckAbsentDevices(int handle) {
     std::uint8_t buffer[64]{};
     for (int target : {handle, handle + 1}) {
-        Require(scePadGetFeatureReport(target) == PAD_ERROR_INVALID_HANDLE);
-        Require(scePadSetFeatureReport(target) == PAD_ERROR_INVALID_HANDLE);
-        Require(scePadOutputReport(target) == PAD_ERROR_INVALID_HANDLE);
-        Require(scePadVrControllerGetDeviceInformation(target, buffer) == PAD_ERROR_INVALID_HANDLE);
-        Require(scePadVrControllerRead(target, buffer, 1) == PAD_ERROR_INVALID_HANDLE);
+        Require(scePadGetFeatureReport(target, 0, buffer, sizeof(buffer)) == PAD_ERROR_INVALID_HANDLE);
+        Require(scePadSetFeatureReport(target, 0, buffer, sizeof(buffer)) == PAD_ERROR_INVALID_HANDLE);
+        Require(scePadOutputReport(target, 0, buffer, sizeof(buffer)) == PAD_ERROR_INVALID_HANDLE);
+        Require(scePadVrControllerGetDeviceInformation(target, reinterpret_cast<PadVrControllerDeviceInformation*>(buffer)) == PAD_ERROR_INVALID_HANDLE);
+        Require(scePadVrControllerRead(target, reinterpret_cast<PadVrControllerData*>(buffer), 1) == PAD_ERROR_INVALID_HANDLE);
     }
 }
 
@@ -666,7 +628,11 @@ int main() {
 
     Require(scePadGetHandle(user, 0, 0) == noHandle);
     Require(scePadOpen_nid_postfix(user, 1, 0, nullptr) == PAD_ERROR_INVALID_ARG);
-    Require(scePadOpen_nid_postfix(user, 0, 1, nullptr) == PAD_ERROR_INVALID_ARG);
+    Require(scePadOpen_nid_postfix(user, 0, 1, nullptr) == static_cast<int>(0x809b0003));
+    for (const int type : {0, 2, 3, 4}) Require(scePadOpen_nid_postfix(-1, type, 0, nullptr) == static_cast<int>(0x809b0001));
+    Require(scePadOpen_nid_postfix(-1, 0, 1, nullptr) == static_cast<int>(0x809b0001));
+    Require(scePadOpen_nid_postfix(-1, 1, 0, nullptr) == PAD_ERROR_INVALID_ARG);
+    for (const int type : {5, 6, 16, 0xff, -1}) Require(scePadOpen_nid_postfix(user, type, 0, nullptr) == PAD_ERROR_INVALID_ARG);
     Require(scePadGetHandle(user, 0, 0) == noHandle);
     const unsigned char wheel[16]{0xb7, 0x0e, 0x04, 0x0e, 0x08, 0x6e, 0x01};
     Require(scePadOpenExt(user, PAD_PORT_TYPE_SPECIAL, 0, wheel) == static_cast<int>(0x80920007));

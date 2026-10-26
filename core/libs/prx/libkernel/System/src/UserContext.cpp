@@ -1,3 +1,5 @@
+#include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/GuestStacks.hpp"
 #include "prx/libc/include/general/AsmMacros.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
@@ -7,9 +9,6 @@
 #include <cstring>
 #if defined(__x86_64__)
 #include <immintrin.h>
-
-extern "C" int* APS5_VABI __error_nid_postfix();
-extern "C" int APS5_VABI sigprocmask_nid_postfix(int how, const void* set, void* previousSet);
 
 namespace {
 
@@ -158,6 +157,7 @@ int APS5_VABI Aps5GetcontextFinish_nid_no_patch(UserUcontext* context, const Reg
     if (context == nullptr) return Fail(GuestEinval);
     UserUcontext captured{};
     sigprocmask_nid_postfix(GuestSigBlock, nullptr, captured.sigmask);
+
     auto& machine = captured.mcontext;
     machine.rdi = frame->rdi;
     machine.rsi = frame->rsi;
@@ -214,6 +214,7 @@ int APS5_VABI setcontext_nid_postfix(const UserUcontext* context) {
     mxcsr &= HostMxcsrMask();
     std::memcpy(frame.fxsave + FxsaveMxcsr, &mxcsr, sizeof(mxcsr));
     sigprocmask_nid_postfix(GuestSigSetmask, context->sigmask, nullptr);
+
     Aps5ContextRestore_nid_no_patch(&frame);
 }
 

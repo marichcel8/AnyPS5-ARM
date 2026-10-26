@@ -1,3 +1,4 @@
+#include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <array>
 #include <cstdint>
@@ -128,8 +129,6 @@ int APS5_VABI fegetexceptflag_nid_postfix(std::uint16_t* flags, int exceptions) 
     return 0;
 }
 
-int* APS5_VABI __error_nid_postfix();
-
 void APS5_VABI _Feraise_nid_postfix(int exceptions) {
     constexpr unsigned Invalid = 0x01, Ranges = 0x1c, Overflows = 0x18, Inexact = 0x20;
     constexpr int GuestEdom = 33, GuestErange = 34;
@@ -157,7 +156,6 @@ int APS5_VABI feclearexcept_nid_postfix(int exceptions) {
     }
     return 0;
 }
-
 
 int APS5_VABI feenableexcept_nid_postfix(int exceptions) {
     return ChangeTraps(exceptions, true);
