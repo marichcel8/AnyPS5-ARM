@@ -418,6 +418,10 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if (!compute) {
         text += StageHeader(state, Parameters(state));
         text += declarations;
+        if (stage == IrShaderStage::Pixel && (state.target.experiment & MslExperimentConstantOutput) != 0u) {
+            text += "    return aps5_out;\n}\n";
+            return text;
+        }
         text += state.body;
         if (!state.body.ends_with(state.exit + "\n")) text += "    " + state.exit + "\n";
         text += "}\n";
