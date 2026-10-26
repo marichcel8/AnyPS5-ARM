@@ -196,7 +196,6 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     }
     product->pixel.quadSampleMask = Graphics::QuadSampleMasks(product->state, product->pixel.sampleOrder);
     if (ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Msl && Graphics::PartialSampleMask(product->state) && Graphics::UniformSampleMask(product->state) && Graphics::HostSampleMask(product->state) != 0u) {
-        // Metal has no pipeline sample mask: a uniform mask is applied by the pixel stage through [[sample_mask]], like the per-pixel ones.
         const auto mask = static_cast<std::uint16_t>(Graphics::HostSampleMask(product->state));
         product->pixel.quadSampleMask = {mask, mask, mask, mask};
     }
