@@ -284,7 +284,7 @@ std::string Parameters(const State& state) {
     }
     if (state.ldsDevice && has(Lds)) {
         parameters.push_back("device uint* aps5_lds_memory [[buffer(" + std::to_string(MetalAbi::WorkgroupMemorySlot) + ")]]");
-        parameters.push_back("uint3 aps5_lds_group [[threadgroup_position_in_grid]]");
+        if (!has(WorkgroupId)) parameters.push_back("uint3 aps5_group [[threadgroup_position_in_grid]]");
         parameters.push_back("uint3 aps5_lds_groups [[threadgroups_per_grid]]");
     }
     if (has(WorkgroupId)) parameters.push_back("uint3 aps5_group [[threadgroup_position_in_grid]]");
@@ -428,7 +428,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if (stage == IrShaderStage::Vertex && (state.features & Lane) != 0u) declare("const uint aps5_lane = 0u;");
     if ((state.features & Lds) != 0u) {
         if (state.ldsDevice) {
-            declare("device uint* aps5_lds = aps5_lds_memory + ulong((aps5_lds_group.z * aps5_lds_groups.y + aps5_lds_group.y) * aps5_lds_groups.x + aps5_lds_group.x) * ulong(" + U32(state.ldsStride) + ");");
+            declare("device uint* aps5_lds = aps5_lds_memory + ulong((aps5_group.z * aps5_lds_groups.y + aps5_group.y) * aps5_lds_groups.x + aps5_group.x) * ulong(" + U32(state.ldsStride) + ");");
         } else {
             declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
         }
