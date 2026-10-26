@@ -1883,7 +1883,7 @@ constexpr std::size_t GraphicsLinkMemoStages = 4;
 
 struct GraphicsLinkMemo {
     std::array<const Shader*, GraphicsLinkMemoStages> headers{};
-    std::array<const void*, GraphicsLinkMemoStages> codes{};
+    std::array<const volatile void*, GraphicsLinkMemoStages> codes{};
     std::vector<ShaderRegister> context;
     std::vector<ShaderRegister> primitive;
     std::weak_ptr<const ShaderRegistry> registry;
