@@ -75,8 +75,6 @@ _aps5_enter:
     ldp x29, x30, [sp], #16
     ret
 
-// aps5_invoke_translated(a, b, c, code): a host call of a translated guest function without the
-// fault redirect; x3 carries the function's translated entry and the arguments stay in x0-x2.
     .p2align 2
     .globl _aps5_invoke_translated
 _aps5_invoke_translated:
