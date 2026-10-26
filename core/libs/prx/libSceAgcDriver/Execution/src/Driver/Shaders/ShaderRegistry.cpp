@@ -1894,6 +1894,24 @@ struct GraphicsLinkMemo {
     bool valid = false;
 };
 
+enum class LinkMemoOutcome : std::size_t { Hit, Cold, Registry, Device, Shape, Context, Primitive, Header, Code, Tracked, Uncommitted, Count };
+
+struct LinkMemoCounters {
+    std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(LinkMemoOutcome::Count)> counts{};
+    ~LinkMemoCounters() {
+        if (std::getenv("APS5_PROFILE_DRAW") == nullptr) return;
+        static constexpr const char* names[] = {"hit", "cold", "registry", "device", "shape", "context", "primitive", "header", "code", "tracked", "uncommitted"};
+        std::fprintf(stderr, "[link-memo]");
+        for (std::size_t index = 0; index < counts.size(); ++index) std::fprintf(stderr, " %s=%llu", names[index], static_cast<unsigned long long>(counts[index].load()));
+        std::fprintf(stderr, "\n");
+    }
+};
+
+void CountLinkMemo(LinkMemoOutcome outcome) {
+    static LinkMemoCounters counters;
+    counters.counts[static_cast<std::size_t>(outcome)].fetch_add(1, std::memory_order_relaxed);
+}
+
 bool SameRegisters(const std::vector<ShaderRegister>& memo, std::span<const ShaderRegister> current) {
     return memo.size() == current.size() && std::ranges::equal(memo, current, [](const ShaderRegister& a, const ShaderRegister& b) { return a.offset == b.offset && a.value == b.value; });
 }
@@ -1918,32 +1936,46 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
         std::lock_guard lock(mutex);
         registry = shaders;
     }
-    if (memo.valid && registry != nullptr && memo.registry.lock() == registry && memo.device == device.Load().get() &&
-        memo.selected.size() == stages.size() && SameRegisters(memo.context, context) && SameRegisters(memo.primitive, primitive)) {
-        bool same = true;
-        for (std::size_t index = 0; index < stages.size() && same; ++index) same = stages[index] == memo.headers[index] && GuestShaderFields(stages[index]).code == memo.codes[index];
-        if (same) {
-            std::shared_ptr<const ShaderSnapshot> memoOwner;
-            for (const auto& selected : memo.selected) {
-                if (!DeferFailedRegistration(*selected) && memoOwner == nullptr) memoOwner = selected;
-            }
-            if (memoOwner == nullptr) {
-                transaction.Commit();
-                return;
-            }
-            if (!transaction.Tracks(*memoOwner)) {
-                if (const auto committed = CommittedGraphicsAbi(*memoOwner, memo.key, registry)) {
-                    const auto localDevice = device.Load();
-                    for (const auto& stage : *committed) {
-                        const auto snapshot = stage.lock();
-                        require(snapshot != nullptr, "prepared graphics ABI lost a registered stage");
-                        if (snapshot->type != 1) ResolvePreparedGraphics(*snapshot, {}, memo.primitiveType, localDevice->Target(), true);
-                    }
-                    transaction.Commit();
-                    return;
-                }
-            }
+    const auto memoOutcome = [&]() {
+        if (!memo.valid) return LinkMemoOutcome::Cold;
+        if (registry == nullptr || memo.registry.lock() != registry) return LinkMemoOutcome::Registry;
+        if (memo.device != device.Load().get()) return LinkMemoOutcome::Device;
+        if (memo.selected.size() != stages.size()) return LinkMemoOutcome::Shape;
+        if (!SameRegisters(memo.context, context)) return LinkMemoOutcome::Context;
+        if (!SameRegisters(memo.primitive, primitive)) return LinkMemoOutcome::Primitive;
+        for (std::size_t index = 0; index < stages.size(); ++index) {
+            if (stages[index] != memo.headers[index]) return LinkMemoOutcome::Header;
+            if (GuestShaderFields(stages[index]).code != memo.codes[index]) return LinkMemoOutcome::Code;
         }
+        return LinkMemoOutcome::Hit;
+    }();
+    if (memoOutcome == LinkMemoOutcome::Hit) {
+        std::shared_ptr<const ShaderSnapshot> memoOwner;
+        for (const auto& selected : memo.selected) {
+            if (!DeferFailedRegistration(*selected) && memoOwner == nullptr) memoOwner = selected;
+        }
+        if (memoOwner == nullptr) {
+            CountLinkMemo(LinkMemoOutcome::Hit);
+            transaction.Commit();
+            return;
+        }
+        if (transaction.Tracks(*memoOwner)) {
+            CountLinkMemo(LinkMemoOutcome::Tracked);
+        } else if (const auto committed = CommittedGraphicsAbi(*memoOwner, memo.key, registry)) {
+            CountLinkMemo(LinkMemoOutcome::Hit);
+            const auto localDevice = device.Load();
+            for (const auto& stage : *committed) {
+                const auto snapshot = stage.lock();
+                require(snapshot != nullptr, "prepared graphics ABI lost a registered stage");
+                if (snapshot->type != 1) ResolvePreparedGraphics(*snapshot, {}, memo.primitiveType, localDevice->Target(), true);
+            }
+            transaction.Commit();
+            return;
+        } else {
+            CountLinkMemo(LinkMemoOutcome::Uncommitted);
+        }
+    } else {
+        CountLinkMemo(memoOutcome);
     }
     {
         std::lock_guard lock(mutex);
