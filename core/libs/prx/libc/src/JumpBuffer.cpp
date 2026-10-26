@@ -1,10 +1,13 @@
 #include "prx/libc/include/JumpBuffer.hpp"
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/AsmMacros.hpp"
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 namespace JumpBuffer {
 namespace {
@@ -99,18 +102,84 @@ asm(".text\n"
     "    fldcw 68(%rdi)\n"
     "    jmp *0(%rdi)\n");
 #elif defined(__aarch64__)
-// Translated guest code reaches these two through aps5_call, which the translator runtime
-// (tools/translator/runtime/Runtime.cpp) recognizes them by address: it saves the native registers of
-// the translated caller for setjmp and resumes them for longjmp. Any other caller has no guest state.
+namespace {
+
+constexpr std::size_t SavedWords = 25;
+
+std::mutex savedMutex;
+std::unordered_map<const void*, std::array<std::uint64_t, SavedWords>> savedStates;
+
+}
+
 extern "C" {
 
-int APS5_VABI setjmp_nid_postfix(void*) {
-    NotImplemented_nid_no_patch("setjmp outside translated guest code");
+void Aps5SetjmpStore_nid_no_patch(unsigned char* buffer, const std::uint64_t* block, std::uint64_t callerStack) {
+    JumpBuffer::JumpBufferSaveMask_nid_no_patch(buffer);
+    std::array<std::uint64_t, SavedWords> state{};
+    std::memcpy(state.data(), block, (SavedWords - 1) * sizeof(std::uint64_t));
+    state[SavedWords - 1] = callerStack;
+    const std::lock_guard lock(savedMutex);
+    savedStates[buffer] = state;
 }
 
-void APS5_VABI longjmp_nid_postfix(void*, int) {
-    NotImplemented_nid_no_patch("longjmp outside translated guest code");
+const std::uint64_t* Aps5LongjmpLoad_nid_no_patch(const unsigned char* buffer) {
+    const std::lock_guard lock(savedMutex);
+    const auto saved = savedStates.find(buffer);
+    if (saved == savedStates.end()) NotImplemented_nid_no_patch("longjmp to a buffer that setjmp did not fill");
+    static thread_local std::array<std::uint64_t, SavedWords> state;
+    state = saved->second;
+    JumpBuffer::JumpBufferRestoreMask_nid_no_patch(buffer);
+    return state.data();
 }
+
+}
+
+asm(".text\n"
+    ".p2align 2\n"
+    APS5_ASM_FUNCTION("setjmp_nid_postfix")
+    "    stp x29, x30, [sp, #-192]!\n"
+    "    mov x29, sp\n"
+    "    stp x19, x20, [sp, #16]\n"
+    "    stp x21, x22, [sp, #32]\n"
+    "    stp x23, x24, [sp, #48]\n"
+    "    stp x25, x26, [sp, #64]\n"
+    "    stp x27, x28, [sp, #80]\n"
+    "    stp d8, d9, [sp, #96]\n"
+    "    stp d10, d11, [sp, #112]\n"
+    "    stp d12, d13, [sp, #128]\n"
+    "    stp d14, d15, [sp, #144]\n"
+    "    mov x1, sp\n"
+    "    add x2, sp, #192\n"
+    "    bl " APS5_ASM_SYMBOL("Aps5SetjmpStore_nid_no_patch") "\n"
+    "    mov w0, #0\n"
+    "    ldp x29, x30, [sp], #192\n"
+    "    ret\n"
+    ".p2align 2\n"
+    APS5_ASM_FUNCTION("longjmp_nid_postfix")
+    "    mov w20, w1\n"
+    "    bl " APS5_ASM_SYMBOL("Aps5LongjmpLoad_nid_no_patch") "\n"
+    "    mov x9, x0\n"
+    "    cmp w20, #0\n"
+    "    csinc w10, w20, wzr, ne\n"
+    "    ldp x29, x30, [x9]\n"
+    "    ldp x19, x20, [x9, #16]\n"
+    "    ldp x21, x22, [x9, #32]\n"
+    "    ldp x23, x24, [x9, #48]\n"
+    "    ldp x25, x26, [x9, #64]\n"
+    "    ldp x27, x28, [x9, #80]\n"
+    "    ldp d8, d9, [x9, #96]\n"
+    "    ldp d10, d11, [x9, #112]\n"
+    "    ldp d12, d13, [x9, #128]\n"
+    "    ldp d14, d15, [x9, #144]\n"
+    "    ldr x11, [x9, #192]\n"
+    "    mov sp, x11\n"
+    "    mov w0, w10\n"
+    "    ret\n");
+
+extern "C" {
+
+int APS5_VABI setjmp_nid_postfix(std::uint64_t* buffer);
+[[noreturn]] void APS5_VABI longjmp_nid_postfix(std::uint64_t* buffer, int value);
 
 void Aps5JumpTargets_nid_no_patch(void** setjmpTarget, void** longjmpTarget) {
     *setjmpTarget = reinterpret_cast<void*>(&setjmp_nid_postfix);
