@@ -28,7 +28,8 @@ using DepthFastClearHarness::Height;
 using DepthFastClearHarness::Shaders;
 using DepthFastClearHarness::Width;
 
-constexpr std::size_t BlockBytes = 1u << 20u;
+constexpr std::size_t BlockBytes = 4u << 20u;
+constexpr std::size_t SlotBytes = 256u << 10u;
 
 class GuestBlock {
 public:
@@ -75,8 +76,8 @@ Counts DrawAndCount(AgcDriver::VulkanDevice& device, const Shaders& compiled, st
         {ShaderRecompiler::ShaderStage::Fragment, &compiled.pixel, PixelPushOffset(compiled.vertexPush, device.Target())}
     }};
     const MultisampleTextureLayout layout(AgcDriver::Graphics::ColorTextureTileMode(tile), 4u, samples, Width, Height, 1u);
-    Require(layout.Bytes() <= 65536u && (slot + 1u) * 65536u <= BlockBytes, what + ": the layout does not fit its slot of the guest block");
-    auto* block = arena + static_cast<std::size_t>(slot++) * 65536u;
+    Require(layout.Bytes() <= SlotBytes && (slot + 1u) * SlotBytes <= BlockBytes, what + ": the layout does not fit its slot of the guest block");
+    auto* block = arena + static_cast<std::size_t>(slot++) * SlotBytes;
     std::memset(block, 0, layout.Bytes());
     AgcDriver::Graphics::State state{};
     state.stages = {AgcDriver::Graphics::ShaderPath::Vertex, 0u, 32u, 32u, std::nullopt, std::nullopt};
