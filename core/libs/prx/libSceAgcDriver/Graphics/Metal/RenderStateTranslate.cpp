@@ -211,7 +211,8 @@ TranslatedState TranslateState(const State& state, bool flatInputs) {
     if (state.rectList) reject("rect lists need the vertex-stage expansion");
     if (!TranslatePrimitive(state.topology, result.primitive)) reject("topology needs primitive conversion on Metal");
     if (state.depthBoundsTest) reject("depth bounds test is not available on Metal");
-    if (state.conservativeRasterization != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) reject("conservative rasterization is not available on Metal");
+    if (state.conservativeRasterization != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) reject("conservative rasterization requires VK_EXT_conservative_rasterization, which Metal does not provide");
+    if (state.polygonMode != VK_POLYGON_MODE_FILL) reject("a point or line polygon mode needs the fillModeNonSolid feature, which Metal draws do not provide");
     if (flatInputs && state.provokingVertexMode != VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT) reject("last provoking vertex is not available on Metal");
     if (state.customSampleLocations || state.sampleLocationGrid) reject("custom sample locations are not mapped on Metal");
     if (state.blends.size() > MaxColorAttachments) reject("more color targets than Metal attachments");
