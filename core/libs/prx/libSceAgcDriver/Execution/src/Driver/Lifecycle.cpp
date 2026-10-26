@@ -88,6 +88,16 @@ void MapDriverMemory() {
     // table is left out and FS table calls stay unlinked.
     mach_vm_address_t address = DriverMemoryAddress;
     if (const auto result = mach_vm_allocate(mach_task_self(), &address, DriverMemoryBytes, VM_FLAGS_FIXED); result != KERN_SUCCESS) {
+        mach_vm_address_t region = DriverMemoryAddress;
+        mach_vm_size_t regionBytes = 0;
+        vm_region_basic_info_data_64_t info{};
+        mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &region, &regionBytes, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &infoCount, &object) == KERN_SUCCESS) {
+            std::fprintf(stderr, "[gpu] the AGC driver memory cannot be mapped at 0x%llx (mach_vm_allocate %d); the next region is 0x%llx-0x%llx, protection %d, maximum %d\n", static_cast<unsigned long long>(DriverMemoryAddress), result, static_cast<unsigned long long>(region), static_cast<unsigned long long>(region + regionBytes), info.protection, info.max_protection);
+        } else {
+            std::fprintf(stderr, "[gpu] the AGC driver memory cannot be mapped at 0x%llx (mach_vm_allocate %d)\n", static_cast<unsigned long long>(DriverMemoryAddress), result);
+        }
         address = 0;
         if (const auto fallback = mach_vm_allocate(mach_task_self(), &address, DriverMemoryBytes, VM_FLAGS_ANYWHERE); fallback != KERN_SUCCESS) {
             std::fprintf(stderr, "[gpu] the AGC FS table cannot be mapped (mach_vm_allocate %d at 0x%llx, %d anywhere); FS table calls stay unlinked\n", result, static_cast<unsigned long long>(DriverMemoryAddress), fallback);

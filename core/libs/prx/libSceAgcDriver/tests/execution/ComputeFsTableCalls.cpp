@@ -68,8 +68,14 @@ std::string Dispatch() {
     return failure;
 }
 
-void CheckTable() {
+bool CheckTable() {
     AgcDriverWaitIdle_nid_postfix();
+#ifdef __APPLE__
+    if (!AgcDriver::GuestMemory::Accessible(reinterpret_cast<const void*>(FsTable), 0x60u)) {
+        std::puts("skipped: macOS reserves 0xfc0000000-0x7000000000 in every arm64 process, so the AGC driver memory cannot be mapped at the PS5's fixed 0xfe0040000");
+        return false;
+    }
+#endif
     Require(AgcDriver::GuestMemory::Accessible(reinterpret_cast<const void*>(FsTable), 0x60u), "the FS table at 0xfe0040000 is not mapped");
     std::array<std::uint64_t, 12> slots{};
     std::memcpy(slots.data(), reinterpret_cast<const void*>(FsTable), sizeof(slots));
@@ -90,6 +96,7 @@ void CheckTable() {
 #ifndef _WIN32
     if (GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix()) Require(AgcDriver::GuestMemory::Watched(DriverMemory, DriverMemoryBytes), "the AGC driver memory at 0xfe0000000 is not write-watched, so a refused import copies it on every address-based build");
 #endif
+    return true;
 }
 
 }
@@ -104,7 +111,10 @@ int main() {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;
         }
-        CheckTable();
+        if (!CheckTable()) {
+            AgcDriverShutdown_nid_postfix();
+            return VulkanTestSkipped;
+        }
         const auto failure = Dispatch();
         Require(failure.find("not statically resolvable") == std::string::npos, "the call through the FS table did not link: " + failure);
         Require(failure.empty(), "the dispatch failed: " + failure);
