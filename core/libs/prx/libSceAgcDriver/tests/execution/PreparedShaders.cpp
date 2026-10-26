@@ -172,6 +172,7 @@ void Run(AgcDriver::VulkanDevice& device) {
     replacement->Dispatch(*replacementResult, 1, 1, 1);
     replacement->WaitIdle();
     replacementRequest.target.nonConstantImageOffsets = !replacementRequest.target.nonConstantImageOffsets;
+    replacementRequest.msl.relaxedFloat = !replacementRequest.msl.relaxedFloat;
     static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, replacementRequest));
     Require(snapshot.prepared->entries.size() == 3, "a target that registration did not prepare for was not prepared");
     ShaderRecompiler::SrtRuntime runtime{};
