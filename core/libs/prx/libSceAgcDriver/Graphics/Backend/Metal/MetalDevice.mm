@@ -251,6 +251,7 @@ struct DepthSurface {
     std::optional<float> fillDepth;
     std::optional<std::uint8_t> fillStencil;
     std::optional<std::uint32_t> htilePattern;
+    std::vector<std::uint32_t> htileWords;
 };
 
 bool DepthFillCovers(std::uint64_t base, std::uint64_t baseBytes, std::uint64_t address, std::size_t bytes) {
@@ -282,8 +283,9 @@ void ScanHtile(DepthSurface& surface, const Graphics::DepthTarget& target) {
     const bool depthCleared = std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return (word & 0xfu) == 0u; });
     const bool stencilCleared = target.htileStencil && std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return ((word >> 8u) & 0x3u) == 0u; });
     if (!depthCleared && !stencilCleared) return;
+    surface.htilePattern.reset();
+    surface.htileWords = std::move(words);
     if (depthCleared) {
-        surface.htilePattern = words.front();
         surface.initialized = false;
         surface.fillDepth.reset();
     }
@@ -301,6 +303,7 @@ void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target)
         if (target.htileAddress != 0u && target.htileAddress >= fill.address && target.htileAddress < fill.address + fill.bytes && fill.address + fill.bytes - target.htileAddress >= HtileBytes(target.extent)) {
             const bool depthCleared = (fill.pattern & 0xfu) == 0u;
             const bool stencilCleared = target.htileStencil && ((fill.pattern >> 8u) & 0x3u) == 0u;
+            surface.htileWords.clear();
             if (depthCleared || stencilCleared) surface.htilePattern = fill.pattern;
             else surface.htilePattern.reset();
             if (depthCleared) {
@@ -1785,7 +1788,7 @@ struct VulkanDevice::State {
         if (texture == nil) throw std::runtime_error("AGC graphics: Metal depth target could not be created");
         texture.label = @"AnyPS5 depth target";
         device->AddResidentAllocation((__bridge void*)texture);
-        return depthSurfaces.emplace(key, DepthSurface{texture, false, false, Graphics::DepthMetadataFillGeneration(), {}, {}, {}}).first->second;
+        return depthSurfaces.emplace(key, DepthSurface{texture, false, false, Graphics::DepthMetadataFillGeneration(), {}, {}, {}, {}}).first->second;
     }
 
     void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key) {
@@ -1818,10 +1821,13 @@ struct VulkanDevice::State {
                 stencilAttachment.storeAction = MTLStoreActionStore;
                 stencilAttachment.clearStencil = depth->fillStencil.value_or(target->clearStencil);
             }
-            if (depth->htilePattern && target->htileAddress != 0u) {
-                const std::vector<std::uint32_t> words(HtileBytes(target->extent) / 4u, ExpandedHtileWord(*depth->htilePattern, target->htileStencil));
+            if (target->htileAddress != 0u && (depth->htilePattern || !depth->htileWords.empty())) {
+                std::vector<std::uint32_t> words = std::move(depth->htileWords);
+                if (words.empty()) words.assign(HtileBytes(target->extent) / 4u, *depth->htilePattern);
+                for (auto& word : words) word = ExpandedHtileWord(word, target->htileStencil);
                 GuestMemory::Write(target->htileAddress, std::as_bytes(std::span(words)), 4);
             }
+            depth->htileWords.clear();
             depth->htilePattern.reset();
             depth->initialized = true;
             if (stencil) depth->stencilInitialized = true;
