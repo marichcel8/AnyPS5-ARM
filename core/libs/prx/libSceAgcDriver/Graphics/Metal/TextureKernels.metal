@@ -62,7 +62,7 @@ kernel void aps5_msaa_to_tiled(constant AgcMsaaParams& p [[buffer(0)]], texture2
     uint within = p.pipeBankXor;
     for (uint bit = 0u; bit < 16u; ++bit) within ^= (popcount(p.equation[bit] & coordinate) & 1u) << bit;
     const uint block = (gid.y >> p.blockLog2Height) * p.blocksPerRow + (gid.x >> p.blockLog2Width);
-    for (uint fragment = 0u; fragment < p.fragments; ++fragment) {
-        agc_store_element(p.tiled, block * 65536u + (within ^ p.fragmentOffsets[fragment]), ELEMENT_BYTES, agc_untransform(source.read(gid, fragment), TRANSFORM));
+    for (uint sampleIndex = 0u; sampleIndex < p.fragments; ++sampleIndex) {
+        agc_store_element(p.tiled, block * 65536u + (within ^ p.fragmentOffsets[sampleIndex]), ELEMENT_BYTES, agc_untransform(source.read(gid, sampleIndex), TRANSFORM));
     }
 }
