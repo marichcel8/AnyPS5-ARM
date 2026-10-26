@@ -799,6 +799,11 @@ std::shared_ptr<const ShaderSnapshot> RegisteredProgram(const ShaderRegistry& re
     return result;
 }
 
+std::atomic<std::uint64_t>& ShaderGeneration() {
+    static std::atomic<std::uint64_t> generation{1};
+    return generation;
+}
+
 void PublishRegisteredShader(std::shared_ptr<ShaderRegistry>& registry, const std::shared_ptr<const ShaderSnapshot>& snapshot) {
     ShaderPreparationTransaction transaction;
     transaction.Hold();
@@ -818,6 +823,7 @@ void PublishRegisteredShader(std::shared_ptr<ShaderRegistry>& registry, const st
             }
         }
     }
+    if (published == snapshot) ShaderGeneration().fetch_add(1, std::memory_order_release);
     auto next = registry != nullptr ? std::make_shared<ShaderRegistry>(*registry) : std::make_shared<ShaderRegistry>();
     auto& headers = (*next)[snapshot->codeAddress];
     std::erase_if(headers, [&](const auto& current) { return current->headerAddress == snapshot->headerAddress || current->code != snapshot->code; });
@@ -1886,7 +1892,7 @@ struct GraphicsLinkMemo {
     std::array<const volatile void*, GraphicsLinkMemoStages> codes{};
     std::vector<ShaderRegister> context;
     std::vector<ShaderRegister> primitive;
-    std::weak_ptr<const ShaderRegistry> registry;
+    std::uint64_t generation = 0;
     const void* device = nullptr;
     std::vector<std::shared_ptr<const ShaderSnapshot>> selected;
     std::vector<std::uint64_t> key;
@@ -1894,13 +1900,13 @@ struct GraphicsLinkMemo {
     bool valid = false;
 };
 
-enum class LinkMemoOutcome : std::size_t { Hit, Cold, Registry, Device, Shape, Context, Primitive, Header, Code, Tracked, Uncommitted, Count };
+enum class LinkMemoOutcome : std::size_t { Hit, Miss, Stale, Tracked, Uncommitted, Count };
 
 struct LinkMemoCounters {
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(LinkMemoOutcome::Count)> counts{};
     std::atomic<std::uint64_t> total{0};
     void Print() const {
-        static constexpr const char* names[] = {"hit", "cold", "registry", "device", "shape", "context", "primitive", "header", "code", "tracked", "uncommitted"};
+        static constexpr const char* names[] = {"hit", "miss", "stale", "tracked", "uncommitted"};
         std::fprintf(stderr, "[link-memo]");
         for (std::size_t index = 0; index < counts.size(); ++index) std::fprintf(stderr, " %s=%llu", names[index], static_cast<unsigned long long>(counts[index].load()));
         std::fprintf(stderr, "\n");
@@ -1914,6 +1920,13 @@ void CountLinkMemo(LinkMemoOutcome outcome) {
     counters.counts[static_cast<std::size_t>(outcome)].fetch_add(1, std::memory_order_relaxed);
     if (counters.total.fetch_add(1, std::memory_order_relaxed) % 2000 == 1999) counters.Print();
 }
+
+constexpr std::size_t GraphicsLinkMemoEntries = 8;
+
+struct GraphicsLinkMemoRing {
+    std::array<GraphicsLinkMemo, GraphicsLinkMemoEntries> entries;
+    std::size_t next = 0;
+};
 
 bool SameRegisters(const std::vector<ShaderRegister>& memo, std::span<const ShaderRegister> current) {
     return memo.size() == current.size() && std::ranges::equal(memo, current, [](const ShaderRegister& a, const ShaderRegister& b) { return a.offset == b.offset && a.value == b.value; });
@@ -1933,28 +1946,34 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
     std::shared_ptr<const ShaderSnapshot> owner;
     std::vector<std::shared_ptr<const ShaderSnapshot>> selectedStages;
     struct GraphicsLinkMemoStorage {};
-    auto& memo = HostThreadLocal<GraphicsLinkMemo, GraphicsLinkMemoStorage>();
+    auto& ring = HostThreadLocal<GraphicsLinkMemoRing, GraphicsLinkMemoStorage>();
     bool memoizable = stages.size() <= GraphicsLinkMemoStages;
     {
         std::lock_guard lock(mutex);
         registry = shaders;
     }
-    const auto memoOutcome = [&]() {
-        if (!memo.valid) return LinkMemoOutcome::Cold;
-        if (registry == nullptr || memo.registry.lock() != registry) return LinkMemoOutcome::Registry;
-        if (memo.device != device.Load().get()) return LinkMemoOutcome::Device;
-        if (memo.selected.size() != stages.size()) return LinkMemoOutcome::Shape;
-        if (!SameRegisters(memo.context, context)) return LinkMemoOutcome::Context;
-        if (!SameRegisters(memo.primitive, primitive)) return LinkMemoOutcome::Primitive;
-        for (std::size_t index = 0; index < stages.size(); ++index) {
-            if (stages[index] != memo.headers[index]) return LinkMemoOutcome::Header;
-            if (GuestShaderFields(stages[index]).code != memo.codes[index]) return LinkMemoOutcome::Code;
+    const auto generation = ShaderGeneration().load(std::memory_order_acquire);
+    const void* const currentDevice = device.Load().get();
+    GraphicsLinkMemo* memo = nullptr;
+    bool stale = false;
+    if (registry != nullptr) {
+        for (auto& entry : ring.entries) {
+            if (!entry.valid || entry.device != currentDevice || entry.selected.size() != stages.size()) continue;
+            if (!SameRegisters(entry.context, context) || !SameRegisters(entry.primitive, primitive)) continue;
+            bool same = true;
+            for (std::size_t index = 0; index < stages.size() && same; ++index) same = stages[index] == entry.headers[index] && GuestShaderFields(stages[index]).code == entry.codes[index];
+            if (!same) continue;
+            if (entry.generation != generation) {
+                stale = true;
+                continue;
+            }
+            memo = &entry;
+            break;
         }
-        return LinkMemoOutcome::Hit;
-    }();
-    if (memoOutcome == LinkMemoOutcome::Hit) {
+    }
+    if (memo != nullptr) {
         std::shared_ptr<const ShaderSnapshot> memoOwner;
-        for (const auto& selected : memo.selected) {
+        for (const auto& selected : memo->selected) {
             if (!DeferFailedRegistration(*selected) && memoOwner == nullptr) memoOwner = selected;
         }
         if (memoOwner == nullptr) {
@@ -1964,13 +1983,13 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
         }
         if (transaction.Tracks(*memoOwner)) {
             CountLinkMemo(LinkMemoOutcome::Tracked);
-        } else if (const auto committed = CommittedGraphicsAbi(*memoOwner, memo.key, registry)) {
+        } else if (const auto committed = CommittedGraphicsAbi(*memoOwner, memo->key, registry)) {
             CountLinkMemo(LinkMemoOutcome::Hit);
             const auto localDevice = device.Load();
             for (const auto& stage : *committed) {
                 const auto snapshot = stage.lock();
                 require(snapshot != nullptr, "prepared graphics ABI lost a registered stage");
-                if (snapshot->type != 1) ResolvePreparedGraphics(*snapshot, {}, memo.primitiveType, localDevice->Target(), true);
+                if (snapshot->type != 1) ResolvePreparedGraphics(*snapshot, {}, memo->primitiveType, localDevice->Target(), true);
             }
             transaction.Commit();
             return;
@@ -1978,7 +1997,7 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
             CountLinkMemo(LinkMemoOutcome::Uncommitted);
         }
     } else {
-        CountLinkMemo(memoOutcome);
+        CountLinkMemo(stale ? LinkMemoOutcome::Stale : LinkMemoOutcome::Miss);
     }
     {
         std::lock_guard lock(mutex);
@@ -2021,20 +2040,29 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
     BuildRegisteredAbiKey(state, *localDevice, key);
     const auto primitiveType = state.userConfig.find(0x242u);
     if (memoizable) {
-        memo.headers = {};
-        memo.codes = {};
-        for (std::size_t index = 0; index < stages.size(); ++index) {
-            memo.headers[index] = stages[index];
-            memo.codes[index] = GuestShaderFields(stages[index]).code;
+        auto* slot = &ring.entries[ring.next];
+        for (auto& entry : ring.entries) {
+            if (entry.valid && entry.device == localDevice.get() && entry.selected.size() == stages.size() && SameRegisters(entry.context, context) && SameRegisters(entry.primitive, primitive) &&
+                std::equal(stages.begin(), stages.end(), entry.headers.begin())) {
+                slot = &entry;
+                break;
+            }
         }
-        memo.context.assign(context.begin(), context.end());
-        memo.primitive.assign(primitive.begin(), primitive.end());
-        memo.registry = registry;
-        memo.device = localDevice.get();
-        memo.selected = selectedStages;
-        memo.key = key;
-        memo.primitiveType = primitiveType == state.userConfig.end() ? 0u : primitiveType->second;
-        memo.valid = true;
+        if (slot == &ring.entries[ring.next]) ring.next = (ring.next + 1) % GraphicsLinkMemoEntries;
+        slot->headers = {};
+        slot->codes = {};
+        for (std::size_t index = 0; index < stages.size(); ++index) {
+            slot->headers[index] = stages[index];
+            slot->codes[index] = GuestShaderFields(stages[index]).code;
+        }
+        slot->context.assign(context.begin(), context.end());
+        slot->primitive.assign(primitive.begin(), primitive.end());
+        slot->generation = generation;
+        slot->device = localDevice.get();
+        slot->selected = selectedStages;
+        slot->key = key;
+        slot->primitiveType = primitiveType == state.userConfig.end() ? 0u : primitiveType->second;
+        slot->valid = true;
     }
     const auto resolveStages = [&](const std::vector<std::weak_ptr<const ShaderSnapshot>>& stages) {
         for (const auto& stage : stages) {
