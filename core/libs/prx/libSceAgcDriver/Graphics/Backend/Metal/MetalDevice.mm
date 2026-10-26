@@ -1815,9 +1815,17 @@ struct VulkanDevice::State {
         return state.gpuResourceID._impl;
     }
 
-    void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses) {
+    void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses, const Graphics::State::DepthRemap* remap = nullptr) {
         if (cpuProfileEnabled()) bindPhaseAt = std::chrono::steady_clock::now();
-        slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
+        if (remap != nullptr && remap->mode != 0u && shader.readsDepthRemapPush) {
+            std::vector<std::byte> block(std::max<std::size_t>(shader.pushConstants.size(), ShaderRecompiler::DepthRemapPushOffsetBytes + ShaderRecompiler::DepthRemapPushBytes), std::byte{0});
+            std::memcpy(block.data(), shader.pushConstants.data(), shader.pushConstants.size());
+            const std::array<float, ShaderRecompiler::DepthRemapPushBytes / 4> words{remap->scale, remap->offset};
+            std::memcpy(block.data() + ShaderRecompiler::DepthRemapPushOffsetBytes, words.data(), sizeof(words));
+            slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(block.data(), block.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
+        } else {
+            slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
+        }
         slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
         std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
         std::uint32_t pointSamplers = 0;
@@ -2228,7 +2236,7 @@ struct VulkanDevice::State {
             std::array<std::uint64_t, ArgumentSlots> vertexSlots{};
             std::array<std::uint64_t, ArgumentSlots> fragmentSlots{};
             std::vector<ImageUse> uses;
-            bindStage(*vertex->program, snapshots, vertexSlots, uses);
+            bindStage(*vertex->program, snapshots, vertexSlots, uses, &graphics.depthRemap);
             if (fragment != nullptr) bindStage(*fragment->program, snapshots, fragmentSlots, uses);
             lap(2);
 
@@ -2425,7 +2433,11 @@ auto VulkanDevice::HostSampleOrder(const Graphics::State&) const -> Graphics::Sa
 
 auto VulkanDevice::RealFramePending() const -> bool { return false; }
 
-auto VulkanDevice::graphicsContext() const -> Graphics::Context { return {}; }
+auto VulkanDevice::graphicsContext() const -> Graphics::Context {
+    Graphics::Context context{};
+    context.depthClamp = true;
+    return context;
+}
 
 auto VulkanDevice::SealPassWriteOnly() -> void {}
 

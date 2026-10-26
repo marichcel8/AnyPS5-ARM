@@ -451,6 +451,7 @@ SpirvTarget MslFrontendTarget(const MslTarget& target) {
     frontend.maxWorkgroupSize = target.maxThreadgroupSize;
     frontend.maxWorkgroupInvocations = target.maxThreadsPerThreadgroup;
     frontend.maxWorkgroupSharedMemoryBytes = target.maxThreadgroupMemoryBytes;
+    frontend.depthRangeRemap = true;
     frontend.mesh = target.mesh;
     frontend.tessellation = target.tessellation;
     frontend.subgroupStages = target.subgroupStages;
