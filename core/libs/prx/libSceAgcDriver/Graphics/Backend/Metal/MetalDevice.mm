@@ -589,6 +589,21 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
     return std::nullopt;
 }
 
+std::uint32_t MslExperiment() {
+    static const std::uint32_t mask = [] {
+        const char* text = std::getenv("APS5_MSL_EXPERIMENT");
+        if (text == nullptr) return 0u;
+        const std::string list = text;
+        std::uint32_t result = 0;
+        if (list.find("nodiscard") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoDiscard;
+        if (list.find("nopow") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoPow;
+        if (list.find("nouniform") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoUniformLoad;
+        std::fprintf(stderr, "[metal] msl experiment %s (mask %u): shader output is wrong on purpose\n", text, result);
+        return result;
+    }();
+    return mask;
+}
+
 ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device, bool presenting) {
     ShaderRecompiler::MslTarget target;
     target.metalVersion = 320;
@@ -601,6 +616,7 @@ ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device, bool presenting
     static const bool exactFloat = std::getenv("APS5_EXACT_FLOAT") != nullptr;
     static const bool relaxedFloat = std::getenv("APS5_RELAXED_FLOAT") != nullptr;
     target.relaxedFloat = !exactFloat && (relaxedFloat || presenting);
+    target.experiment = MslExperiment();
     return target;
 }
 
@@ -1361,6 +1377,10 @@ struct VulkanDevice::State {
                      static_cast<unsigned long long>((snapshotBytes - reportSnapshotBytes) / 1024));
         if (reportFrames != 0u) std::fprintf(stderr, "[metal] present per flip: %.2f ms Present call (paced %.2f ms, drawable wait %.2f ms), %.2f ms wait for scanout serial\n", presentMs[0] / static_cast<double>(reportFrames), presentMs[2] / static_cast<double>(reportFrames), presentMs[3] / static_cast<double>(reportFrames), presentMs[1] / static_cast<double>(reportFrames));
         std::fprintf(stderr, "[metal] flushes %llu, writeback surfaces %llu, submit-to-completion %.2f ms avg, %.2f ms max over %llu completions\n", static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(writebackSurfaces), completedFlushes != 0u ? completionMsTotal / static_cast<double>(completedFlushes) : 0.0, completionMsMax, static_cast<unsigned long long>(completedFlushes));
+        if (std::getenv("APS5_METAL_GPU_TIME") != nullptr) {
+            NSProcessInfo* process = [NSProcessInfo processInfo];
+            std::fprintf(stderr, "[metal] device state: thermal %ld, low power mode %d, allocated %.0f MB of %.0f MB recommended\n", static_cast<long>(process.thermalState), process.lowPowerModeEnabled ? 1 : 0, static_cast<double>(native.currentAllocatedSize) / 1048576.0, static_cast<double>(native.recommendedMaxWorkingSetSize) / 1048576.0);
+        }
         const auto gpu = device->TakeGpuTime();
         if (gpu.enabled) std::fprintf(stderr, "[metal] gpu busy %.1f ms over %llu command buffers in %.1f s (%.1f %% of wall), longest %.2f ms (%s)\n", gpu.busyMs, static_cast<unsigned long long>(gpu.commandBuffers), seconds, seconds > 0.0 ? gpu.busyMs / (seconds * 10.0) : 0.0, gpu.maxMs, gpu.longestTag.c_str());
         flushes = 0;

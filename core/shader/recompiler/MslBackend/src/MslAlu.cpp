@@ -133,8 +133,14 @@ bool EmitPrecise(State& state, const IrValue& inst) {
     case IrOpcode::FPSqrt: value("sqrt", 1); return true;
     case IrOpcode::FPSin: value("sin", 1); return true;
     case IrOpcode::FPCos: value("cos", 1); return true;
-    case IrOpcode::FPExp2: value("exp2", 1); return true;
-    case IrOpcode::FPLog2: value("log2", 1); return true;
+    case IrOpcode::FPExp2:
+    case IrOpcode::FPLog2:
+        if ((state.target.experiment & MslExperimentNoPow) != 0u) {
+            Out(state, inst, Typed(state, inst, 0));
+            return true;
+        }
+        value(inst.Opcode() == IrOpcode::FPExp2 ? "exp2" : "log2", 1);
+        return true;
     case IrOpcode::FPRoundEven32: value("rint", 1); return true;
     case IrOpcode::FPFloor32: value("floor", 1); return true;
     case IrOpcode::FPCeil32: value("ceil", 1); return true;
@@ -373,8 +379,14 @@ bool EmitAlu(State& state, const IrValue& inst) {
     case IrOpcode::FPSqrt: call("sqrt", 1); return true;
     case IrOpcode::FPSin: Out(state, inst, "sinpi(2.0f * " + a(0) + ")"); return true;
     case IrOpcode::FPCos: Out(state, inst, "cospi(2.0f * " + a(0) + ")"); return true;
-    case IrOpcode::FPExp2: call("exp2", 1); return true;
-    case IrOpcode::FPLog2: call("log2", 1); return true;
+    case IrOpcode::FPExp2:
+    case IrOpcode::FPLog2:
+        if ((state.target.experiment & MslExperimentNoPow) != 0u) {
+            Out(state, inst, a(0));
+            return true;
+        }
+        call(inst.Opcode() == IrOpcode::FPExp2 ? "exp2" : "log2", 1);
+        return true;
     case IrOpcode::FPRoundEven32: call("rint", 1); return true;
     case IrOpcode::FPFloor32: call("floor", 1); return true;
     case IrOpcode::FPCeil32: call("ceil", 1); return true;
