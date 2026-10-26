@@ -2262,7 +2262,10 @@ struct VulkanDevice::State {
             for (const auto& use : uses) {
                 if (!use.written) continue;
                 for (const auto& [key, depth] : depthSurfaces) {
-                    if (depth.texture.sampleCount > 1 && key[0] == use.resource.baseAddress) throw std::runtime_error("AGC graphics: storage image access to a multisampled depth surface is not implemented on Metal");
+                    if (key[0] != use.resource.baseAddress) continue;
+                    if (depth.texture.sampleCount > 1) throw std::runtime_error("AGC graphics: storage image access to a multisampled depth surface is not implemented on Metal");
+                    const auto views = std::count_if(uses.begin(), uses.end(), [&](const ImageUse& other) { return other.written && other.surface != use.surface && other.resource.baseAddress == use.resource.baseAddress; });
+                    if (views != 0) throw std::runtime_error("AGC graphics: storage image writes to depth surface 0x" + std::to_string(key[0]) + " through a view that another view of the plane replaced are not implemented on Metal");
                 }
             }
             writebackDirty();
@@ -2747,6 +2750,7 @@ struct VulkanDevice::State {
                 if (color.samples > 1u) {
                     resource.dimension = Graphics::TextureDimension::k2DMsaa;
                     resource.samples = color.samples;
+                    resource.allocatedMipCount = 1u;
                 }
                 const auto [surface, info, layers] = surfaceFor(resource);
                 Metal::TextureHandle handle = surface->texture;
