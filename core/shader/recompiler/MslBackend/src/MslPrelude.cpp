@@ -340,11 +340,11 @@ static inline void aps5_buffer_store(thread aps5_ctx& c, uint element, aps5_vsha
     for (uint part = 0u; part < bytes; ++part) pointer[part] = uchar(value >> (part * 8u));
 }
 static inline device atomic_uint* aps5_buffer_atomic(thread aps5_ctx& c, uint element, aps5_vsharp r, uint byte, uint pc) {
-    ulong guest = r.base + ulong(byte);
-    if ((guest & 3ul) != 0ul) { aps5_fault(c, $UNALIGNED, guest, 4u, pc); return nullptr; }
     aps5_guest_buffer buffer = c.buffers[element];
     if (ulong(byte) + 4ul > ulong(buffer.size)) return nullptr;
-    return reinterpret_cast<device atomic_uint*>(buffer.data + byte);
+    uint skew = uint((r.base + ulong(byte)) & 3ul);
+    if (skew > byte) return nullptr;
+    return reinterpret_cast<device atomic_uint*>(buffer.data + (byte - skew));
 }
 )";
 
