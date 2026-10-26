@@ -254,6 +254,11 @@ struct DepthSurface {
     std::vector<std::uint32_t> htileWords;
 };
 
+std::atomic<std::uint64_t>& GlobalComputePipelinesCreated() {
+    static std::atomic<std::uint64_t> created{0};
+    return created;
+}
+
 bool DepthFillCovers(std::uint64_t base, std::uint64_t baseBytes, std::uint64_t address, std::size_t bytes) {
     return base != 0 && base >= address && base + baseBytes <= address + bytes;
 }
@@ -1182,6 +1187,7 @@ struct VulkanDevice::State {
                 ticket = compiler->Compute(request);
                 pipelines.emplace(identity, PipelineEntry{std::move(source), ticket});
                 pipelinesCreated.fetch_add(1, std::memory_order_relaxed);
+                GlobalComputePipelinesCreated().fetch_add(1, std::memory_order_relaxed);
             } else {
                 ticket = found->second.ticket;
             }
@@ -2280,7 +2286,7 @@ auto VulkanDevice::CopyVerifyCounts() -> CopyVerification { return {}; }
 
 auto VulkanDevice::CopyAliasCounts() -> CopyAliasing { return {}; }
 
-auto VulkanDevice::ComputePipelineCounts() -> ComputePipelineCreation { return {}; }
+auto VulkanDevice::ComputePipelineCounts() -> ComputePipelineCreation { return {GlobalComputePipelinesCreated().load(std::memory_order_relaxed), 0}; }
 
 auto VulkanDevice::DispatchMoveCounts() -> DispatchMoveCount { return {}; }
 
@@ -2379,7 +2385,10 @@ auto VulkanDevice::PresentCounts() -> PresentStatistics { return {}; }
 
 auto VulkanDevice::PresyncCounts() -> PresyncStatistics { return {}; }
 
-auto VulkanDevice::PrepareDispatch(const ShaderRecompiler::RecompileResult&, std::span<const Graphics::GuestMemorySnapshot>, std::uint64_t, std::uint64_t) -> std::shared_ptr<PreparedDispatch> { return {}; }
+auto VulkanDevice::PrepareDispatch(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot>, std::uint64_t, std::uint64_t) -> std::shared_ptr<PreparedDispatch> {
+    if (shader.backend == ShaderRecompiler::ShaderBackendKind::Msl && !shader.msl.empty()) static_cast<void>(state->pipeline(shader));
+    return {};
+}
 
 auto VulkanDevice::PreparePhaseMs(const PreparedDispatch&) -> std::span<const double, 5> {
     static constexpr double zeros[5] = {};
