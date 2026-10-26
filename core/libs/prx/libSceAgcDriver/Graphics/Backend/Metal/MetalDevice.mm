@@ -1123,7 +1123,7 @@ struct VulkanDevice::State {
             [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
             if (Trace()) depthProbes.emplace_back(reinterpret_cast<const float*>(scratch.data), static_cast<std::size_t>(bytes / 4u));
             if (Trace()) std::fprintf(stderr, "[metal] depth export: texture %p guest %016llx device %016llx, %ux%u, tile %u, format %u, bytes %llu\n", (__bridge void*)surface->texture, static_cast<unsigned long long>(surface->guestAddress), static_cast<unsigned long long>(surface->address), width, height, static_cast<unsigned>(surface->resource.tileMode), surface->resource.format, static_cast<unsigned long long>(surface->guestBytes));
-            textures->EncodeLinearToTiled((__bridge void*)compute, surface->resource, surface->address, scratch.gpuAddress, pitch);
+            textureManager().EncodeLinearToTiled((__bridge void*)compute, surface->resource, surface->address, scratch.gpuAddress, pitch);
             [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             cbMovedBytes += surface->guestBytes;
             surface->dirty = false;
@@ -2146,7 +2146,7 @@ struct VulkanDevice::State {
     }
 
     void importDepth(DepthSurface& depth, const Graphics::DepthTarget& target) {
-        if (depth.dirty || (!depth.initialized && depth.clearRequested)) return;
+        if (depth.dirty || (!depth.initialized && (depth.clearRequested || target.htileAddress != 0u))) return;
         const auto plane = depthPlane(depth, target);
         if (!plane) return;
         if (depth.initialized && depth.stamp != 0 && GuestMemory::UnchangedSinceCollected(target.address, plane->bytes, depth.stamp)) return;
@@ -2159,7 +2159,7 @@ struct VulkanDevice::State {
         const auto scratch = upload(bytes);
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-        textures->EncodeTiledToLinear((__bridge void*)compute, plane->resource, source, scratch.gpuAddress, pitch);
+        textureManager().EncodeTiledToLinear((__bridge void*)compute, plane->resource, source, scratch.gpuAddress, pitch);
         [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
         [compute copyFromBuffer:(__bridge id<MTLBuffer>)scratch.buffer sourceOffset:scratch.offset sourceBytesPerRow:pitch sourceBytesPerImage:bytes sourceSize:MTLSizeMake(width, height, 1) toTexture:depth.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
         [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
