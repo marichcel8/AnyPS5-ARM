@@ -14,9 +14,9 @@ std::uint32_t APS5_VABI sceAgcDcbAtomicGdsGetSize();
 extern "C" {
 
 uint32_t APS5_VABI sceAgcDcbAcquireMemGetSize(void);
-uint32_t* APS5_VABI sceAgcDcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dstCachePolicy, uint64_t dstAddress, uint8_t src, uint8_t srcCachePolicy, uint64_t srcAddressOrImmediate, uint8_t itemSize, uint8_t writeConfirm);
+uint32_t* APS5_VABI sceAgcDcbCopyData(CommandBuffer* buf, uint8_t dst, uint8_t dst_cache_policy, uint64_t dst_address, uint8_t src, uint8_t src_cache_policy, uint64_t src_address_or_immediate, uint8_t item_size, std::uint64_t write_confirmSlot);
 std::uint64_t APS5_VABI sceAgcDcbCopyDataGetSize();
-std::uint32_t* APS5_VABI sceAgcDcbDmaData(CommandBuffer* buf, std::uint8_t engine, std::uint8_t dst, std::uint8_t dstCachePolicy, std::uint64_t dstAddress, std::uint8_t src, std::uint8_t srcCachePolicy, std::uint64_t srcAddress, std::uint32_t numBytes, std::uint8_t waitForPrevious, std::uint8_t writeConfirm, std::uint8_t blockEngine);
+std::uint32_t* APS5_VABI sceAgcDcbDmaData(CommandBuffer* buf, std::uint8_t engine, std::uint8_t dst, std::uint8_t dstCachePolicy, std::uint64_t dstAddress, std::uint8_t src, std::uint8_t srcCachePolicy, std::uint64_t srcAddress, std::uint64_t numBytesSlot, std::uint64_t waitForPreviousSlot, std::uint64_t writeConfirmSlot, std::uint64_t blockEngineSlot);
 std::uint32_t APS5_VABI sceAgcDcbDmaDataGetSize();
 std::uint32_t* APS5_VABI sceAgcDcbAtomicMem(CommandBuffer* buf, std::uint8_t atomicOp, std::uint8_t command, std::uint8_t cachePolicy, const volatile void* address, std::uint64_t srcData, std::uint64_t compareData, std::uint16_t loopInterval);
 std::uint32_t APS5_VABI sceAgcDcbAtomicMemGetSize();

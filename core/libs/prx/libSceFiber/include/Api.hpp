@@ -21,6 +21,6 @@ int32_t APS5_VABI sceFiberStartContextSizeCheck(uint32_t flags);
 int32_t APS5_VABI sceFiberStopContextSizeCheck(void);
 int32_t APS5_VABI _sceFiberAttachContextAndRun(FiberObject* object, void* addrContext, uint64_t sizeContext, uint64_t argOnRun, uint64_t* argOnReturn);
 int32_t APS5_VABI _sceFiberAttachContextAndSwitch(FiberObject* object, void* addrContext, uint64_t sizeContext, uint64_t argOnRun, uint64_t* argOnRunOut);
-int32_t APS5_VABI _sceFiberInitializeWithInternalOptionImpl(FiberObject* object, const char* name, GuestFiberEntry entry, uint64_t argOnInitialize, void* addrContext, uint64_t sizeContext, const FiberOptParam* optParam, uint32_t flags, uint32_t buildVersion);
+int32_t APS5_VABI _sceFiberInitializeWithInternalOptionImpl(FiberObject* object, const char* name, GuestFiberEntry entry, uint64_t arg_on_initialize, void* addr_context, uint64_t size_context, const FiberOptParam* opt_param, uint32_t flags, std::uint64_t build_versionSlot);
 
 }
