@@ -435,7 +435,7 @@ std::string ResultVector(Access& access, const std::string& value, IrTextureNume
                 packed[word] = "((" + Bits(low, valueClass) + " & 0xffffu) | ((" + Bits(high, valueClass) + " & 0xffffu) << 16u))";
             } else {
                 state.features |= Half;
-                packed[word] = "(aps5_f32_to_f16(" + low + ") | (aps5_f32_to_f16(" + high + ") << 16u))";
+                packed[word] = "(aps5_f32_to_f16(as_type<uint>(" + low + ")) | (aps5_f32_to_f16(as_type<uint>(" + high + ")) << 16u))";
             }
         }
         return "uint4(" + packed[0] + ", " + packed[1] + ", " + packed[2] + ", " + packed[3] + ")";
