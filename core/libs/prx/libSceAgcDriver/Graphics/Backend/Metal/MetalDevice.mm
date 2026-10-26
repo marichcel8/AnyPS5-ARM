@@ -1405,9 +1405,11 @@ struct VulkanDevice::State {
         std::optional<std::uint32_t> tableElements;
         std::vector<std::uint32_t> map;
         std::uint32_t otherSamplers = 0;
+        std::uint32_t integerSamplers = 0;
         for (const auto& binding : shader.bindings) {
             const auto use = SamplerUseOf(binding);
             pointSamplers |= use.integer;
+            integerSamplers |= use.integer;
             otherSamplers |= use.other;
         }
         pointSamplers &= ~otherSamplers;
@@ -1444,7 +1446,11 @@ struct VulkanDevice::State {
             case ShaderRecompiler::DescriptorRole::GuestSamplers: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest sampler descriptor must contain four DWORDs per element");
                 std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
-                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, element < 32u && ((pointSamplers >> element) & 1u) != 0u);
+                for (std::uint32_t element = 0; element < binding.count; ++element) {
+                    const bool point = element < 32u && ((pointSamplers >> element) & 1u) != 0u;
+                    entries[element].resourceId = sampler(binding, element, point);
+                    if (Trace()) std::fprintf(stderr, "[metal] sampler %u.%u: point %u, words %08x %08x %08x %08x, integer mask %x, other mask %x\n", binding.binding, element, point ? 1u : 0u, binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u], integerSamplers, otherSamplers);
+                }
                 slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
                 break;
             }
