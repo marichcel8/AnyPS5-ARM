@@ -49,6 +49,7 @@ struct GpuTimeReport {
     double busyMs = 0.0;
     double maxMs = 0.0;
     std::uint64_t commandBuffers = 0;
+    std::string longestTag;
     bool enabled = false;
 };
 
@@ -65,6 +66,7 @@ public:
     void* NativeResidencySet() const;
 
     GpuTimeReport TakeGpuTime();
+    void TagNextSubmit(std::string tag);
 
     GuestWindows& Guest();
 
