@@ -14,6 +14,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureFormat.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "BdaAbi.hpp"
@@ -413,6 +414,21 @@ ImageKind ImageKindOf(std::uint32_t binding) {
     return {group == 1u ? Numeric::Uint : group == 2u ? Numeric::Sint : Numeric::Float, false};
 }
 
+Metal::PixelFormat SrgbView(Metal::PixelFormat format) {
+    using enum Metal::PixelFormat;
+    switch (format) {
+    case R8Unorm: return R8UnormSrgb;
+    case RG8Unorm: return RG8UnormSrgb;
+    case RGBA8Unorm: return RGBA8UnormSrgb;
+    case BGRA8Unorm: return BGRA8UnormSrgb;
+    case BC1RGBA: return BC1RGBASrgb;
+    case BC2RGBA: return BC2RGBASrgb;
+    case BC3RGBA: return BC3RGBASrgb;
+    case BC7RGBAUnorm: return BC7RGBAUnormSrgb;
+    default: return Invalid;
+    }
+}
+
 Metal::PixelFormat NumericView(Metal::PixelFormat format, Numeric numeric) {
     using enum Metal::PixelFormat;
     static constexpr std::array<std::array<Metal::PixelFormat, 6>, 11> families{{
@@ -718,6 +734,7 @@ struct VulkanDevice::State {
 
     std::unique_ptr<Metal::TextureManager> textures;
     std::map<SurfaceKey, CachedSurface> surfaces;
+    std::uint32_t forcingSamplers = 0;
     std::map<SamplerKey, id<MTLSamplerState>> samplers;
     std::array<id<MTLTexture>, 4> nullTextures{};
     std::vector<CachedSurface*> dirtySurfaces;
@@ -1586,7 +1603,14 @@ struct VulkanDevice::State {
             storageMip = 0u;
             for (auto previous = element; previous > 0u && std::equal(words.begin(), words.end(), binding.guestDescriptor.begin() + static_cast<std::ptrdiff_t>(previous - 1u) * 8); --previous) ++*storageMip;
         }
-        return imageView(words, *binding.imageShape, written, kind.numeric, true, snapshots, uses, storageMip);
+        if (element < binding.imageUnnormalized.size() && binding.imageUnnormalized[element] && !Graphics::IsNullTextureResource(words)) {
+            const auto resource = Graphics::DecodeTextureResource(words);
+            const bool exactAtBase = element < binding.imageUnnormalizedBaseLevel.size() && binding.imageUnnormalizedBaseLevel[element];
+            const bool singleLevel = resource.lastLevel <= resource.baseLevel && resource.baseLevel == 0u;
+            if (Graphics::EffectiveMinLod(resource) != 0.0f || !(singleLevel || exactAtBase)) throw std::runtime_error("AGC graphics: guest texture sampled with unnormalized coordinates has a minimum LOD clamp, and is neither a single-level view at mip 0 nor read only by image_sample_lz through an S# without minimum LOD or bias, which is not implemented (base level " + std::to_string(resource.baseLevel) + ", last level " + std::to_string(resource.lastLevel) + ")");
+        }
+        const bool forceSrgb = element < binding.imageSamplers.size() && (binding.imageSamplers[element] & forcingSamplers) != 0u;
+        return imageView(words, *binding.imageShape, written, kind.numeric, true, snapshots, uses, storageMip, forceSrgb);
     }
 
     std::uint64_t tableImage(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses) {
@@ -1595,7 +1619,7 @@ struct VulkanDevice::State {
         return imageView(words, binding.imageShapes.at(element), written, std::nullopt, false, snapshots, uses);
     }
 
-    std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses, std::optional<std::uint32_t> storageMip = std::nullopt) {
+    std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses, std::optional<std::uint32_t> storageMip = std::nullopt, bool forceSrgb = false) {
         const auto viewKind = ViewKindOf(shape);
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
         auto resource = Graphics::ArrayLayerWindow(Graphics::DecodeTextureResource(words), MaxTextureArrayLayers);
@@ -1613,6 +1637,10 @@ struct VulkanDevice::State {
         view.kind = viewKind;
         view.changeKind = true;
         view.pixelFormat = numeric ? NumericView(surface.texture.pixelFormat, *numeric) : surface.texture.pixelFormat;
+        if (forceSrgb && !Graphics::IsSrgbTextureFormat(resource.format) && !Graphics::IgnoresForcedDegamma(resource.format)) {
+            view.pixelFormat = SrgbView(view.pixelFormat);
+            if (view.pixelFormat == Metal::PixelFormat::Invalid) throw std::runtime_error("AGC graphics: a sampler forces sRGB decoding on guest format " + std::to_string(resource.format) + ", which has no Metal sRGB view");
+        }
         view.baseLevel = std::min(resource.baseLevel, info.mipLevels - 1u);
         view.levelCount = std::min(std::max(resource.lastLevel, view.baseLevel), info.mipLevels - 1u) - view.baseLevel + 1u;
         if (storageMip) {
@@ -1687,14 +1715,14 @@ struct VulkanDevice::State {
         }
     }
 
-    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, bool point, const std::array<std::uint32_t, 4>* override = nullptr) {
+    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, bool point, const std::array<std::uint32_t, 4>* override = nullptr, bool degammaPaired = false) {
         const std::span<const std::uint32_t> words = override != nullptr ? std::span<const std::uint32_t>(*override) : std::span<const std::uint32_t>(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u);
         const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
         const bool integerBorder = element < binding.samplerIntegerBorder.size() && binding.samplerIntegerBorder[element];
         const bool compare = element < binding.samplerDepthCompare.size() && binding.samplerDepthCompare[element];
-        const SamplerKey key{words[0], words[1], words[2], words[3], (unnormalized ? 1u : 0u) | (integerBorder ? 2u : 0u) | (point ? 4u : 0u) | (compare ? 8u : 0u)};
+        const SamplerKey key{words[0], words[1], words[2], words[3], (unnormalized ? 1u : 0u) | (integerBorder ? 2u : 0u) | (point ? 4u : 0u) | (compare ? 8u : 0u) | (degammaPaired ? 16u : 0u)};
         if (const auto found = samplers.find(key); found != samplers.end()) return found->second.gpuResourceID._impl;
-        const auto decoded = Graphics::DecodeSamplerResource(words, unnormalized, false, integerBorder);
+        const auto decoded = Graphics::DecodeSamplerResource(words, unnormalized, degammaPaired, integerBorder);
         MTLSamplerDescriptor* descriptor = [MTLSamplerDescriptor new];
         descriptor.minFilter = NativeFilter(decoded.minFilter);
         descriptor.magFilter = decoded.unnormalizedCoordinates ? descriptor.minFilter : NativeFilter(decoded.magFilter);
@@ -1747,6 +1775,13 @@ struct VulkanDevice::State {
             mipmappedSamplers |= use.mipmapped;
         }
         pointSamplers &= ~otherSamplers;
+        forcingSamplers = 0;
+        for (const auto& binding : shader.bindings) {
+            if (binding.role != ShaderRecompiler::DescriptorRole::GuestSamplers) continue;
+            for (std::uint32_t element = 0; element < std::min(binding.count, 32u); ++element) {
+                if (binding.guestDescriptor.size() > static_cast<std::size_t>(element) * 4u && ((binding.guestDescriptor[element * 4u] >> 20u) & 1u) != 0u) forcingSamplers |= 1u << element;
+            }
+        }
         bindLap(0);
         for (const auto& binding : shader.bindings) {
             switch (binding.role) {
@@ -1791,7 +1826,7 @@ struct VulkanDevice::State {
                     const bool point = element < 32u && ((pointSamplers >> element) & 1u) != 0u;
                     std::optional<std::array<std::uint32_t, 4>> words;
                     if (element < 32u) words = Graphics::SingleLevelSamplerWords(std::span<const std::uint32_t, 4>(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u), ((singleLevelSamplers >> element) & 1u) != 0u, ((mipmappedSamplers >> element) & 1u) != 0u);
-                    entries[element].resourceId = sampler(binding, element, point, words ? &*words : nullptr);
+                    entries[element].resourceId = sampler(binding, element, point, words ? &*words : nullptr, true);
                     if (Trace()) std::fprintf(stderr, "[metal] sampler %u.%u: point %u, words %08x %08x %08x %08x, integer mask %x, other mask %x\n", binding.binding, element, point ? 1u : 0u, binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u], integerSamplers, otherSamplers);
                 }
                 slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));

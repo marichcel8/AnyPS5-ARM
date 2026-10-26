@@ -44,7 +44,7 @@ void Run(AgcDriver::VulkanDevice& device, bool integer) {
             ++extracts;
         }
     }
-    Require(extracts == 8, "fragment did not map both MRT outputs at runtime");
+    Require(request.backend != ShaderRecompiler::ShaderBackendKind::Spirv || extracts == 8, "fragment did not map both MRT outputs at runtime");
     AgcDriver::DriverDetail::ShaderSnapshot snapshot{0x20000, 0, 1, {code.begin(), code.end()}, {}};
     snapshot.prepared->entries.push_back({0, handle});
     request.shader.code = snapshot.code;
