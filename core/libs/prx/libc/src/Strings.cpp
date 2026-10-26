@@ -418,11 +418,7 @@ long double APS5_VABI strtold_nid_postfix(const char* str, char** endptr) {
     static_assert(sizeof(long double) == 16, "Guest long double requires x87 extended precision storage");
     return ParseFloat<long double>(str, endptr, std::strtold);
 #else
-    // TODO(native-arm64): the guest receives long double in x87 st(0); it needs its own bridge.
-    static_cast<void>(str);
-    static_cast<void>(endptr);
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ParseFloat<double>(str, endptr, std::strtod);
 #endif
 }
 
@@ -754,11 +750,7 @@ long double APS5_VABI wcstold_nid_postfix(const char16_t* str, char16_t** endptr
     static_assert(std::numeric_limits<long double>::digits == 64);
     return ParseAsciiPrefix(str, endptr, [](const char* text, char** end) { return ParseFloat<long double>(text, end, std::strtold); });
 #else
-    // TODO(native-arm64): the guest receives long double in x87 st(0); it needs its own bridge.
-    static_cast<void>(str);
-    static_cast<void>(endptr);
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return ParseAsciiPrefix(str, endptr, [](const char* text, char** end) { return ParseFloat<double>(text, end, std::strtod); });
 #endif
 }
 

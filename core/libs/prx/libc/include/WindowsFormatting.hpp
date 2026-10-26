@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBC_INCLUDE_WINDOWSFORMATTING_HPP
 
 #include "SceTypes.hpp"
+#include "prx/libc/include/X87Extended.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -74,8 +75,8 @@ private:
             }
         } else if constexpr (std::is_same_v<T, long double>) {
             const auto aligned = (reinterpret_cast<std::uintptr_t>(args.overflow_arg_area) + 15) & ~std::uintptr_t(15);
-            address = reinterpret_cast<const void*>(aligned);
             args.overflow_arg_area = reinterpret_cast<void*>(aligned + 16);
+            return X87Extended::Load(reinterpret_cast<const void*>(aligned));
         } else {
             static_assert(sizeof(T) <= 8);
             if (args.gp_offset < 48) {
@@ -657,6 +658,7 @@ inline int FormatWindows(char* buffer, size_t size, const char* format, const vo
 #if defined(__x86_64__)
                 static_assert(sizeof(long double) == 16);
                 static_assert(std::numeric_limits<long double>::digits == 64);
+#endif
                 const long double value = args.Next<long double>();
                 if (std::isnan(value)) {
                     output.Value(PaddedStringSpec(spec), NanText(spec, std::signbit(value), conversion < 'a').c_str());
@@ -667,10 +669,6 @@ inline int FormatWindows(char* buffer, size_t size, const char* format, const vo
                 } else {
                     output.Value(spec + "L" + conversion, value);
                 }
-#else
-                // TODO(native-arm64): read the guest's 80-bit x87 value.
-                throw std::invalid_argument("long double formatting is not ported to arm64");
-#endif
             } else {
                 if (!length.empty() && length != "l") throw std::invalid_argument("Invalid floating length");
                 const double value = args.Next<double>();

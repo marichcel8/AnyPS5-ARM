@@ -142,6 +142,19 @@ std::unordered_map<std::uint64_t, ContextRecord> contextRecords;
 std::unordered_map<std::uint64_t, Coroutine> coroutines;
 thread_local const UserUcontext* swapTarget = nullptr;
 
+// libc's exports with long double in their signature (libc/src/GuestX87.cpp), by address.
+struct X87Export {
+    const void* function;
+    const char* signature;
+};
+
+std::unordered_map<std::uint64_t, const char*> x87Exports;
+
+// A guest stack per thread for sceKernelRaiseException handlers, and the GuestState they interrupted.
+constexpr std::size_t SignalStackBytes = 256u << 10;
+thread_local std::uint8_t* signalStack = nullptr;
+thread_local GuestState interrupted;
+
 struct sigaction previousBus {}, previousSegv {};
 // APS5_NATIVE_TRACE: report each redirected host call into guest code.
 bool tracing = false;
@@ -477,6 +490,92 @@ GuestState* NewFiberState(std::uint64_t rsp) {
     ResumeContext(swapTarget);
 }
 
+// A guest call of a libc export whose signature has long double: the guest passes long double
+// arguments in memory after the return address and takes a long double result in st(0); the host
+// takes and returns doubles in vector registers. A long double* argument points at an 80-bit value,
+// which the host function reads and writes as a double.
+void CallX87(GuestState* state, std::uint64_t target, const char* signature) {
+    static constexpr unsigned integers[] = {Rdi, Rsi, Rdx, Rcx, R8, R9};
+    alignas(16) GuestState call {};
+    std::uint64_t stack[12] = {};
+    call.gpr[Rsp] = reinterpret_cast<std::uint64_t>(stack);
+    double pointed[8] = {};
+    std::uint64_t written[8] = {};
+    unsigned gp = 0, fp = 0, hostGp = 0, hostFp = 0, memory = 0, pointers = 0;
+    auto hostInteger = [&](std::uint64_t value) {
+        if (hostGp < 6) call.gpr[integers[hostGp]] = value;
+        else if (hostGp < 8) stack[1 + hostGp - 6] = value;
+        else Fail("x87 export with more than 8 integer arguments at", target);
+        ++hostGp;
+    };
+    auto hostDouble = [&](double value) {
+        if (hostFp >= 8) Fail("x87 export with more than 8 floating-point arguments at", target);
+        std::memcpy(call.ymm[hostFp++], &value, 8);
+    };
+    for (const char* letter = signature + 1; *letter != 0; ++letter) {
+        switch (*letter) {
+        case 'i':
+            hostInteger(state->gpr[integers[gp++]]);
+            break;
+        case 'I':
+            hostInteger(state->gpr[integers[gp++]]);
+            hostInteger(state->gpr[integers[gp++]]);
+            break;
+        case 'd': case 'f':
+            if (hostFp >= 8) Fail("x87 export with more than 8 floating-point arguments at", target);
+            std::memcpy(call.ymm[hostFp++], state->ymm[fp++], 16);
+            break;
+        case 'L':
+            hostDouble(aps5_x87_load80(reinterpret_cast<const std::uint8_t*>(state->gpr[Rsp] + 8 + 16 * memory++)));
+            break;
+        case 'P': case 'p': {
+            const auto guest = state->gpr[integers[gp++]];
+            if (guest == 0) {
+                hostInteger(0);
+                break;
+            }
+            pointed[pointers] = aps5_x87_load80(reinterpret_cast<const std::uint8_t*>(guest));
+            if (*letter == 'P') written[pointers] = guest;
+            hostInteger(reinterpret_cast<std::uint64_t>(&pointed[pointers++]));
+            break;
+        }
+        default:
+            Fail("x87 export with an unknown signature at", target);
+        }
+    }
+    aps5_host_bridge(&call, target);
+    for (unsigned i = 0; i < pointers; ++i) {
+        if (written[i] != 0) aps5_x87_store80(reinterpret_cast<std::uint8_t*>(written[i]), pointed[i]);
+    }
+    auto push = [&](const std::uint8_t* lane) {
+        double value = 0;
+        std::memcpy(&value, lane, 8);
+        state->x87Top = static_cast<std::uint8_t>((state->x87Top - 1) & 7);
+        state->x87[state->x87Top] = value;
+    };
+    switch (signature[0]) {
+    case 'L':
+        push(call.ymm[0]);
+        break;
+    case 'C':
+        push(call.ymm[1]);
+        push(call.ymm[0]);
+        break;
+    case 'd': case 'f':
+        std::memcpy(state->ymm[0], call.ymm[0], 16);
+        break;
+    case 'I':
+        state->gpr[Rdx] = call.gpr[Rdx];
+        state->gpr[Rax] = call.gpr[Rax];
+        break;
+    case 'i':
+        state->gpr[Rax] = call.gpr[Rax];
+        break;
+    default:
+        break;
+    }
+}
+
 void InstallRedirect() {
     tracing = std::getenv("APS5_NATIVE_TRACE") != nullptr;
     if (auto* targets = reinterpret_cast<void (*)(void**, void**)>(dlsym(RTLD_DEFAULT, "Aps5JumpTargets_nid_no_patch"))) {
@@ -495,6 +594,15 @@ void InstallRedirect() {
         if (found[2] != nullptr) aps5_capture_targets[CaptureGetcontext] = reinterpret_cast<std::uint64_t>(found[2]);
         if (found[3] != nullptr) aps5_capture_targets[CaptureSwapcontext] = reinterpret_cast<std::uint64_t>(found[3]);
         guestSigprocmask = reinterpret_cast<GuestSigprocmask>(found[4]);
+    }
+    if (auto* exports = reinterpret_cast<void (*)(const void**, std::size_t*)>(dlsym(RTLD_DEFAULT, "Aps5X87Exports_nid_no_patch"))) {
+        const void* table = nullptr;
+        std::size_t count = 0;
+        exports(&table, &count);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& entry = static_cast<const X87Export*>(table)[i];
+            x87Exports.emplace(reinterpret_cast<std::uint64_t>(entry.function), entry.signature);
+        }
     }
     if (auto* hooks = reinterpret_cast<void (*)(const void* (*)(const void*), int (*)(const void*, const void*, const void*, const void*))>(dlsym(RTLD_DEFAULT, "Aps5CallbackHooks_nid_no_patch")))
         hooks(ResolveCallback, aps5_invoke_translated);
@@ -597,6 +705,45 @@ void aps5_fiber_release(GuestState* state) {
     std::free(state);
 }
 
+// For libkernel's sceKernelRaiseException delivery on this thread: the guest registers (16 in DWARF
+// order, rip, rflags, mxcsr, x87 control) and a guest stack for the handler. They are exact while the
+// thread is in a guest call into the host; interrupted translated code may hold newer values, and
+// its GuestState comes back unchanged.
+int aps5_signal_enter(std::uint64_t* registers) {
+    auto* state = Current();
+    if (state == nullptr) return -1;
+    if (signalStack == nullptr) {
+        void* mapping = mmap(nullptr, SignalStackBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (mapping == MAP_FAILED) return -1;
+        signalStack = static_cast<std::uint8_t*>(mapping);
+    }
+    const bool exact = Bridged() == state;
+    for (unsigned i = 0; i < 16; ++i) registers[i] = state->gpr[DwarfRegisters[i]];
+    registers[16] = 0;
+    if (exact) {
+        std::memcpy(&registers[16], reinterpret_cast<const void*>(state->gpr[Rsp]), 8);
+        registers[7] = state->gpr[Rsp] + 8;
+    }
+    registers[17] = PackFlags(state);
+    registers[18] = state->mxcsr;
+    registers[19] = state->x87Control;
+    std::memcpy(&interrupted, state, sizeof(GuestState));
+    state->gpr[Rsp] = reinterpret_cast<std::uint64_t>(signalStack + SignalStackBytes - 64);
+    return 0;
+}
+
+void aps5_signal_leave(const std::uint64_t* registers) {
+    auto* state = Current();
+    std::memcpy(state, &interrupted, sizeof(GuestState));
+    if (Bridged() != state) return;
+    for (unsigned i = 0; i < 16; ++i) {
+        if (DwarfRegisters[i] != Rsp) state->gpr[DwarfRegisters[i]] = registers[i];
+    }
+    UnpackFlags(state, registers[17]);
+    state->mxcsr = static_cast<std::uint32_t>(registers[18]);
+    state->x87Control = static_cast<std::uint16_t>(registers[19]);
+}
+
 // A guest call or jump whose target the translator could not resolve statically. The caller has
 // pushed the guest return address; a translated callee pops it with its ret, a host callee does not.
 void aps5_call_impl(GuestState* state, std::uint64_t target) {
@@ -615,7 +762,8 @@ void aps5_call_impl(GuestState* state, std::uint64_t target) {
     auto* outer = Bridged();
     Bridged() = state;
     try {
-        aps5_host_bridge(state, target);
+        if (const auto x87 = x87Exports.find(target); x87 != x87Exports.end()) CallX87(state, target, x87->second);
+        else aps5_host_bridge(state, target);
     } catch (const GuestResume&) {
         Bridged() = outer;
         return;
