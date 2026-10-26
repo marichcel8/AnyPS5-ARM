@@ -877,11 +877,18 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
             return;
         }
     } else if (HasFlag(mem, RdnaImageSampleFlagDerivative)) {
-        if (shape.spatial == 1u) throw MslUnsupported("MSL backend: gradients on 1D images have no Metal sample option");
         const auto gradX = CoordF32(access, layout.gradX, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
         const auto gradY = CoordF32(access, layout.gradY, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
-        options = std::string(shape.spatial == 3u ? "gradient3d(" : "gradient2d(") + gradX + ", " + gradY + ")";
-        if (layout.clamp != NoComponent) options += ", min_lod_clamp(" + AddressF32(access, layout.clamp) + ")";
+        if (shape.spatial == 1u) {
+            const auto footprint = Temp(state);
+            Line(state, "const float " + footprint + " = max(abs(float(" + gradX + ")), abs(float(" + gradY + "))) * float(" + texture + ".get_width());");
+            std::string lod = "log2(max(" + footprint + ", 1.0e-30f))";
+            if (layout.clamp != NoComponent) lod = "max(" + lod + ", " + AddressF32(access, layout.clamp) + ")";
+            options = "level(" + lod + ")";
+        } else {
+            options = std::string(shape.spatial == 3u ? "gradient3d(" : "gradient2d(") + gradX + ", " + gradY + ")";
+            if (layout.clamp != NoComponent) options += ", min_lod_clamp(" + AddressF32(access, layout.clamp) + ")";
+        }
     } else if (explicitLod) {
         auto lod = HasFlag(mem, RdnaImageSampleFlagLod) ? AddressF32(access, layout.lod) : std::string("0.0f");
         if (layout.clamp != NoComponent) lod = "max(" + lod + ", " + AddressF32(access, layout.clamp) + ")";
