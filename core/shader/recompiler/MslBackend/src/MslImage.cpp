@@ -921,7 +921,8 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
         const auto converted = shape.spatial == 2u ? "float2(" + offset + ")" : "float3(" + offset + ")";
         return SpatialPart(coordinate, shape) + " + " + converted;
     };
-    const auto assign = [&](const std::string& expression) {
+    const auto assign = [&](const std::string& sampled) {
+        const auto expression = (state.target.experiment & MslExperimentNoSample) != 0u && !gather ? std::string("float4(0.5f)") : sampled;
         if (gather && conversion.format != IrBufferFormat::Invalid) Line(state, result + " = " + ResultVector(access, UnpackGather(access, expression), IrTextureNumericClass::Uint, false, true) + ";");
         else Line(state, result + " = " + ResultVector(access, expression, image.numericClass, dref && !gather, gather) + ";");
     };

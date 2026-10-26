@@ -342,7 +342,8 @@ bool EmitAlu(State& state, const IrValue& inst) {
         return true;
     case IrOpcode::PackFloat2x16Rtz:
         state.features |= Half;
-        Out(state, inst, "aps5_f32_to_f16_rtz(" + Bits(state, inst, 0) + ") | (aps5_f32_to_f16_rtz(" + Bits(state, inst, 1) + ") << 16u)");
+        if ((state.target.experiment & MslExperimentNoPack) != 0u) Out(state, inst, "(" + Bits(state, inst, 0) + " >> 16u) | (" + Bits(state, inst, 1) + " & 0xffff0000u)");
+        else Out(state, inst, "aps5_f32_to_f16_rtz(" + Bits(state, inst, 0) + ") | (aps5_f32_to_f16_rtz(" + Bits(state, inst, 1) + ") << 16u)");
         return true;
     case IrOpcode::FPAdd16x2: state.features |= Half; Out(state, inst, "aps5_half2(" + a(0) + ", " + a(1) + ", false)"); return true;
     case IrOpcode::FPMul16x2: state.features |= Half; Out(state, inst, "aps5_half2(" + a(0) + ", " + a(1) + ", true)"); return true;

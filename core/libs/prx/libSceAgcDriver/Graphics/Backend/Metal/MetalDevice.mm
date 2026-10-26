@@ -601,6 +601,8 @@ std::uint32_t MslExperiment() {
         if (list.find("nopow") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoPow;
         if (list.find("nouniform") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoUniformLoad;
         if (list.find("constout") != std::string::npos) result |= ShaderRecompiler::MslExperimentConstantOutput;
+        if (list.find("nosample") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoSample;
+        if (list.find("nopack") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoPack;
         std::fprintf(stderr, "[metal] msl experiment %s (mask %u): shader output is wrong on purpose\n", text, result);
         return result;
     }();
