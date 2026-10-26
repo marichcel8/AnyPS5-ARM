@@ -38,6 +38,8 @@ struct RenderPipelineRequest {
     std::vector<VertexBufferLayout> vertexBuffers;
     std::string label;
     CompilePriority priority = CompilePriority::Needed;
+    bool mesh = false;
+    std::uint32_t meshThreads = 0;
 };
 
 class RenderPipeline {
