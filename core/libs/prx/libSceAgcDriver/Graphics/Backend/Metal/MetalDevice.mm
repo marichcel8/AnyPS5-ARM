@@ -269,6 +269,12 @@ struct DepthSurface {
     std::uint64_t guestBytes = 0;
 };
 
+std::array<std::uint32_t, 8> DepthPlaneWords(const Graphics::DepthTarget& target) {
+    const auto base = (target.address | target.pipeBankXor) >> 8u;
+    const auto width = target.extent.width - 1u, height = target.extent.height - 1u;
+    return {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 255u) | (22u << 20u) | ((width & 3u) << 30u), (width >> 2u) | (height << 14u), (9u << 28u) | (target.depthSwizzle << 20u) | 0x204u, 0u, 0u, 0u, 0u};
+}
+
 std::atomic<std::uint64_t>& GlobalComputePipelinesCreated() {
     static std::atomic<std::uint64_t> created{0};
     return created;
@@ -2107,7 +2113,7 @@ struct VulkanDevice::State {
         if (Trace()) std::fprintf(stderr, "[metal] depth mark: address %016llx, %ux%u, format %lu, samples %u\n", static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
         if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0) return;
         try {
-            const auto resource = Graphics::DecodeTextureResource(Graphics::DepthCopySourceWords(target));
+            const auto resource = Graphics::DecodeTextureResource(DepthPlaneWords(target));
             const auto* format = Metal::FindFormat(resource.format);
             if (format == nullptr || !format->uploadable || format->guestElementBytes != 4u) return;
             const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
