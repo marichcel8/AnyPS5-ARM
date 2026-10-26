@@ -2,6 +2,7 @@
 #include "BdaAbi.hpp"
 #include "MetalAbi.hpp"
 #include "Recompiler.hpp"
+#include "SpirvBackend/SpirvAnalysis.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -254,6 +255,18 @@ bool HasSharedAtomic64(const IrProgram& program) {
     return false;
 }
 
+bool UsesLds(const IrProgram& program) {
+    for (const auto* block : program.BlockOrder()) {
+        for (const auto* inst : block->Instructions()) {
+            if (SharedAccessOf(inst->Opcode()) == SharedAccess::None) continue;
+            const auto index = inst->Flags<MemoryFlags>().index;
+            const auto& infos = program.Resources().memoryInfo;
+            if (index >= infos.size() || infos[index].kind == ResourceKind::Lds) return true;
+        }
+    }
+    return false;
+}
+
 bool HasBarrier(const IrProgram& program) {
     for (const auto* block : program.BlockOrder()) {
         for (const auto* inst : block->Instructions()) {
@@ -399,7 +412,17 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
     state.lds64 = HasSharedAtomic64(program);
-    state.ldsDevice = program.Info().sharedMemoryBytes != 0u;
+    if (!compute && !geometry && stage != IrShaderStage::Mesh && UsesLds(program)) {
+        state.ldsFunction = true;
+        state.ldsDwords = FunctionLdsDwords(program);
+        state.ldsLaneAddresses = FunctionLdsLaneAddresses(program);
+        if (!state.ldsLaneAddresses.empty()) {
+            std::uint64_t needed = 0;
+            for (const auto& [inst, address] : state.ldsLaneAddresses) needed = std::max<std::uint64_t>(needed, ((std::uint64_t{address} + program.Resources().memoryInfo[inst->Flags<MemoryFlags>().index].offset) >> 2u) + 4u);
+            state.ldsDwords = static_cast<std::uint32_t>(std::min<std::uint64_t>(std::max<std::uint64_t>((needed + 63u) & ~63ull, 64u), FunctionLdsDwordLimit));
+        }
+    }
+    state.ldsDevice = compute && program.Info().sharedMemoryBytes != 0u;
     state.ldsStride = WorkgroupMemoryStrideDwords(program.Info());
     state.stopAllowed = compute && state.waveLds == 0u && !HasBarrier(program) && state.lanes == 1u;
     state.stopOnUnlinkedCall = compute && state.waveLds == 0u && !HasBarrier(program);
@@ -413,7 +436,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     EmitFlow(state);
     if (geometry) CheckGeometry(state);
     if (stage == IrShaderStage::Vertex && (state.features & Permute) != 0u) throw MslUnsupported("MSL backend: vertex functions cannot run cross-lane permutes");
-    if (!compute && !geometry && (state.features & (Lds | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
+    if (!compute && !geometry && (state.features & ((state.ldsFunction ? 0u : Lds) | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
 
     std::string declarations;
     const auto declare = [&](std::string_view text) {
@@ -429,6 +452,8 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if ((state.features & Lds) != 0u) {
         if (state.ldsDevice) {
             declare("device uint* aps5_lds = aps5_lds_memory + ulong((aps5_group.z * aps5_lds_groups.y + aps5_group.y) * aps5_lds_groups.x + aps5_group.x) * ulong(" + U32(state.ldsStride) + ");");
+        } else if (state.ldsFunction) {
+            declare("uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
         } else {
             declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
         }
@@ -436,6 +461,9 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if ((state.features & Lds64) != 0u) {
         if (state.ldsDevice) {
             declare("device atomic_uint* aps5_lds_lock = reinterpret_cast<device atomic_uint*>(aps5_lds + " + U32(state.ldsDwords) + ");");
+        } else if (state.ldsFunction) {
+            declare("uint aps5_lds_lock_word = 0u;");
+            declare("thread uint* aps5_lds_lock = &aps5_lds_lock_word;");
         } else {
             declare("threadgroup atomic_uint aps5_lds_lock_word;");
             declare("threadgroup atomic_uint* aps5_lds_lock = &aps5_lds_lock_word;");

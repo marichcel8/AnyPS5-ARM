@@ -525,6 +525,9 @@ const MemoryInfo& SharedMemory(State& state, const IrValue& inst) {
 }
 
 std::string SharedByte(State& state, const IrValue& inst, const MemoryInfo& mem) {
+    if (state.ldsFunction) {
+        if (const auto found = state.ldsLaneAddresses.find(&inst); found != state.ldsLaneAddresses.end()) return U32(found->second + mem.offset);
+    }
     const auto address = Typed(state, inst, 0u);
     return mem.offset == 0u ? address : "(" + address + " + " + U32(mem.offset) + ")";
 }
@@ -603,7 +606,7 @@ void SharedAtomic(State& state, const IrValue& inst) {
     const auto apply = "aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")";
     const auto condition = (active.empty() ? std::string() : active + " && ") + index + " < " + U32(state.ldsDwords);
     if (state.lds64) {
-        state.features |= Lds64 | Atomic64 | Float64 | Lane | LocalIndex;
+        state.features |= Lds64 | Atomic64 | Float64 | Lane | (state.ldsFunction ? 0u : LocalIndex);
         Define(state, inst, "aps5_lds32(aps5_lds_lock, reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")");
         return;
     }
@@ -756,7 +759,7 @@ void SharedAtomic64(State& state, const IrValue& inst) {
     const auto active = Active(state, inst);
     const auto index = Temp(state);
     LdsArray(state);
-    state.features |= Lds64 | Atomic64 | Float64 | Lane | LocalIndex;
+    state.features |= Lds64 | Atomic64 | Float64 | Lane | (state.ldsFunction ? 0u : LocalIndex);
     Line(state, "const uint " + index + " = " + SharedByte(state, inst, mem) + " >> 2u;");
     const auto condition = (active.empty() ? std::string() : "(" + active + ") && ") + "(" + index + " + 1u) < " + U32(state.ldsDwords);
     Define(state, inst, "aps5_lds64(aps5_lds_lock, reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(op) + ", " + a + ", " + b + ")");
@@ -977,6 +980,7 @@ void EmitAppendConsume(State& state, const IrValue& inst) {
     const auto& mem = Memory(state, inst);
     const bool gds = mem.kind == ResourceKind::Gds;
     if (!gds && mem.kind != ResourceKind::Lds) Fail(inst, "must access LDS or GDS");
+    if (!gds && state.ldsFunction) throw MslUnsupported("MSL backend: LDS append and consume in a vertex or pixel program are not emitted");
     const auto opcode = inst.Opcode();
     const bool ordered = opcode == IrOpcode::DataOrderedCount || opcode == IrOpcode::DataOrderedSwap;
     const bool swap = opcode == IrOpcode::DataOrderedSwap;
