@@ -1508,9 +1508,17 @@ int DoMprotect(const void* addr, size_t len, int prot) {
     for (const auto& [span, spanBytes] : spans) mutation.RequireUnpinned(span, spanBytes);
     for (const auto& [span, spanBytes] : spans) {
         mutation.Protect(span, spanBytes, (prot & 3) != 0, (prot & 2) != 0, (prot & GuestProtGpuReadWrite) != 0, [&] {
-            if (mprotect(const_cast<void*>(span), spanBytes, nativeProtection) != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
+            auto hostProtection = nativeProtection;
+            int result = mprotect(const_cast<void*>(span), spanBytes, hostProtection);
+#if defined(__APPLE__) && defined(__aarch64__)
+            if (result != 0 && errno == EACCES && (hostProtection & PROT_EXEC) != 0) {
+                hostProtection &= ~PROT_EXEC;
+                result = mprotect(const_cast<void*>(span), spanBytes, hostProtection);
+            }
+#endif
+            if (result != 0) throw std::system_error(errno, std::generic_category(), "mprotect failed");
 #ifdef __APPLE__
-            GuestWriteWatch::GuestWriteWatchProtectionChanged_nid_postfix(span, spanBytes, nativeProtection);
+            GuestWriteWatch::GuestWriteWatchProtectionChanged_nid_postfix(span, spanBytes, hostProtection);
 #endif
         });
         RecordProtection(span, spanBytes, prot);
