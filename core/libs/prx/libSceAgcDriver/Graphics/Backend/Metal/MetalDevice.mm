@@ -2151,6 +2151,70 @@ struct VulkanDevice::State {
         bindLap(5);
     }
 
+    struct DepthSlice {
+        DepthSurface* depth;
+        std::uint32_t layer;
+    };
+
+    std::vector<DepthSlice> layeredDepthSlices(const ImageUse& use) {
+        std::vector<DepthSlice> slices;
+        const auto& resource = use.resource;
+        if (!use.written || use.surface == nullptr || resource.dimension != Graphics::TextureDimension::k2DArray || resource.depthOrLastArray == 0u || resource.width == 0u || resource.height == 0u) return slices;
+        id<MTLTexture> storage = (__bridge id<MTLTexture>)use.surface->texture.texture;
+        if (storage == nil || storage.pixelFormat != MTLPixelFormatR32Float || storage.textureType != MTLTextureType2DArray) return slices;
+        const auto pitch = Graphics::DescribeSurface(resource).GuestLayerOffset(1);
+        if (pitch == 0u) return slices;
+        const auto extent = static_cast<std::uint64_t>(resource.width) | static_cast<std::uint64_t>(resource.height) << 32u;
+        for (std::uint32_t layer = resource.baseArray; layer <= resource.depthOrLastArray && layer < storage.arrayLength; ++layer) {
+            const auto address = resource.baseAddress + static_cast<std::uint64_t>(layer) * pitch;
+            for (auto& [key, depth] : depthSurfaces) {
+                if (key[0] != address || key[1] != extent || !depth.initialized || depth.texture.sampleCount != 1) continue;
+                slices.push_back({&depth, layer});
+                break;
+            }
+        }
+        return slices;
+    }
+
+    void encodeLayeredDepthCopies(id<MTL4ComputeCommandEncoder> compute, id<MTLTexture> storage, const std::vector<DepthSlice>& slices, bool toStorage) {
+        if (slices.empty()) return;
+        std::vector<Upload> scratch;
+        scratch.reserve(slices.size());
+        [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        for (const auto& slice : slices) {
+            const auto width = static_cast<std::uint32_t>(slice.depth->texture.width);
+            const auto height = static_cast<std::uint32_t>(slice.depth->texture.height);
+            const auto pitch = width * 4u;
+            const auto bytes = static_cast<std::uint64_t>(pitch) * height;
+            const bool combined = slice.depth->texture.pixelFormat != MTLPixelFormatDepth32Float;
+            scratch.push_back(upload(bytes));
+            const auto& buffer = scratch.back();
+            if (toStorage) [compute copyFromTexture:slice.depth->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)buffer.buffer destinationOffset:buffer.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes options:combined ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
+            else [compute copyFromTexture:storage sourceSlice:slice.layer sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)buffer.buffer destinationOffset:buffer.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes options:MTLBlitOptionNone];
+        }
+        [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        for (std::size_t index = 0; index < slices.size(); ++index) {
+            const auto& slice = slices[index];
+            const auto& buffer = scratch[index];
+            const auto width = static_cast<std::uint32_t>(slice.depth->texture.width);
+            const auto height = static_cast<std::uint32_t>(slice.depth->texture.height);
+            const auto pitch = width * 4u;
+            const auto bytes = static_cast<std::uint64_t>(pitch) * height;
+            const bool combined = slice.depth->texture.pixelFormat != MTLPixelFormatDepth32Float;
+            if (toStorage) [compute copyFromBuffer:(__bridge id<MTLBuffer>)buffer.buffer sourceOffset:buffer.offset sourceBytesPerRow:pitch sourceBytesPerImage:bytes sourceSize:MTLSizeMake(width, height, 1) toTexture:storage destinationSlice:slice.layer destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+            else [compute copyFromBuffer:(__bridge id<MTLBuffer>)buffer.buffer sourceOffset:buffer.offset sourceBytesPerRow:pitch sourceBytesPerImage:bytes sourceSize:MTLSizeMake(width, height, 1) toTexture:slice.depth->texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:combined ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
+        }
+        [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        if (Trace()) std::fprintf(stderr, "[metal] layered depth storage: %zu slices %s\n", slices.size(), toStorage ? "copied into the storage view" : "copied back into the depth surfaces");
+        if (toStorage) return;
+        for (const auto& slice : slices) {
+            auto& depth = *slice.depth;
+            if (depth.address == 0u || depth.guestBytes == 0u || depth.dirty) continue;
+            depth.dirty = true;
+            dirtyDepths.push_back(&depth);
+        }
+    }
+
     void dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
         if (shader.backend != ShaderRecompiler::ShaderBackendKind::Msl) throw std::runtime_error("AGC graphics: the Metal backend dispatches only MSL results");
         if (shader.msl.empty()) throw std::runtime_error("AGC graphics: the MSL result has no source");
@@ -2196,6 +2260,13 @@ struct VulkanDevice::State {
                 encodeUploads(compute, uses);
                 [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
             }
+            std::vector<std::pair<const ImageUse*, std::vector<DepthSlice>>> layered;
+            for (const auto& use : uses) {
+                auto slices = layeredDepthSlices(use);
+                if (slices.empty() || std::any_of(layered.begin(), layered.end(), [&](const auto& entry) { return entry.first->surface == use.surface; })) continue;
+                layered.emplace_back(&use, std::move(slices));
+            }
+            for (const auto& [use, slices] : layered) encodeLayeredDepthCopies(compute, (__bridge id<MTLTexture>)use->surface->texture.texture, slices, true);
             for (std::uint32_t slot = 0; slot < ArgumentSlots; ++slot) {
                 if (slots[slot] != 0) [table setAddress:slots[slot] atIndex:slot];
             }
@@ -2231,6 +2302,7 @@ struct VulkanDevice::State {
                     }
                     textures->EncodeWriteback((__bridge void*)compute, use.surface->texture, use.resource, use.address);
                 }
+                for (const auto& [use, slices] : layered) encodeLayeredDepthCopies(compute, (__bridge id<MTLTexture>)use->surface->texture.texture, slices, false);
             }
             ++epoch;
             ++encodedDispatches;
