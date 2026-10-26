@@ -2069,7 +2069,7 @@ struct VulkanDevice::State {
         const std::uint64_t ldsBytes = static_cast<std::uint64_t>(shader.workgroupMemoryDwords) * sizeof(std::uint32_t) * x * y * z;
         const auto threads = shader.hostThreadgroup;
         if (threads[0] == 0 || threads[1] == 0 || threads[2] == 0) throw std::runtime_error("AGC graphics: the MSL result has no threadgroup size");
-        if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error(shader.workgroupMemoryDwords != 0 ? "AGC graphics: Metal dispatch exceeds the threadgroup count limit and a split aliases the device-memory LDS slots" : "AGC graphics: Metal dispatch exceeds the threadgroup count limit");
+        if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error(shader.workgroupMemoryDwords != 0 ? "AGC graphics: Metal dispatch exceeds the threadgroup count limit and a split aliases the device-memory LDS slots" : "AGC graphics: Metal dispatch exceeds the threadgroup count limit (" + std::to_string(y) + "x" + std::to_string(z) + " groups, " + std::to_string(shader.workgroupMemoryDwords) + " workgroup memory dwords)");
         if (shader.workgroupMemoryDwords != 0 && (ldsBytes / sizeof(std::uint32_t) / shader.workgroupMemoryDwords != static_cast<std::uint64_t>(x) * y * z || ldsBytes > device->Limits().maxBufferBytes)) throw std::runtime_error("AGC graphics: Metal dispatch needs more device-memory LDS than one buffer holds");
         id<MTLComputePipelineState> state = pipeline(shader);
         @autoreleasepool {
@@ -2656,7 +2656,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         s.registry->Refresh();
         NSError* error = nil;
         MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
-        descriptor.maxBufferBindCount = ArgumentSlots;
+        descriptor.maxBufferBindCount = ShaderRecompiler::MetalAbi::WorkgroupMemorySlot + 1u;
         s.table = [s.native newArgumentTableWithDescriptor:descriptor error:&error];
         if (s.table == nil) throw std::runtime_error("AGC graphics: Metal argument table could not be created");
         descriptor.maxBufferBindCount = RenderSlots;
