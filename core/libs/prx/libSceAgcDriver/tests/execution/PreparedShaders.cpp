@@ -281,6 +281,7 @@ void PrepareMultisampledStorage(AgcDriver::VulkanDevice& device) {
             code[4] = variant == 0u ? 0x7e04020eu : 0x7e040282u;
             const auto handle = PrepareShader(request);
             const auto& artifact = GetPreparedArtifact(*handle);
+            if (request.backend != ShaderBackendKind::Spirv) continue;
             std::vector<std::uint32_t> samples;
             bool written = false;
             for (std::size_t offset = 5; offset < artifact.spirv.size(); offset += artifact.spirv[offset] >> 16u) {
