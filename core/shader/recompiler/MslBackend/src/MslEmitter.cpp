@@ -240,6 +240,16 @@ std::uint32_t WaveLdsScope(const IrProgram& program, const ShaderWorkgroupInputI
     return threads <= program.WaveSize() ? 1u : 2u;
 }
 
+bool HasSharedAtomic64(const IrProgram& program) {
+    for (const auto* block : program.BlockOrder()) {
+        for (const auto* inst : block->Instructions()) {
+            const auto name = IrOpcodeName(inst->Opcode());
+            if (name.starts_with("SharedAtomic") && name.ends_with("64")) return true;
+        }
+    }
+    return false;
+}
+
 bool HasBarrier(const IrProgram& program) {
     for (const auto* block : program.BlockOrder()) {
         for (const auto* inst : block->Instructions()) {
@@ -379,6 +389,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     state.scratchDwords = program.Info().scratchDwords;
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
+    state.lds64 = HasSharedAtomic64(program);
     state.stopAllowed = compute && state.waveLds == 0u && !HasBarrier(program) && state.lanes == 1u;
     state.stopOnUnlinkedCall = compute && state.waveLds == 0u && !HasBarrier(program);
     if (geometry) {
@@ -405,6 +416,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     }
     if (stage == IrShaderStage::Vertex && (state.features & Lane) != 0u) declare("const uint aps5_lane = 0u;");
     if ((state.features & Lds) != 0u) declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
+    if ((state.features & Lds64) != 0u) declare("threadgroup atomic_uint aps5_lds_lock;");
     ForEachHalf(state, [&](std::uint32_t) {
         if ((state.features & Scratch) != 0u) declare("uint aps5_scratch" + HalfSuffix() + "[" + std::to_string(std::max(state.scratchDwords, 1u)) + "];");
         if ((state.features & VectorWindow) != 0u) declare("uint aps5_window" + HalfSuffix() + "[" + std::to_string(std::max(state.windowDwords, 1u)) + "] = {};");
@@ -435,6 +447,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     }
     text += "kernel void " + std::string(MslEntryPoint) + "(" + Parameters(state) + ")\n{\n";
     text += declarations;
+    if ((state.features & Lds64) != 0u) text += "    if (aps5_index == 0u) atomic_store_explicit(&aps5_lds_lock, 0u, memory_order_relaxed);\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n";
     text += state.body;
     text += "}\n";
     return text;

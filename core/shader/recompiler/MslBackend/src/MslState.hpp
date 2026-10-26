@@ -43,7 +43,8 @@ enum Feature : std::uint32_t {
     Atomic64 = 1u << 27u,
     UpdateTable = 1u << 28u,
     Tables = 1u << 29u,
-    Gds = 1u << 30u
+    Gds = 1u << 30u,
+    Lds64 = 1u << 31u
 };
 
 enum : std::uint8_t {
@@ -66,6 +67,7 @@ struct State {
     std::uint32_t windowDwords = 0;
     std::uint32_t waveLds = 0;
     bool stopAllowed = false;
+    bool lds64 = false;
     bool stopOnUnlinkedCall = false;
     std::uint32_t lanes = 1;
     std::unordered_set<const IrValue*> hoisted;
