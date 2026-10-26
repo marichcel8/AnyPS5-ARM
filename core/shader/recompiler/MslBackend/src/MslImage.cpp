@@ -653,7 +653,6 @@ void EmitWrite(Access& access, const std::string& texture) {
     State& state = access.state;
     const auto shape = ShapeOf(access.image.dimension);
     if (access.image.resourceClass != ImageResourceClass::Storage) Fail(access.inst, "writes a sampled image");
-    if (shape.multisampled) throw MslUnsupported("MSL backend: multisampled storage image writes are not emitted");
     const bool integer = access.image.numericClass == IrTextureNumericClass::Uint;
     if (access.mem.imageDimension == RdnaImageDimension::Dim2DArray && access.image.dimension == RdnaImageDimension::Dim3D) {
         if (access.image.mipMode == ImageMipMode::DynamicStorage) throw MslUnsupported("MSL backend: a 2D-array address stored to a 3D image with dynamic mips is not emitted");
@@ -664,7 +663,8 @@ void EmitWrite(Access& access, const std::string& texture) {
     const auto coord = Temp(state);
     Line(state, "const auto " + coord + " = " + CoordU32(access) + ";");
     const auto texel = access.mem.imagePacked ? PackedStoreTexel(access, Typed(state, access.inst, 2u)) : StoreTexel(access, Typed(state, access.inst, 2u), integer);
-    if (shape.arrayed) Line(state, texture + ".write(" + texel + ", " + HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ");");
+    if (shape.multisampled) Line(state, texture + ".write(" + texel + ", " + SpatialPart(coord, shape) + (shape.arrayed ? ", " + coord + ".z" : "") + ", " + SampleIndex(access) + ");");
+    else if (shape.arrayed) Line(state, texture + ".write(" + texel + ", " + HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ");");
     else Line(state, texture + ".write(" + texel + ", " + HostPlane(coord, shape, false) + ");");
     Close(state);
 }
