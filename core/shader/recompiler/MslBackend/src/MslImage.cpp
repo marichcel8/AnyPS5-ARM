@@ -597,6 +597,8 @@ std::string StoreTexel(Access& access, const std::string& data, bool integer) {
         }
         if (component < sint.componentCount && sint.componentBits[component] < 32u) {
             values[component] = std::string(mem.dataBits == 16u ? "aps5_fmt_encode16(" : "aps5_fmt_encode(") + raw + ", 2u, " + U32(sint.componentBits[component]) + ")";
+        } else if (integer && mem.dataBits == 16u && component < sint.componentCount) {
+            values[component] = "as_type<uint>((as_type<int>(" + raw + ") << 16) >> 16)";
         } else if (integer) {
             values[component] = raw;
         } else if (mem.dataBits == 16u) {
