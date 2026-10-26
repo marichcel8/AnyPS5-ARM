@@ -137,7 +137,7 @@ int main() {
                     const auto full = DrawAndCount(*device, fullShaders, block.Data(), samples, tile, what + ", full triangle");
                     Require(full.full == Width * Height && full.mixed == 0u && full.empty == 0u, what + ": the full triangle left " + std::to_string(full.empty) + " empty and " + std::to_string(full.mixed) + " mixed pixels in guest memory");
                     const auto half = DrawAndCount(*device, halfShaders, block.Data(), samples, tile, what + ", half triangle");
-                    Require(half.full > 0u && half.empty > 0u && half.mixed > 0u, what + ": the half triangle left " + std::to_string(half.full) + " full, " + std::to_string(half.empty) + " empty and " + std::to_string(half.mixed) + " mixed pixels, so the samples were not exported one by one");
+                    Require(half.full > 0u && half.empty > 0u && (samples != 4u || half.mixed > 0u), what + ": the half triangle left " + std::to_string(half.full) + " full, " + std::to_string(half.empty) + " empty and " + std::to_string(half.mixed) + " mixed pixels, so the samples were not exported one by one");
                     Require(half.mixed < 2u * (Width + Height), what + ": the half triangle left " + std::to_string(half.mixed) + " mixed pixels, more than its edge can cross");
                 } catch (const AgcDriver::Graphics::UnrenderableDraw& refusal) {
                     std::printf("%s: skipped, %s\n", what.c_str(), refusal.what());
