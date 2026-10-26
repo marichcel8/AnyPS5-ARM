@@ -248,6 +248,10 @@ struct CachedSurface {
     std::uint64_t guestAddress = 0;
     std::uint64_t guestBytes = 0;
     std::uint64_t validEpoch = 0;
+    std::uint64_t uploadSeq = 0;
+    std::uint64_t uploadStamp = 0;
+    std::uint64_t uploadBase = 0;
+    std::uint64_t uploadBytes = 0;
     bool dirty = false;
     std::uint64_t drawnFrame = 0;
     bool scanned = false;
@@ -402,6 +406,7 @@ struct ImageUse {
     Graphics::GuestTextureResource resource{};
     std::uint64_t address = 0;
     bool written = false;
+    std::uint64_t stamp = 0;
 };
 
 struct PipelineEntry {
@@ -804,6 +809,36 @@ struct VulkanDevice::State {
     Metal::DynamicState boundDynamic;
     bool dynamicValid = false;
     std::uint64_t epoch = 1;
+    struct GpuWrite {
+        std::uint64_t begin;
+        std::uint64_t end;
+        std::uint64_t seq;
+    };
+    static constexpr std::size_t GpuWriteLimit = 1u << 14u;
+    std::vector<GpuWrite> gpuWrites;
+    std::uint64_t gpuWriteSeq = 0;
+    std::uint64_t gpuWriteFloor = 0;
+
+    void recordGpuWrite(std::uint64_t address, std::uint64_t bytes) {
+        const auto end = address + bytes;
+        ++gpuWriteSeq;
+        if (!gpuWrites.empty() && gpuWrites.back().begin == address && gpuWrites.back().end == end) {
+            gpuWrites.back().seq = gpuWriteSeq;
+            return;
+        }
+        if (gpuWrites.size() >= GpuWriteLimit) {
+            const auto drop = gpuWrites.size() / 2u;
+            gpuWriteFloor = gpuWrites[drop - 1u].seq;
+            gpuWrites.erase(gpuWrites.begin(), gpuWrites.begin() + static_cast<std::ptrdiff_t>(drop));
+        }
+        gpuWrites.push_back({address, end, gpuWriteSeq});
+    }
+
+    bool gpuWrittenSince(std::uint64_t address, std::uint64_t bytes, std::uint64_t seq) const {
+        if (seq < gpuWriteFloor) return true;
+        const auto end = address + bytes;
+        return std::any_of(gpuWrites.rbegin(), gpuWrites.rend(), [&](const GpuWrite& write) { return write.seq > seq && write.begin < end && address < write.end; });
+    }
     std::uint32_t encodedDispatches = 0;
     std::uint64_t recordedSinceSubmit = 0;
     std::uint32_t cbDraws = 0;
@@ -1156,17 +1191,26 @@ struct VulkanDevice::State {
         if (windows != nullptr) {
             if (const auto resolved = Metal::Resolve(*windows, address, bytes); resolved && (!writable || (resolved.window->writable && !resolved.window->copied))) {
                 resolvedBy = "window";
-                if (writable) noteWrite(address, bytes);
+                if (writable) {
+                    noteWrite(address, bytes);
+                    recordGpuWrite(address, bytes);
+                }
                 return resolved.deviceAddress;
             }
         }
         if (const auto* import = importHost(address, bytes)) {
             resolvedBy = "import";
-            if (writable) noteWrite(address, bytes);
+            if (writable) {
+                noteWrite(address, bytes);
+                recordGpuWrite(address, bytes);
+            }
             return import->buffer.gpuAddress + (address - import->span.base);
         }
         resolvedBy = writable ? "staged, written back" : "staged";
-        if (writable) noteWrite(address, bytes);
+        if (writable) {
+            noteWrite(address, bytes);
+            recordGpuWrite(address, bytes);
+        }
         auto buffer = device->NewSharedBuffer(bytes, "AnyPS5 staged guest range");
         if (!buffer) throw std::runtime_error("AGC graphics: Metal staging buffer could not be allocated");
         std::memcpy(buffer.contents, reinterpret_cast<const void*>(address), bytes);
@@ -1365,10 +1409,17 @@ struct VulkanDevice::State {
             for (auto& write : pendingWrites) {
                 if (write.serial == 0) write.serial = serial;
             }
-            for (const auto* surface : dirtySurfaces) noteWrite(surface->guestAddress, surface->guestBytes);
+            for (const auto* surface : dirtySurfaces) {
+                noteWrite(surface->guestAddress, surface->guestBytes);
+                recordGpuWrite(surface->guestAddress, surface->guestBytes);
+            }
             for (const auto* surface : dirtyDepths) {
                 noteWrite(surface->guestAddress, surface->guestBytes);
-                if (surface->hasStencilPlane) noteWrite(surface->stencilGuestAddress, surface->stencilGuestBytes);
+                recordGpuWrite(surface->guestAddress, surface->guestBytes);
+                if (surface->hasStencilPlane) {
+                    noteWrite(surface->stencilGuestAddress, surface->stencilGuestBytes);
+                    recordGpuWrite(surface->stencilGuestAddress, surface->stencilGuestBytes);
+                }
             }
             recordedSinceSubmit = 0;
             ++epoch;
@@ -1934,9 +1985,10 @@ struct VulkanDevice::State {
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
         auto& surface = *found;
         const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
+        const auto stamp = GuestMemory::TrackerGeneration();
         const auto address = resolve(resource.baseAddress, bytes, written, snapshots, &surface);
         bindLap(8);
-        uses.push_back({&surface, resource, address, written});
+        uses.push_back({&surface, resource, address, written, resolvedBy == "snapshot" ? 0u : stamp});
         Metal::ViewInfo view;
         view.kind = viewKind;
         view.changeKind = true;
@@ -2022,8 +2074,29 @@ struct VulkanDevice::State {
         return existing->second;
     }
 
+    bool uploadCurrent(const ImageUse& use) const {
+        static const bool everyBuffer = std::getenv("APS5_METAL_UPLOAD_EVERY_CB") != nullptr;
+        const auto& surface = *use.surface;
+        if (everyBuffer || use.written || surface.uploadStamp == 0) return false;
+        const auto base = use.resource.baseAddress;
+        const auto bytes = Graphics::DescribeSurface(use.resource).guestBytes;
+        if (surface.uploadBase != base || surface.uploadBytes != bytes) return false;
+        if (!GuestMemory::Watched(base, bytes) || gpuWrittenSince(base, bytes, surface.uploadSeq)) return false;
+        return GuestMemory::UnchangedSinceCollected(base, bytes, surface.uploadStamp);
+    }
+
     bool needsUpload(const std::vector<ImageUse>& uses) const {
-        return std::any_of(uses.begin(), uses.end(), [&](const ImageUse& use) { return !use.surface->dirty && !use.surface->scaled && use.surface->validEpoch != epoch; });
+        bool needed = false;
+        for (const auto& use : uses) {
+            auto& surface = *use.surface;
+            if (surface.dirty || surface.scaled || surface.validEpoch == epoch) continue;
+            if (uploadCurrent(use)) {
+                surface.validEpoch = epoch;
+                continue;
+            }
+            needed = true;
+        }
+        return needed;
     }
 
     void encodeUploads(id<MTL4ComputeCommandEncoder> compute, const std::vector<ImageUse>& uses) {
@@ -2031,10 +2104,15 @@ struct VulkanDevice::State {
             auto& surface = *use.surface;
             if (surface.dirty || surface.scaled || surface.validEpoch == epoch) continue;
             surface.validEpoch = epoch;
+            if (uploadCurrent(use)) continue;
             if (Trace()) std::fprintf(stderr, "[metal] upload: guest %016llx device %016llx, %ux%u, tile %u, format %u\n", static_cast<unsigned long long>(use.resource.baseAddress), static_cast<unsigned long long>(use.address), use.resource.width, use.resource.height, static_cast<unsigned>(use.resource.tileMode), use.resource.format);
             textures->EncodeUpload((__bridge void*)compute, surface.texture, use.resource, use.address, textures->DefaultUploadPath());
             ++cbUploads;
             cbMovedBytes += Graphics::DescribeSurface(use.resource).guestBytes;
+            surface.uploadSeq = gpuWriteSeq;
+            surface.uploadStamp = use.written ? 0u : use.stamp;
+            surface.uploadBase = use.resource.baseAddress;
+            surface.uploadBytes = Graphics::DescribeSurface(use.resource).guestBytes;
         }
     }
 
