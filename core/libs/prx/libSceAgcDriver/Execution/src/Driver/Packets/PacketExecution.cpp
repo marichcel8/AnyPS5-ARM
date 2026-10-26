@@ -40,7 +40,10 @@ bool orderedFills() {
 }
 
 bool pipelineDma() {
-    static const bool enabled = std::getenv("APS5_PIPELINE_DMA") != nullptr;
+    static const bool enabled = [] {
+        const char* text = std::getenv("APS5_PIPELINE_DMA");
+        return text != nullptr && text[0] != '0';
+    }();
     return enabled;
 }
 
