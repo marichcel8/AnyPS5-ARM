@@ -417,9 +417,12 @@ ImageKind ImageKindOf(std::uint32_t binding) {
 Metal::PixelFormat SrgbView(Metal::PixelFormat format) {
     using enum Metal::PixelFormat;
     switch (format) {
-    case R8Unorm: return R8UnormSrgb;
-    case RG8Unorm: return RG8UnormSrgb;
-    case RGBA8Unorm: return RGBA8UnormSrgb;
+    case R8Unorm:
+    case R8Snorm: return R8UnormSrgb;
+    case RG8Unorm:
+    case RG8Snorm: return RG8UnormSrgb;
+    case RGBA8Unorm:
+    case RGBA8Snorm: return RGBA8UnormSrgb;
     case BGRA8Unorm: return BGRA8UnormSrgb;
     case BC1RGBA: return BC1RGBASrgb;
     case BC2RGBA: return BC2RGBASrgb;

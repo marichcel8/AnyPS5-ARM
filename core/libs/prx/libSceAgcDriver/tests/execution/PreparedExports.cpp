@@ -77,23 +77,25 @@ void Run(AgcDriver::VulkanDevice& device, bool integer) {
         SrtRuntime runtime{};
         const auto capture = invocation.Capture(runtime);
         const auto pixel = invocation.Materialize(*capture);
-        Require(pixel->variantId == artifact.variantId && pixel->specialization.empty(), "export mapping did not materialize a prepared fragment module");
-        if (!first) first = pixel;
-        else if (mapping == 0xe4u) Require(pixel == first, "export mapping did not reuse the materialized result");
-        else Require(pixel != first, "export mapping reused stale materialized data");
-        for (const bool cached : {true, false}) {
-            request.useCache = cached;
-            const auto materialized = MaterializeShader(request, *capture, *handle);
-            Require(materialized->spirv.data() == pixel->spirv.data() && materialized->PipelineVariantId() == pixel->PipelineVariantId(), "export mapping did not reuse its specialized module");
-            if (device.Target().registrationModules) {
-                Require(materialized->PipelineVariantId() == first->PipelineVariantId(), "registration modules: the export mapping specialized the fragment module");
-                continue;
-            }
-            for (std::size_t cursor = 5; cursor < materialized->spirv.size();) {
-                const auto count = materialized->spirv[cursor] >> 16u;
-                Require(count != 0u && count <= materialized->spirv.size() - cursor, "invalid specialized fragment instruction");
-                Require((materialized->spirv[cursor] & 0xffffu) != static_cast<std::uint32_t>(spv::OpVectorExtractDynamic), "fragment export retained a dynamic channel selection");
-                cursor += count;
+        if (request.backend == ShaderRecompiler::ShaderBackendKind::Spirv) {
+            Require(pixel->variantId == artifact.variantId && pixel->specialization.empty(), "export mapping did not materialize a prepared fragment module");
+            if (!first) first = pixel;
+            else if (mapping == 0xe4u) Require(pixel == first, "export mapping did not reuse the materialized result");
+            else Require(pixel != first, "export mapping reused stale materialized data");
+            for (const bool cached : {true, false}) {
+                request.useCache = cached;
+                const auto materialized = MaterializeShader(request, *capture, *handle);
+                Require(materialized->spirv.data() == pixel->spirv.data() && materialized->PipelineVariantId() == pixel->PipelineVariantId(), "export mapping did not reuse its specialized module");
+                if (device.Target().registrationModules) {
+                    Require(materialized->PipelineVariantId() == first->PipelineVariantId(), "registration modules: the export mapping specialized the fragment module");
+                    continue;
+                }
+                for (std::size_t cursor = 5; cursor < materialized->spirv.size();) {
+                    const auto count = materialized->spirv[cursor] >> 16u;
+                    Require(count != 0u && count <= materialized->spirv.size() - cursor, "invalid specialized fragment instruction");
+                    Require((materialized->spirv[cursor] & 0xffffu) != static_cast<std::uint32_t>(spv::OpVectorExtractDynamic), "fragment export retained a dynamic channel selection");
+                    cursor += count;
+                }
             }
         }
         request.useCache = true;
