@@ -2860,7 +2860,7 @@ auto VulkanDevice::Target() const -> ShaderRecompiler::SpirvTarget { return stat
 
 auto VulkanDevice::ComputeTarget(std::uint32_t) const -> ShaderRecompiler::SpirvTarget { return state->target; }
 
-auto VulkanDevice::ComputeFullSubgroups() const -> bool { return true; }
+auto VulkanDevice::ComputeFullSubgroups() const -> bool { return false; }
 
 auto VulkanDevice::GeometryLimits() const -> std::optional<ShaderRecompiler::GeometryStageLimits> { return {}; }
 

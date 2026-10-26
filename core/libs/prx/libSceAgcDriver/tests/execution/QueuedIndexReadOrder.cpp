@@ -349,6 +349,10 @@ int main() {
     setenv("APS5_PIPELINE_DMA", "1", 1);
 #endif
     try {
+#ifdef ANYPS5_NO_LAZY_STORAGE_WRITEBACK
+        std::puts("skipped, the Metal backend writes storage images back immediately, it has no pending write-back to order against");
+        return VulkanTestSkipped;
+#endif
         {
             const auto device = OpenVulkanTestDevice();
             if (!device) return VulkanTestSkipped;

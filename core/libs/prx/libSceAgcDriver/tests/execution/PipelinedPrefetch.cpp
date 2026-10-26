@@ -95,6 +95,9 @@ int main() {
     _putenv_s("APS5_PIPELINED_DRAWS", "1");
 #else
     setenv("APS5_PIPELINED_DRAWS", "1", 1);
+#ifdef __APPLE__
+    setenv("APS5_PIPELINE_DMA", "0", 1);
+#endif
 #endif
     try {
         for (std::size_t i = 0; i < Source.size(); ++i) Source[i] = static_cast<std::uint32_t>(i * 2654435761u);
