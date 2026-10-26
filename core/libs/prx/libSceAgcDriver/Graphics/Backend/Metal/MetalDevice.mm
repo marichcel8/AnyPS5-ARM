@@ -3028,8 +3028,11 @@ auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& sha
     std::array<std::uint32_t, 3> groups{};
     std::memcpy(groups.data(), reinterpret_cast<const void*>(arguments), sizeof(groups));
     const auto readMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    const int reason = shader.workgroupMemoryDwords != 0 ? 8 : 0;
+    const auto& limit = state->groupLimit;
+    if (groups[0] > limit[0] || groups[1] > limit[1] || groups[2] > limit[2]) return {reason, readMs};
     state->dispatch(shader, groups[0], groups[1], groups[2], snapshots);
-    return {shader.workgroupMemoryDwords != 0 ? 8 : 0, readMs};
+    return {reason, readMs};
 }
 
 auto VulkanDevice::PrepareRecipe(const std::shared_ptr<const Recipe>&, bool) -> std::shared_ptr<RecipeHit> { return {}; }
