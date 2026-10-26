@@ -2006,7 +2006,7 @@ struct VulkanDevice::State {
                 if (buffer >= RenderSlots) throw std::runtime_error("AGC graphics: Metal draw has more vertex streams than buffer slots");
                 request.vertexAttributes.push_back({attribute.location, static_cast<std::uint32_t>(format), buffer, 0});
                 const auto packed = (decoded.bytes + 3u) & ~3u;
-                if (Graphics::NullVertexDescriptor(attribute) || Graphics::VertexFetchOutOfRange(attribute)) {
+                if (Graphics::NullVertexDescriptor(attribute) || Graphics::VertexFetchOutOfRange(attribute) || attribute.resource.fields[2] == 0u) {
                     request.vertexBuffers.push_back({buffer, packed, Metal::VertexStep::Constant});
                     vertexBuffers.push_back(uploadBytes(nullptr, 0, std::max<std::size_t>(packed, 16u)));
                     continue;
