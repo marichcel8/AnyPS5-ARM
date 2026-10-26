@@ -1,5 +1,6 @@
 #ifdef __APPLE__
 #include <crt_externs.h>
+#include <mach-o/dyld.h>
 #endif
 #include "prx/libc/include/Api.hpp"
 #include "prx/libSceLibcInternal/include/Api.hpp"
@@ -212,11 +213,31 @@ static std::filesystem::path OwnExecutablePath() {
     const DWORD length = GetModuleFileNameW(nullptr, own.data(), static_cast<DWORD>(own.size()));
     own.resize(length);
     return std::filesystem::path(own);
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> executable(size);
+    std::error_code error;
+    if (_NSGetExecutablePath(executable.data(), &size) != 0) return {};
+    return std::filesystem::canonical(executable.data(), error);
 #else
     std::error_code error;
     return std::filesystem::read_symlink("/proc/self/exe", error);
 #endif
 }
+
+#ifndef _WIN32
+static volatile std::sig_atomic_t spawnedChild = 0;
+
+static void KillSpawnedChild(int) {
+    if (spawnedChild > 0) {
+        kill(spawnedChild, SIGKILL);
+        kill(spawnedChild, SIGCONT);
+    }
+    std::signal(SIGABRT, SIG_DFL);
+    std::abort();
+}
+#endif
 
 static std::int32_t SpawnChild(const char* role) {
     const auto own = OwnExecutablePath();
@@ -248,6 +269,10 @@ static std::int32_t SpawnChild(const char* role) {
     std::int32_t processId = 0;
     Check(posix_spawn_nid_postfix(&processId, program, nullptr, nullptr, arguments, environment.data()) == 0);
     Check(processId > 0);
+#ifndef _WIN32
+    spawnedChild = processId;
+    std::signal(SIGABRT, KillSpawnedChild);
+#endif
     return processId;
 }
 
