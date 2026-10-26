@@ -154,7 +154,10 @@ std::vector<DepthMetadataFillRecord> DepthMetadataFillsSince(std::uint64_t gener
     return fills;
 }
 
-bool NoteHtileDepthClear(std::uint64_t, std::size_t, std::size_t) { return false; }
+bool NoteHtileDepthClear(std::uint64_t htileAddress, std::size_t bytes, std::size_t) {
+    NoteDepthMetadataFill(htileAddress, bytes, 0xfffffff0u);
+    return false;
+}
 
 void NoteKeysFillOnGpu(std::uint64_t, std::size_t, DccKeys) {}
 
