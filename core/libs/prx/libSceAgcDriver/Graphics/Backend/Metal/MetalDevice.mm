@@ -2279,6 +2279,20 @@ struct VulkanDevice::State {
     }
 
     void draw(const Graphics::State& submitted, const Pm4::DrawParameters& submittedParams, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+        if (submitted.depthBias && submitted.depthBiasPerFace && (submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN)) {
+            if (submitted.cullMode != VK_CULL_MODE_NONE) throw std::runtime_error("AGC graphics: per-face depth bias needs both faces rasterized");
+            auto front = submitted;
+            front.depthBiasPerFace = false;
+            front.cullMode = VK_CULL_MODE_BACK_BIT;
+            auto back = submitted;
+            back.depthBiasPerFace = false;
+            back.cullMode = VK_CULL_MODE_FRONT_BIT;
+            back.depthBiasConstant = submitted.backDepthBiasConstant;
+            back.depthBiasSlope = submitted.backDepthBiasSlope;
+            draw(front, submittedParams, shaders, snapshots);
+            draw(back, submittedParams, shaders, snapshots);
+            return;
+        }
         if (submittedParams.indirect) throw std::runtime_error("AGC graphics: Metal indirect draws are not wired yet");
         if (submittedParams.indexCount == 0 || submittedParams.instanceCount == 0) return;
         if (submittedParams.indexed && submittedParams.indexSize != 2u && submittedParams.indexSize != 4u) throw std::runtime_error("AGC graphics: only uint16 and uint32 index buffers are supported");
