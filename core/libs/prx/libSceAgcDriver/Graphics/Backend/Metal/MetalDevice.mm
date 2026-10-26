@@ -1642,7 +1642,7 @@ struct VulkanDevice::State {
         view.pixelFormat = numeric ? NumericView(surface.texture.pixelFormat, *numeric) : surface.texture.pixelFormat;
         if (forceSrgb && !Graphics::IsSrgbTextureFormat(resource.format) && !Graphics::IgnoresForcedDegamma(resource.format)) {
             view.pixelFormat = SrgbView(view.pixelFormat);
-            if (view.pixelFormat == Metal::PixelFormat::Invalid) throw std::runtime_error("AGC graphics: a sampler forces sRGB decoding on guest format " + std::to_string(resource.format) + ", which has no Metal sRGB view");
+            if (view.pixelFormat == Metal::PixelFormat::Invalid) throw std::runtime_error("AGC graphics: a texture of guest format " + std::to_string(resource.format) + ", which is not sRGB and has no sRGB view, is sampled through a sampler that forces sRGB decoding, which is not implemented");
         }
         view.baseLevel = std::min(resource.baseLevel, info.mipLevels - 1u);
         view.levelCount = std::min(std::max(resource.lastLevel, view.baseLevel), info.mipLevels - 1u) - view.baseLevel + 1u;
