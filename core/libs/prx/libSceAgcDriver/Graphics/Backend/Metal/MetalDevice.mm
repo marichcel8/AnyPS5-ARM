@@ -191,6 +191,8 @@ struct CachedSurface {
     std::map<ViewKey, Metal::TextureHandle> views;
     Graphics::GuestTextureResource resource{};
     std::uint64_t address = 0;
+    std::uint64_t guestAddress = 0;
+    std::uint64_t guestBytes = 0;
     std::uint64_t validEpoch = 0;
     bool dirty = false;
 };
@@ -241,11 +243,6 @@ struct IdentityHash {
 bool Verbose() {
     static const bool verbose = std::getenv("APS5_METAL_VERBOSE") != nullptr;
     return verbose;
-}
-
-bool LazyWriteback() {
-    static const bool lazy = std::getenv("APS5_METAL_LAZY_WRITEBACK") != nullptr;
-    return lazy;
 }
 
 bool Trace() {
@@ -688,8 +685,9 @@ struct VulkanDevice::State {
         return &imports.back();
     }
 
-    std::uint64_t resolve(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+    std::uint64_t resolve(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots, const CachedSurface* self = nullptr, bool settle = true) {
         if (address == 0 || bytes == 0) return 0;
+        if (settle) writebackOverlapping(address, bytes, self);
         if (!writable) {
             for (const auto& snapshot : snapshots) {
                 if (address >= snapshot.address && bytes <= snapshot.bytes.size() && address - snapshot.address <= snapshot.bytes.size() - bytes) {
@@ -765,23 +763,38 @@ struct VulkanDevice::State {
         return encoder;
     }
 
-    void writebackDirty() {
-        if (dirtySurfaces.empty()) return;
+    void encodeWritebacks(const std::vector<CachedSurface*>& surfaces) {
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-        writebackSurfaces += dirtySurfaces.size();
-        for (auto* surface : dirtySurfaces) {
+        writebackSurfaces += surfaces.size();
+        for (auto* surface : surfaces) {
             textures->EncodeWriteback((__bridge void*)compute, surface->texture, surface->resource, surface->address);
             surface->dirty = false;
         }
-        dirtySurfaces.clear();
         [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     }
 
-    void flush() {
+    void writebackDirty() {
+        if (dirtySurfaces.empty()) return;
+        encodeWritebacks(dirtySurfaces);
+        dirtySurfaces.clear();
+    }
+
+    void writebackOverlapping(std::uint64_t address, std::uint64_t bytes, const CachedSurface* self) {
+        if (dirtySurfaces.empty() || bytes == 0) return;
+        std::vector<CachedSurface*> hit;
+        for (auto* surface : dirtySurfaces) {
+            if (surface != self && surface->guestAddress < address + bytes && address < surface->guestAddress + surface->guestBytes) hit.push_back(surface);
+        }
+        if (hit.empty()) return;
+        encodeWritebacks(hit);
+        std::erase_if(dirtySurfaces, [](const CachedSurface* surface) { return !surface->dirty; });
+    }
+
+    void flush(bool settleSurfaces = true) {
         if (!open) return;
         @autoreleasepool {
-            if (!LazyWriteback()) writebackDirty();
+            if (settleSurfaces) writebackDirty();
             endRender();
             endCompute();
             sync->EncodeLabels(open);
@@ -851,7 +864,7 @@ struct VulkanDevice::State {
 
     Completion* afterRecorded() {
         reap();
-        if (open) flush();
+        if (open) flush(false);
         if (completions.empty()) return nullptr;
         auto& [serial, completion] = *completions.rbegin();
         if (!completion.waking) {
@@ -1151,7 +1164,7 @@ struct VulkanDevice::State {
                      static_cast<unsigned long long>(labels[0] - reportLabels[0]), static_cast<unsigned long long>(labels[1] - reportLabels[1]), static_cast<unsigned long long>(labels[2] - reportLabels[2]),
                      static_cast<unsigned long long>((snapshotBytes - reportSnapshotBytes) / 1024));
         if (reportFrames != 0u) std::fprintf(stderr, "[metal] present per flip: %.2f ms Present call (paced %.2f ms, drawable wait %.2f ms), %.2f ms wait for scanout serial\n", presentMs[0] / static_cast<double>(reportFrames), presentMs[2] / static_cast<double>(reportFrames), presentMs[3] / static_cast<double>(reportFrames), presentMs[1] / static_cast<double>(reportFrames));
-        std::fprintf(stderr, "[metal] flushes %llu, writeback surfaces %llu, submit-to-completion %.2f ms avg, %.2f ms max over %llu completions%s\n", static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(writebackSurfaces), completedFlushes != 0u ? completionMsTotal / static_cast<double>(completedFlushes) : 0.0, completionMsMax, static_cast<unsigned long long>(completedFlushes), LazyWriteback() ? " (lazy writeback)" : "");
+        std::fprintf(stderr, "[metal] flushes %llu, writeback surfaces %llu, submit-to-completion %.2f ms avg, %.2f ms max over %llu completions\n", static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(writebackSurfaces), completedFlushes != 0u ? completionMsTotal / static_cast<double>(completedFlushes) : 0.0, completionMsMax, static_cast<unsigned long long>(completedFlushes),
         flushes = 0;
         writebackSurfaces = 0;
         completedFlushes = 0;
@@ -1235,7 +1248,7 @@ struct VulkanDevice::State {
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
         auto& surface = *found;
         const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
-        const auto address = resolve(resource.baseAddress, bytes, written, snapshots);
+        const auto address = resolve(resource.baseAddress, bytes, written, snapshots, &surface);
         uses.push_back({&surface, resource, address, written});
         Metal::ViewInfo view;
         view.kind = viewKind;
@@ -1456,6 +1469,8 @@ struct VulkanDevice::State {
             std::lock_guard lock(mutex);
             const EncodingScope encoding;
             registry->Refresh();
+            begin();
+            writebackDirty();
             begin();
             std::array<std::uint64_t, ArgumentSlots> slots{};
             std::vector<ImageUse> uses;
@@ -1738,7 +1753,7 @@ struct VulkanDevice::State {
                 for (auto& [surface, resource] : targets) {
                     if (surface->dirty) continue;
                     surface->resource = resource;
-                    surface->address = resolve(resource.baseAddress, Graphics::DescribeSurface(resource).guestBytes, true, {});
+                    surface->address = resolve(resource.baseAddress, Graphics::DescribeSurface(resource).guestBytes, true, {}, surface);
                     loads.push_back({surface, resource, surface->address, false});
                 }
             }
@@ -1777,7 +1792,7 @@ struct VulkanDevice::State {
             const auto primitive = static_cast<MTLPrimitiveType>(translated.primitive);
             if (params.indexed) {
                 const auto bytes = static_cast<std::uint64_t>(params.indexCount) * params.indexSize;
-                const auto indices = resolve(params.indexAddress, bytes, false, snapshots);
+                const auto indices = resolve(params.indexAddress, bytes, false, snapshots, nullptr, false);
                 [render drawIndexedPrimitives:primitive indexCount:params.indexCount indexType:params.indexSize == 2u ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferLength:bytes instanceCount:params.instanceCount baseVertex:static_cast<NSInteger>(params.firstVertex) baseInstance:params.firstInstance];
             } else {
                 [render drawPrimitives:primitive vertexStart:params.firstVertex vertexCount:params.indexCount instanceCount:params.instanceCount baseInstance:params.firstInstance];
@@ -1786,6 +1801,8 @@ struct VulkanDevice::State {
                 surface->validEpoch = epoch;
                 if (surface->dirty) continue;
                 surface->dirty = true;
+                surface->guestAddress = resource.baseAddress;
+                surface->guestBytes = Graphics::DescribeSurface(resource).guestBytes;
                 dirtySurfaces.push_back(surface);
             }
             ++recordedSinceSubmit;

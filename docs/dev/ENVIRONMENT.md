@@ -16,7 +16,6 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `APS5_METAL_TEXTURE_MIB` | number | `core/libs/prx/libSceAgcDriver/Graphics/Metal/Textures.mm` | a third of the recommended working set | Metal texture memory budget in MiB; creating a texture over it fails |
 | `APS5_METAL_SERIALIZER` | string | `core/libs/prx/libSceAgcDriver/Graphics/Metal/MetalCompiler.mm` | binaries | `descriptors` or `both` changes what the Metal pipeline serializer captures for the shader archive; only `binaries` serializes on macOS 27.2 |
 | `APS5_METAL_UPLOAD` | string | `core/libs/prx/libSceAgcDriver/Graphics/Metal/Textures.mm` | direct | `staged` detiles Metal texture uploads into a private staging buffer and blits them instead of writing the texture directly |
-| `APS5_METAL_LAZY_WRITEBACK` | presence | `core/libs/prx/libSceAgcDriver/Graphics/Backend/Metal/MetalDevice.mm` |  | experiment: skips the render-target writeback into guest memory at every Metal submission; the scanout still writes back before it reads |
 | `APS5_SKIP_TIMING_TESTS` | presence | `core/libs/tests/PreciseWait.cpp` |  | treats the timing tests' runner as preempted, so they skip without probing the clock |
 | `APS5_USBD_DEVICE` | string | `core/libs/tests/GuestUsbd.cpp` |  | selects the USB device a test drives, as vendor:product in hex |
 
