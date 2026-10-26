@@ -210,7 +210,10 @@ struct Server {
         } else {
             mbedtls_ssl_set_bio(&ssl, &client, mbedtls_net_send, mbedtls_net_recv, nullptr);
             const int handshake = mbedtls_ssl_handshake(&ssl);
-            if (handshake != 0) failure = "server handshake failed, error " + std::to_string(handshake);
+            if (handshake != 0) {
+                failure = "server handshake failed, error " + std::to_string(handshake);
+                std::fprintf(stderr, "%s\n", failure.c_str());
+            }
             else if (mode == Serve::Exchange) Exchange(ssl);
             else if (mode == Serve::Close) mbedtls_ssl_close_notify(&ssl);
             else if (mode == Serve::Reset) Reset(ssl, client);

@@ -1,5 +1,6 @@
 #include "prx/libSceSsl/include/Ssl.hpp"
 #ifdef _WIN32
+#include <cstdio>
 #include <winsock2.h>
 #else
 #include <sys/socket.h>
@@ -907,6 +908,7 @@ int Establish(const char* function, int sslConnectionId, std::shared_ptr<Session
                 return ErrorFatalAlert;
             }
             if (result != 0) {
+                std::fprintf(stderr, "ssl handshake result -0x%x\n", static_cast<unsigned>(-result));
                 {
                     std::lock_guard lock(State().mutex);
                     const auto found = State().connections.find(sslConnectionId);
