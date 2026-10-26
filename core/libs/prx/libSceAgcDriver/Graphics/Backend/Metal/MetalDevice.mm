@@ -2371,6 +2371,8 @@ struct VulkanDevice::State {
             depthImport = depthChanged || stencilChanged;
         } else if (!depth.initialized || !depth.coherent) {
             depthImport = false;
+        } else {
+            stencilChanged = plane->stencil;
         }
         const bool stencilImport = plane->stencil && !depth.stencilClearRequested && !depth.fillStencil && (stencilChanged || (!depth.stencilInitialized && !(depth.freshStencil && target.htileAddress != 0u)));
         if (!depthImport && !stencilImport) return;
