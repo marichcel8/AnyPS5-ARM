@@ -245,6 +245,9 @@ static std::int32_t SpawnChild(const char* role) {
     std::error_code error;
     std::filesystem::copy_file(own, target, std::filesystem::copy_options::overwrite_existing, error);
     Check(!error);
+#ifdef __APPLE__
+    Check(std::system(("codesign --force --sign - '" + target.string() + "' >/dev/null 2>&1").c_str()) == 0);
+#endif
     const auto app0 = std::filesystem::current_path() / "app0";
     Check(std::filesystem::create_directories(app0) || std::filesystem::exists(app0));
     { std::ofstream file(app0 / "child.bin"); file << "child"; }
