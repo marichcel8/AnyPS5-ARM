@@ -24,7 +24,6 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
-#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -204,26 +203,18 @@ struct Server {
         mbedtls_net_init(&client);
         mbedtls_ssl_context ssl;
         mbedtls_ssl_init(&ssl);
-        const int accepted = mbedtls_net_accept(&listener, &client, nullptr, 0, nullptr);
-        const int acceptErrno = errno;
-        const int setup = accepted == 0 ? mbedtls_ssl_setup(&ssl, &config) : 0;
-        if (accepted != 0 || setup != 0) {
-            failure = "server accept or setup failed, accept -" + std::to_string(-accepted) + " errno " + std::to_string(acceptErrno) + ", setup -" + std::to_string(-setup);
+        if (mbedtls_net_accept(&listener, &client, nullptr, 0, nullptr) != 0 || mbedtls_ssl_setup(&ssl, &config) != 0) {
+            failure = "server accept or setup failed";
         } else if (mode == Serve::Alert) {
             Alert(client);
         } else {
             mbedtls_ssl_set_bio(&ssl, &client, mbedtls_net_send, mbedtls_net_recv, nullptr);
             const int handshake = mbedtls_ssl_handshake(&ssl);
-            std::fprintf(stderr, "server handshake returned -0x%x\n", static_cast<unsigned>(-handshake));
-            if (handshake != 0) {
-                failure = "server handshake failed, error " + std::to_string(handshake);
-                std::fprintf(stderr, "%s\n", failure.c_str());
-            }
+            if (handshake != 0) failure = "server handshake failed, error " + std::to_string(handshake);
             else if (mode == Serve::Exchange) Exchange(ssl);
             else if (mode == Serve::Close) mbedtls_ssl_close_notify(&ssl);
             else if (mode == Serve::Reset) Reset(ssl, client);
         }
-        if (!failure.empty()) std::fprintf(stderr, "server: %s\n", failure.c_str());
         mbedtls_ssl_free(&ssl);
         mbedtls_net_free(&client);
     }
@@ -339,9 +330,7 @@ int main(int argc, char** argv) {
     const int empty = sceSslInit_nid_postfix(256 * 1024);
     const int untrustedSocket = sockets.Open(server.port);
     const int untrusted = sceSslCreateConnection(empty, untrustedSocket, "localhost");
-    const int firstConnect = sceSslConnect(untrusted);
-    std::fprintf(stderr, "sceSslConnect returned 0x%x, the verify result is 0x%x\n", static_cast<unsigned>(firstConnect), static_cast<unsigned>(ErrorUnknownCa));
-    Require(firstConnect == ErrorUnknownCa, "a server certificate without a loaded CA passed the initial verify options");
+    Require(sceSslConnect(untrusted) == ErrorUnknownCa, "a server certificate without a loaded CA passed the initial verify options");
     Require(sceSslConnect(untrusted) == ErrorUnknownCa, "a second connect did not repeat the verification result");
     std::array<char, 16> scratch{};
     Require(Throws([&] { sceSslRead(untrusted, scratch.data(), 1, 0); }), "a connection that failed verification was readable");
