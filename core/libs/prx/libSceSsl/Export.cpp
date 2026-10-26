@@ -1,6 +1,6 @@
 #include "prx/libSceSsl/include/Ssl.hpp"
-#ifdef _WIN32
 #include <cstdio>
+#ifdef _WIN32
 #include <winsock2.h>
 #else
 #include <sys/socket.h>
