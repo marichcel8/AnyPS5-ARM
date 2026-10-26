@@ -68,13 +68,15 @@ struct Counts {
     std::uint32_t mixed = 0;
 };
 
-Counts DrawAndCount(AgcDriver::VulkanDevice& device, const Shaders& compiled, std::uint8_t* block, std::uint32_t samples, ColorTileMode tile, const std::string& what) {
+Counts DrawAndCount(AgcDriver::VulkanDevice& device, const Shaders& compiled, std::uint8_t* arena, std::uint32_t samples, ColorTileMode tile, const std::string& what) {
+    static std::uint32_t slot = 0;
     const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
         {ShaderRecompiler::ShaderStage::Vertex, &compiled.vertex, 0},
         {ShaderRecompiler::ShaderStage::Fragment, &compiled.pixel, PixelPushOffset(compiled.vertexPush, device.Target())}
     }};
     const MultisampleTextureLayout layout(AgcDriver::Graphics::ColorTextureTileMode(tile), 4u, samples, Width, Height, 1u);
-    Require(layout.Bytes() <= BlockBytes, what + ": the layout does not fit the guest block");
+    Require(layout.Bytes() <= 65536u && (slot + 1u) * 65536u <= BlockBytes, what + ": the layout does not fit its slot of the guest block");
+    auto* block = arena + static_cast<std::size_t>(slot++) * 65536u;
     std::memset(block, 0, layout.Bytes());
     AgcDriver::Graphics::State state{};
     state.stages = {AgcDriver::Graphics::ShaderPath::Vertex, 0u, 32u, 32u, std::nullopt, std::nullopt};
