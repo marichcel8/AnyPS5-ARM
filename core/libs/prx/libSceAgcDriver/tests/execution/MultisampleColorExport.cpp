@@ -69,7 +69,7 @@ struct Counts {
     std::uint32_t mixed = 0;
 };
 
-Counts DrawAndCount(AgcDriver::VulkanDevice& device, const Shaders& compiled, std::uint8_t* arena, std::uint32_t samples, ColorTileMode tile, const std::string& what) {
+Counts DrawAndCount(AgcDriver::VulkanDevice& device, const Shaders& compiled, std::uint8_t* arena, std::uint32_t samples, ColorTileMode tile, const std::string& what, bool perSample = false) {
     static std::uint32_t slot = 0;
     const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
         {ShaderRecompiler::ShaderStage::Vertex, &compiled.vertex, 0},
@@ -88,6 +88,7 @@ Counts DrawAndCount(AgcDriver::VulkanDevice& device, const Shaders& compiled, st
     state.colors = {state.color};
     state.hasColorTarget = true;
     state.samples = samples;
+    state.perSampleShading = perSample;
     state.renderExtent = {Width, Height};
     state.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     state.viewport = {0, static_cast<float>(Height), static_cast<float>(Width), -static_cast<float>(Height), 0, 1};
@@ -140,6 +141,18 @@ int main() {
                     const auto half = DrawAndCount(*device, halfShaders, block.Data(), samples, tile, what + ", half triangle");
                     Require(half.full > 0u && half.empty > 0u && (samples != 4u || half.mixed > 0u), what + ": the half triangle left " + std::to_string(half.full) + " full, " + std::to_string(half.empty) + " empty and " + std::to_string(half.mixed) + " mixed pixels, so the samples were not exported one by one");
                     Require(half.mixed < 2u * (Width + Height), what + ": the half triangle left " + std::to_string(half.mixed) + " mixed pixels, more than its edge can cross");
+                } catch (const AgcDriver::Graphics::UnrenderableDraw& refusal) {
+                    std::printf("%s: skipped, %s\n", what.c_str(), refusal.what());
+                }
+            }
+        }
+        if (TargetHasCapability(device->Target(), spv::CapabilityInterpolationFunction)) {
+            const auto iterated = DepthFastClearHarness::Compile(*device, Full.data(), true);
+            for (const auto samples : {2u, 4u, 8u}) {
+                const std::string what = std::to_string(samples) + " samples, per-sample shading";
+                try {
+                    const auto full = DrawAndCount(*device, iterated, block.Data(), samples, ColorTileMode::Z64KBX, what, true);
+                    Require(full.full == Width * Height && full.mixed == 0u && full.empty == 0u, what + ": the full triangle left " + std::to_string(full.empty) + " empty and " + std::to_string(full.mixed) + " mixed pixels in guest memory");
                 } catch (const AgcDriver::Graphics::UnrenderableDraw& refusal) {
                     std::printf("%s: skipped, %s\n", what.c_str(), refusal.what());
                 }

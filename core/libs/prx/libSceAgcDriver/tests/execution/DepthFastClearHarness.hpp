@@ -72,7 +72,7 @@ struct Shaders {
     std::uint32_t vertexPush = 0;
 };
 
-inline Shaders Compile(AgcDriver::VulkanDevice& device, const void* vertices = Triangles().data()) {
+inline Shaders Compile(AgcDriver::VulkanDevice& device, const void* vertices = Triangles().data(), bool iteratesSamples = false) {
     const auto target = device.Target();
     Shaders shaders;
     std::vector<std::uint32_t> vertexUserData(4, 0u);
@@ -93,6 +93,7 @@ inline Shaders Compile(AgcDriver::VulkanDevice& device, const void* vertices = T
     pixel.wave32 = true;
     pixel.inputAddr = ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PositionX) | ShaderRecompiler::PixelInputBit(ShaderRecompiler::PixelInput::PositionY);
     pixel.posX = true;
+    pixel.iteratesSamples = iteratesSamples;
     pixel.posY = true;
     pixel.targetOutputMode[0] = 9;
     pixel.targetExportMapping.fill(0xe4u);
