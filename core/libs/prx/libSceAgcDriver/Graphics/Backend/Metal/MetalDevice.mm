@@ -90,6 +90,11 @@ kernel void aps5_scanout(device const uint* source [[buffer(0)]], constant Scano
     }
     target.write(color / 255.0f, gid);
 }
+kernel void aps5_scanout_texture(constant uint& swapRedBlue [[buffer(0)]], texture2d<float, access::read> source [[texture(0)]], texture2d<float, access::write> target [[texture(1)]], uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= target.get_width() || gid.y >= target.get_height()) return;
+    const float4 color = source.read(gid);
+    target.write(float4(swapRedBlue != 0u ? color.bgr : color.rgb, 1.0f), gid);
+}
 )";
 
 struct ScanoutParams {
@@ -571,6 +576,7 @@ struct VulkanDevice::State {
     std::uint32_t presentHeight = 0;
     std::uint64_t presentAfter = 0;
     id<MTLComputePipelineState> scanoutPipeline = nil;
+    id<MTLComputePipelineState> scanoutTexturePipeline = nil;
     id<MTL4ArgumentTable> scanoutTable = nil;
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
@@ -1115,12 +1121,47 @@ struct VulkanDevice::State {
         if (function == nil) throw std::runtime_error(std::string("AGC graphics: Metal scanout kernel failed to compile: ") + (error.localizedDescription.UTF8String ?: ""));
         scanoutPipeline = [native newComputePipelineStateWithFunction:function error:&error];
         if (scanoutPipeline == nil) throw std::runtime_error(std::string("AGC graphics: Metal scanout pipeline failed to build: ") + (error.localizedDescription.UTF8String ?: ""));
+        id<MTLFunction> textureFunction = [library newFunctionWithName:@"aps5_scanout_texture"];
+        scanoutTexturePipeline = textureFunction != nil ? [native newComputePipelineStateWithFunction:textureFunction error:&error] : nil;
+        if (scanoutTexturePipeline == nil) throw std::runtime_error(std::string("AGC graphics: Metal texture scanout pipeline failed to build: ") + (error.localizedDescription.UTF8String ?: ""));
         MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
         descriptor.maxBufferBindCount = 2;
-        descriptor.maxTextureBindCount = 1;
+        descriptor.maxTextureBindCount = 2;
         scanoutTable = [native newArgumentTableWithDescriptor:descriptor error:&error];
         if (scanoutTable == nil) throw std::runtime_error("AGC graphics: Metal scanout argument table could not be created");
         return scanoutPipeline;
+    }
+
+    // A frame that was just rendered into a cached surface is scanned out straight from its texture: no 4K writeback to guest memory and no detiling kernel.
+    bool stageDirectScanout(const DisplayBuffer& buffer) {
+        if (buffer.tilingMode > 1u || DisplayTenBit(buffer.pixelFormat)) return false;
+        CachedSurface* found = nullptr;
+        for (auto* surface : dirtySurfaces) {
+            if (surface->guestAddress != buffer.address) continue;
+            id<MTLTexture> texture = (__bridge id<MTLTexture>)surface->texture.texture;
+            if (texture == nil || texture.textureType != MTLTextureType2D || texture.sampleCount != 1 || texture.width != buffer.width || texture.height != buffer.height || (texture.pixelFormat != MTLPixelFormatRGBA8Unorm && texture.pixelFormat != MTLPixelFormatBGRA8Unorm)) continue;
+            found = surface;
+            break;
+        }
+        if (found == nullptr) return false;
+        id<MTLTexture> texture = (__bridge id<MTLTexture>)found->texture.texture;
+        const std::uint32_t textureRedLow = texture.pixelFormat == MTLPixelFormatRGBA8Unorm ? 1u : 0u;
+        const std::uint32_t swap = textureRedLow != (DisplayRedLow(buffer.pixelFormat) ? 1u : 0u) ? 1u : 0u;
+        const auto slot = presentTarget(buffer.width, buffer.height);
+        auto compute = computeEncoder();
+        [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        [scanoutTable setAddress:uploadBytes(&swap, sizeof(swap)) atIndex:0];
+        [scanoutTable setTexture:texture.gpuResourceID atIndex:0];
+        [scanoutTable setTexture:presentTextures[slot].gpuResourceID atIndex:1];
+        [compute setComputePipelineState:scanoutTexturePipeline];
+        [compute setArgumentTable:scanoutTable];
+        [compute dispatchThreads:MTLSizeMake(buffer.width, buffer.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
+        ++encodedDispatches;
+        flush(false);
+        reap();
+        presentAfter = lastSerial;
+        pendingPresent = slot;
+        return true;
     }
 
     void stageScanout(const DisplayBuffer& buffer) {
@@ -1129,6 +1170,7 @@ struct VulkanDevice::State {
         auto state = scanout();
         registry->Refresh();
         begin();
+        if (stageDirectScanout(buffer)) return;
         writebackDirty();
         const auto source = resolve(buffer.address, bytes, false, {});
         const ScanoutParams params{buffer.width, buffer.height, buffer.pitchInPixel == 0 ? buffer.width : buffer.pitchInPixel, (buffer.width + 127u) / 128u, buffer.tilingMode == 0 ? 1u : 0u, DisplayRedLow(buffer.pixelFormat) ? 1u : 0u, DisplayTenBit(buffer.pixelFormat) ? 1u : 0u};
