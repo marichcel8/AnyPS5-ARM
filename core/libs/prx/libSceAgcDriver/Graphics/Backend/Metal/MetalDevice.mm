@@ -1121,6 +1121,7 @@ struct VulkanDevice::State {
             const auto scratch = upload(bytes);
             [compute copyFromTexture:surface->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)scratch.buffer destinationOffset:scratch.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes];
             [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            if (Trace()) std::fprintf(stderr, "[metal] depth export: guest %016llx device %016llx, %ux%u, tile %u, format %u, bytes %llu\n", static_cast<unsigned long long>(surface->guestAddress), static_cast<unsigned long long>(surface->address), width, height, static_cast<unsigned>(surface->resource.tileMode), surface->resource.format, static_cast<unsigned long long>(surface->guestBytes));
             textures->EncodeLinearToTiled((__bridge void*)compute, surface->resource, surface->address, scratch.gpuAddress, pitch);
             [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             cbMovedBytes += surface->guestBytes;
@@ -1824,6 +1825,7 @@ struct VulkanDevice::State {
             auto& surface = *use.surface;
             if (surface.dirty || surface.validEpoch == epoch) continue;
             surface.validEpoch = epoch;
+            if (Trace()) std::fprintf(stderr, "[metal] upload: guest %016llx device %016llx, %ux%u, tile %u, format %u\n", static_cast<unsigned long long>(use.resource.baseAddress), static_cast<unsigned long long>(use.address), use.resource.width, use.resource.height, static_cast<unsigned>(use.resource.tileMode), use.resource.format);
             textures->EncodeUpload((__bridge void*)compute, surface.texture, use.resource, use.address, textures->DefaultUploadPath());
             ++cbUploads;
             cbMovedBytes += Graphics::DescribeSurface(use.resource).guestBytes;
