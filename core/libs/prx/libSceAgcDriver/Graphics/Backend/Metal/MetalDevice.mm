@@ -280,6 +280,7 @@ struct DepthSurface {
     bool dirty = false;
     bool clearRequested = false;
     bool stencilClearRequested = false;
+    bool freshStencil = false;
     bool coherent = false;
     std::uint64_t stamp = 0;
     Graphics::GuestTextureResource resource{};
@@ -846,6 +847,7 @@ struct VulkanDevice::State {
     std::vector<DepthSurface*> dirtyDepths;
     std::vector<std::pair<const float*, std::size_t>> depthProbes;
     std::map<DepthKey, DepthSurface> depthSurfaces;
+    std::set<std::uint64_t> stencilPlanes;
     std::unique_ptr<Metal::PipelineCache> renderPipelines;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> stageSources;
     std::unordered_map<Metal::CompileKey, std::shared_ptr<Metal::RenderPipeline>, Metal::CompileKeyHash> drawPipelines;
@@ -912,6 +914,7 @@ struct VulkanDevice::State {
             device->RetireAllocation((__bridge void*)retired, {});
         }
         depthSurfaces.clear();
+        stencilPlanes.clear();
         for (auto& [key, surface] : surfaces) {
             for (auto& [view, handle] : surface.views) textures->Release(handle);
             textures->Release(surface.texture);
@@ -2359,16 +2362,17 @@ struct VulkanDevice::State {
         const auto plane = depthPlane(depth, target);
         if (!plane) return;
         bool depthImport = true;
+        bool stencilChanged = false;
         if (!depth.initialized && (depth.clearRequested || target.htileAddress != 0u)) {
             depthImport = false;
         } else if (GuestMemory::Watched(target.address, plane->bytes)) {
             const bool depthChanged = depth.stamp != 0 && guestChangedSince(target.address, plane->bytes, depth.stamp);
-            const bool stencilChanged = plane->stencil && depth.stamp != 0 && GuestMemory::Watched(target.stencilAddress, plane->stencilBytes) && guestChangedSince(target.stencilAddress, plane->stencilBytes, depth.stamp);
+            stencilChanged = plane->stencil && depth.stamp != 0 && GuestMemory::Watched(target.stencilAddress, plane->stencilBytes) && guestChangedSince(target.stencilAddress, plane->stencilBytes, depth.stamp);
             depthImport = depthChanged || stencilChanged;
         } else if (!depth.initialized || !depth.coherent) {
             depthImport = false;
         }
-        const bool stencilImport = plane->stencil && !depth.stencilInitialized && !depth.stencilClearRequested && !depth.fillStencil;
+        const bool stencilImport = plane->stencil && !depth.stencilClearRequested && !depth.fillStencil && (stencilChanged || (!depth.stencilInitialized && !(depth.freshStencil && target.htileAddress != 0u)));
         if (!depthImport && !stencilImport) return;
         const auto width = static_cast<std::uint32_t>(depth.texture.width);
         const auto height = static_cast<std::uint32_t>(depth.texture.height);
@@ -2420,6 +2424,7 @@ struct VulkanDevice::State {
         device->AddResidentAllocation((__bridge void*)texture);
         auto& created = depthSurfaces.emplace(key, DepthSurface{texture, false, false, Graphics::DepthMetadataFillGeneration(), {}, {}, {}, {}}).first->second;
         created.stamp = GuestMemory::TrackerGeneration();
+        created.freshStencil = target.stencilAddress != 0u && stencilPlanes.insert(target.stencilAddress).second;
         return created;
     }
 
