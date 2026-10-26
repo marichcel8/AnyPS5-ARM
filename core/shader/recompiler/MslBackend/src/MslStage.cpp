@@ -270,7 +270,7 @@ void AuxPosition(State& state, const std::string& data, const ExportInfo& exp) {
             else Line(state, "aps5_out.point_size = " + size + ";");
             continue;
         }
-        if (output.cullDistance != NoDistance) throw MslUnsupported("MSL backend: cull distances have no Metal equivalent (section S7)");
+        if (output.cullDistance != NoDistance) throw MslUnsupported("MSL backend: vertex cull distances need shaderCullDistance, which the device lacks (Metal has no per-primitive cull in the vertex pipeline)");
         if (output.clipDistance != NoDistance) Line(state, "aps5_out.clip[" + std::to_string(output.clipDistance) + "] = as_type<float>(" + raw + ");");
     }
 }
@@ -355,7 +355,7 @@ void DeclareVertexOutputs(State& state) {
         case StageOutputKind::Parameter: Output(state, "p" + std::to_string(output.index), "float4 p" + std::to_string(output.index) + " [[user(locn" + Location(output) + ")]]"); break;
         case StageOutputKind::PointSize: Output(state, "point_size", "float point_size [[point_size]]"); break;
         case StageOutputKind::ClipDistance: clips = std::max(clips, output.index + 1u); break;
-        case StageOutputKind::CullDistance: throw MslUnsupported("MSL backend: cull distances have no Metal equivalent (section S7)");
+        case StageOutputKind::CullDistance: throw MslUnsupported("MSL backend: vertex cull distances need shaderCullDistance, which the device lacks (Metal has no per-primitive cull in the vertex pipeline)");
         case StageOutputKind::Layer: Output(state, "layer", "uint layer [[render_target_array_index]]"); break;
         case StageOutputKind::ViewportIndex: Output(state, "viewport", "uint viewport [[viewport_array_index]]"); break;
         default: Fail("a vertex program declares a pixel output");
