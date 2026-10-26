@@ -707,10 +707,23 @@ std::optional<std::string> MultisampleRejection(const Graphics::State& graphics)
     if (!multisampled) return std::nullopt;
     if (samples != 2u && samples != 4u && samples != 8u) return std::string("the draw's sample count is not 2, 4 or 8");
     if (graphics.perSampleShading) return std::string("per-sample shading is not wired on Metal yet");
-    if (graphics.customSampleLocations || graphics.sampleLocationGrid) return std::string("custom sample locations are not wired on Metal yet");
+    if (graphics.sampleLocationGrid) return std::string("per-pixel sample location grids are not wired on Metal (render passes take one position set)");
     if (graphics.ditheredAlphaToCoverage) return std::string("dithered alpha to coverage is not wired on Metal yet");
     if (Graphics::PartialSampleMask(graphics) && !(Graphics::UniformSampleMask(graphics) && Graphics::HostSampleMask(graphics) == 0u)) return std::string("partial sample masks are not wired on Metal yet");
     return std::nullopt;
+}
+
+// Guest custom sample positions (low nibble signed x, high nibble signed y, 1/16 pixel), one set for the whole pass.
+std::vector<MTLSamplePosition> GuestSamplePositions(const Graphics::State& graphics) {
+    std::vector<MTLSamplePosition> positions;
+    if (!graphics.customSampleLocations || graphics.sampleLocationGrid || graphics.samples < 2u) return positions;
+    for (std::uint32_t sample = 0; sample < graphics.samples; ++sample) {
+        const auto bits = graphics.sampleLocations[sample];
+        const int x = static_cast<int>(bits & 7u) - static_cast<int>(bits & 8u);
+        const int y = static_cast<int>((bits >> 4u) & 7u) - static_cast<int>((bits >> 4u) & 8u);
+        positions.push_back(MTLSamplePositionMake(0.5f + static_cast<float>(x) / 16.0f, 0.5f + static_cast<float>(y) / 16.0f));
+    }
+    return positions;
 }
 
 std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
@@ -2542,7 +2555,7 @@ struct VulkanDevice::State {
         return created;
     }
 
-    void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key) {
+    void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key, const std::vector<MTLSamplePosition>& samplePositions = {}) {
         begin();
         endRender();
         endCompute();
@@ -2596,6 +2609,7 @@ struct VulkanDevice::State {
         }
         descriptor.renderTargetWidth = width;
         descriptor.renderTargetHeight = height;
+        if (!samplePositions.empty()) [descriptor setSamplePositions:samplePositions.data() count:samplePositions.size()];
         if (depth == nullptr && std::all_of(colors.begin(), colors.end(), [](const ColorAttachment& color) { return color.texture == nil; })) descriptor.defaultRasterSampleCount = 1;
         id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)open.commands;
         render = [commands renderCommandEncoderWithDescriptor:descriptor];
@@ -2782,6 +2796,12 @@ struct VulkanDevice::State {
             }
             if (width == 0 || height == 0) return;
             key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
+            const auto samplePositions = GuestSamplePositions(graphics);
+            for (const auto& position : samplePositions) {
+                std::uint64_t packed = 0;
+                std::memcpy(&packed, &position, sizeof(packed));
+                key.push_back(packed);
+            }
             lap(3);
 
             if (depth != nullptr && graphics.depth && !(render != nil && key == passKey)) ScanHtile(*depth, *graphics.depth);
@@ -2804,7 +2824,7 @@ struct VulkanDevice::State {
                     [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
                     encodeUploads(compute, pending);
                 }
-                openPass(colors, depth, graphics.depth ? &*graphics.depth : nullptr, stencil, width, height, std::move(key));
+                openPass(colors, depth, graphics.depth ? &*graphics.depth : nullptr, stencil, width, height, std::move(key), samplePositions);
             }
             lap(4);
 
