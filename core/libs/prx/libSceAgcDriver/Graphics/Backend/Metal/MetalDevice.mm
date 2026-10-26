@@ -807,6 +807,46 @@ struct VulkanDevice::State {
     std::uint32_t encodedDispatches = 0;
     std::uint64_t recordedSinceSubmit = 0;
     std::uint32_t cbDraws = 0;
+    static constexpr std::chrono::microseconds OpenLabelDeadline{1000};
+    static std::chrono::microseconds openLabelQuiet() {
+        static const std::chrono::microseconds value = [] {
+            const char* text = std::getenv("APS5_METAL_LABEL_QUIET_US");
+            return std::chrono::microseconds(text != nullptr ? std::strtol(text, nullptr, 10) : 150);
+        }();
+        return value;
+    }
+    std::chrono::steady_clock::time_point openLabelsActive;
+    std::vector<LabelStore> openLabels;
+    std::chrono::steady_clock::time_point openLabelsSince;
+    std::condition_variable_any labelTimerWake;
+    std::thread labelTimer;
+    bool labelTimerStop = false;
+
+    void runLabelTimer() {
+        std::unique_lock lock(mutex);
+        while (!labelTimerStop) {
+            if (openLabels.empty() || !open) {
+                labelTimerWake.wait(lock);
+                continue;
+            }
+            const auto due = std::min(openLabelsSince + OpenLabelDeadline, openLabelsActive + openLabelQuiet());
+            if (std::chrono::steady_clock::now() < due) {
+                labelTimerWake.wait_until(lock, due);
+                continue;
+            }
+            try {
+                flush(false);
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "[gpu] label timer flush failed: %s\n", error.what());
+                openLabelsSince = std::chrono::steady_clock::now();
+            }
+        }
+    }
+
+    void armLabelTimer() {
+        if (!labelTimer.joinable()) labelTimer = std::thread([this] { runLabelTimer(); });
+        labelTimerWake.notify_one();
+    }
     std::uint32_t cbPasses = 0;
     std::uint32_t cbDispatches = 0;
     std::uint32_t cbWritebacks = 0;
@@ -911,6 +951,14 @@ struct VulkanDevice::State {
     std::atomic<std::uint64_t> draws{0};
 
     ~State() {
+        if (labelTimer.joinable()) {
+            {
+                std::lock_guard lock(mutex);
+                labelTimerStop = true;
+            }
+            labelTimerWake.notify_one();
+            labelTimer.join();
+        }
         if (waker != nullptr) {
             {
                 std::lock_guard lock(waker->mutex);
@@ -1295,6 +1343,12 @@ struct VulkanDevice::State {
             completion.submitted = std::chrono::steady_clock::now();
             ++flushes;
             completion.writeBacks = std::move(writeBacks);
+            if (!openLabels.empty()) {
+                completion.labels = std::move(openLabels);
+                openLabels.clear();
+                armCompletion(serial, completion);
+            }
+            openLabelsSince = {};
             gdsStageOpen = false;
             ldsStageOpen = false;
             completion.staged = std::move(staged);
@@ -1353,20 +1407,28 @@ struct VulkanDevice::State {
         std::atomic_thread_fence(std::memory_order_release);
     }
 
+    void armCompletion(std::uint64_t serial, Completion& completion) {
+        if (completion.waking) return;
+        completion.waking = true;
+        if (waker == nullptr) {
+            waker = std::make_shared<Waker>();
+            completer = std::thread([this, signal = waker] { runCompleter(*signal); });
+        }
+        sync->OnComplete(Queue, serial, [signal = waker] { signal->Notify(); });
+    }
+
     Completion* afterRecorded() {
         reap();
         if (open) flush(false);
         if (completions.empty()) return nullptr;
         auto& [serial, completion] = *completions.rbegin();
-        if (!completion.waking) {
-            completion.waking = true;
-            if (waker == nullptr) {
-                waker = std::make_shared<Waker>();
-                completer = std::thread([this, signal = waker] { runCompleter(*signal); });
-            }
-            sync->OnComplete(Queue, serial, [signal = waker] { signal->Notify(); });
-        }
+        armCompletion(serial, completion);
         return &completion;
+    }
+
+    bool openWriteOverlaps(std::uint64_t address, std::uint64_t bytes) const {
+        const auto end = address + bytes;
+        return std::any_of(pendingWrites.begin(), pendingWrites.end(), [&](const auto& write) { return write.serial == 0 && write.begin < end && address < write.end; });
     }
 
     void runCompleter(Waker& signal) {
@@ -2696,6 +2758,11 @@ struct VulkanDevice::State {
         };
         @autoreleasepool {
             std::lock_guard lock(mutex);
+            if (!openLabels.empty()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - openLabelsSince >= OpenLabelDeadline) flush(false);
+                else openLabelsActive = now;
+            }
             lap(0);
             const EncodingScope encoding;
             registry->Refresh();
@@ -3088,6 +3155,17 @@ auto VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::b
     if (s.sync == nullptr || bytes.empty() || bytes.size() > Metal::Sync::MaxLabelBytes || address % 4 != 0 || bytes.size() % 4 != 0) return 4;
     std::lock_guard lock(s.mutex);
     if (GuestMemory::CurrentPacket().opcode != ReleaseMemOpcode || !GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes.size(), true)) return 3;
+    s.reap();
+    if (s.open) {
+        const bool first = s.openLabels.empty();
+        s.openLabelsActive = std::chrono::steady_clock::now();
+        if (first) s.openLabelsSince = s.openLabelsActive;
+        s.openLabels.push_back({address, std::vector<std::byte>(bytes.begin(), bytes.end())});
+        s.noteWrite(address, bytes.size());
+        s.labelsOnCompletion.fetch_add(1, std::memory_order_relaxed);
+        if (first) s.armLabelTimer();
+        return 0;
+    }
     auto* completion = s.afterRecorded();
     if (completion == nullptr) {
         s.labelsOnCpu.fetch_add(1, std::memory_order_relaxed);
@@ -3112,7 +3190,12 @@ auto VulkanDevice::AfterRecordedWork(std::function<void()> action, bool) -> bool
 
 auto VulkanDevice::PendingLabel(std::uint64_t, std::size_t, std::uint64_t, Graphics::Recorder::LabelRefusal*) const -> std::optional<Graphics::Recorder::LabelHit> { return {}; }
 
-auto VulkanDevice::OpenWriteOverlaps(std::uint64_t, std::size_t) const -> bool { return false; }
+auto VulkanDevice::OpenWriteOverlaps(std::uint64_t address, std::size_t bytes) const -> bool {
+    auto& s = *state;
+    if (s.sync == nullptr) return false;
+    std::lock_guard lock(s.mutex);
+    return s.openWriteOverlaps(address, bytes);
+}
 
 auto VulkanDevice::RecordedWritesSettled(std::uint64_t, std::size_t) const -> bool {
     auto& s = *state;

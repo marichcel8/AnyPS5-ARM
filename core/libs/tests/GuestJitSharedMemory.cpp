@@ -42,11 +42,23 @@ int Call(const void* code) {
     return function();
 }
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+constexpr std::size_t ReturnLength = 12;
+
+void WriteReturn(void* code, std::uint32_t value) {
+    const std::uint32_t words[] = {0x52800000u | ((value & 0xffffu) << 5), 0x72a00000u | ((value >> 16) << 5), 0xd65f03c0u};
+    std::memcpy(code, words, sizeof(words));
+    __builtin___clear_cache(static_cast<char*>(code), static_cast<char*>(code) + sizeof(words));
+}
+#else
+constexpr std::size_t ReturnLength = 6;
+
 void WriteReturn(void* code, std::uint32_t value) {
     unsigned char bytes[] = {0xb8, 0, 0, 0, 0, 0xc3};
     std::memcpy(bytes + 1, &value, sizeof(value));
     std::memcpy(code, bytes, sizeof(bytes));
 }
+#endif
 
 void WriteThroughAliasRunsThroughExecutableView() {
     const int fd = Create(nullptr, Read | Write | Execute);
@@ -58,7 +70,7 @@ void WriteThroughAliasRunsThroughExecutableView() {
     Require(writable != executable);
     Require(executable[0] == 0 && executable[Size - 1] == 0);
     WriteReturn(writable, 0x12345678);
-    Require(std::memcmp(writable, executable, 6) == 0);
+    Require(std::memcmp(writable, executable, ReturnLength) == 0);
     Require(Call(executable) == 0x12345678);
     WriteReturn(writable + 0x4000, 0x0badcafe);
     Require(Call(executable + 0x4000) == 0x0badcafe);
@@ -175,6 +187,12 @@ void InvalidArgumentsAreRejected() {
 }
 
 int main() {
+#if defined(__APPLE__) && defined(__aarch64__)
+    {
+        std::fputs("skipped: macOS arm64 cannot make shared memory executable outside MAP_JIT, and a title's JIT output is x86 code the translator cannot run natively\n", stderr);
+        return 77;
+    }
+#endif
     WriteThroughAliasRunsThroughExecutableView();
     OneViewWritesAndRuns();
     Dup2KeepsTheDescriptorTableInStep();
