@@ -264,6 +264,7 @@ struct DepthSurface {
     std::vector<std::uint32_t> htileWords;
     bool dirty = false;
     bool clearRequested = false;
+    bool coherent = false;
     std::uint64_t stamp = 0;
     Graphics::GuestTextureResource resource{};
     std::uint64_t address = 0;
@@ -1127,6 +1128,7 @@ struct VulkanDevice::State {
             [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             cbMovedBytes += surface->guestBytes;
             surface->dirty = false;
+            surface->coherent = true;
             surface->stamp = GuestMemory::TrackerGeneration();
         }
         writebackSurfaces += surfaces.size();
@@ -2149,7 +2151,10 @@ struct VulkanDevice::State {
         if (depth.dirty || (!depth.initialized && (depth.clearRequested || target.htileAddress != 0u))) return;
         const auto plane = depthPlane(depth, target);
         if (!plane) return;
-        if (depth.initialized && depth.stamp != 0 && GuestMemory::UnchangedSinceCollected(target.address, plane->bytes, depth.stamp)) return;
+        if (depth.initialized) {
+            if (!depth.coherent) return;
+            if (GuestMemory::Watched(target.address, plane->bytes) && GuestMemory::UnchangedSinceCollected(target.address, plane->bytes, depth.stamp)) return;
+        }
         const auto source = resolve(target.address, plane->bytes, false, {});
         if (source == 0) return;
         const auto width = static_cast<std::uint32_t>(depth.texture.width);
@@ -2166,6 +2171,7 @@ struct VulkanDevice::State {
         if (Trace()) std::fprintf(stderr, "[metal] depth import: guest %016llx, %ux%u\n", static_cast<unsigned long long>(target.address), width, height);
         depth.initialized = true;
         depth.clearRequested = false;
+        depth.coherent = true;
         depth.stamp = GuestMemory::TrackerGeneration();
         cbMovedBytes += plane->bytes;
     }
@@ -2226,6 +2232,7 @@ struct VulkanDevice::State {
             }
             depth->htileWords.clear();
             depth->htilePattern.reset();
+            if (load == MTLLoadActionClear) depth->coherent = false;
             depth->initialized = true;
             depth->clearRequested = false;
             if (stencil) depth->stencilInitialized = true;
