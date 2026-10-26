@@ -3099,6 +3099,8 @@ auto VulkanDevice::FinishPresent() -> double {
 
 auto VulkanDevice::QueuePresent() -> void {}
 auto VulkanDevice::PresentsOnOwnQueue() const -> bool { return false; }
+auto VulkanDevice::HasComputePipeline(const ShaderRecompiler::RecompileResult&) const -> bool { return true; }
+auto VulkanDevice::PrebuildComputePipeline(const ShaderRecompiler::RecompileResult&, std::uint64_t) -> void {}
 
 auto VulkanDevice::FlipBatches(std::uint64_t& submissions, std::uint64_t& unsignaled) const -> void {
     submissions = 0;
