@@ -17,6 +17,8 @@
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
+#include <deque>
+#include <mutex>
 
 namespace AgcDriver::Graphics {
 
@@ -101,7 +103,30 @@ bool MultisampledColorFillAbsorbs(std::uint64_t, std::size_t, std::uint32_t) { r
 
 void NoteColorMetadataFill(std::uint64_t, std::size_t, std::uint32_t) {}
 
-void NoteDepthMetadataFill(std::uint64_t, std::size_t, std::uint32_t) {}
+namespace {
+constexpr std::size_t MaxDepthMetadataFills = 1024;
+std::mutex depthMetadataFillMutex;
+std::deque<DepthMetadataFillRecord> depthMetadataFills;
+std::uint64_t depthMetadataFillCount = 0;
+}
+
+void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern) {
+    std::lock_guard lock(depthMetadataFillMutex);
+    depthMetadataFills.push_back({++depthMetadataFillCount, address, bytes, pattern});
+    if (depthMetadataFills.size() > MaxDepthMetadataFills) depthMetadataFills.pop_front();
+}
+
+std::uint64_t DepthMetadataFillGeneration() {
+    std::lock_guard lock(depthMetadataFillMutex);
+    return depthMetadataFillCount;
+}
+
+std::vector<DepthMetadataFillRecord> DepthMetadataFillsSince(std::uint64_t generation) {
+    std::lock_guard lock(depthMetadataFillMutex);
+    std::vector<DepthMetadataFillRecord> fills;
+    for (const auto& fill : depthMetadataFills) if (fill.generation > generation) fills.push_back(fill);
+    return fills;
+}
 
 bool NoteHtileDepthClear(std::uint64_t, std::size_t, std::size_t) { return false; }
 

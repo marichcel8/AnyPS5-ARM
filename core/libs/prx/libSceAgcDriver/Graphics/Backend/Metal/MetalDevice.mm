@@ -11,6 +11,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/Sync.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/TextureJobs.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Textures.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
@@ -30,6 +31,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -244,7 +246,55 @@ struct StageSource {
 struct DepthSurface {
     id<MTLTexture> texture = nil;
     bool initialized = false;
+    std::uint64_t seenFills = 0;
+    std::optional<float> fillDepth;
+    std::optional<std::uint8_t> fillStencil;
 };
+
+bool DepthFillCovers(std::uint64_t base, std::uint64_t baseBytes, std::uint64_t address, std::size_t bytes) {
+    return base != 0 && base >= address && base + baseBytes <= address + bytes;
+}
+
+std::uint64_t HtileBytes(VkExtent2D extent) {
+    return static_cast<std::uint64_t>((extent.width + 1023u) / 1024u) * ((extent.height + 511u) / 512u) * 32768u;
+}
+
+void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target) {
+    const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
+    for (const auto& fill : Graphics::DepthMetadataFillsSince(surface.seenFills)) {
+        surface.seenFills = fill.generation;
+        if (target.samples != 1u) continue;
+        if (target.htileAddress != 0u && target.htileAddress >= fill.address && target.htileAddress < fill.address + fill.bytes && fill.address + fill.bytes - target.htileAddress >= HtileBytes(target.extent)) {
+            const bool depthCleared = (fill.pattern & 0xfu) == 0u;
+            const bool stencilCleared = target.htileStencil && ((fill.pattern >> 8u) & 0x3u) == 0u;
+            if (depthCleared || stencilCleared) {
+                surface.initialized = false;
+                surface.fillDepth.reset();
+                surface.fillStencil.reset();
+            }
+            continue;
+        }
+        if (DepthFillCovers(target.address, static_cast<std::uint64_t>(target.extent.width) * target.extent.height * (d16 ? 2u : 4u), fill.address, fill.bytes)) {
+            std::optional<float> value;
+            if (d16) {
+                if ((fill.pattern >> 16u) == (fill.pattern & 0xffffu)) value = static_cast<float>(fill.pattern & 0xffffu) / 65535.0f;
+            } else if (const auto depth = std::bit_cast<float>(fill.pattern); depth >= 0.0f && depth <= 1.0f) {
+                value = depth;
+            }
+            if (value) {
+                surface.initialized = false;
+                surface.fillDepth = value;
+            }
+        }
+        if (DepthFillCovers(target.stencilAddress, static_cast<std::uint64_t>(target.extent.width) * target.extent.height, fill.address, fill.bytes)) {
+            const auto byte = static_cast<std::uint8_t>(fill.pattern & 0xffu);
+            if (fill.pattern == byte * 0x01010101u) {
+                surface.initialized = false;
+                surface.fillStencil = byte;
+            }
+        }
+    }
+}
 
 using DepthKey = std::array<std::uint64_t, 3>;
 
@@ -1684,7 +1734,10 @@ struct VulkanDevice::State {
 
     DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
         const DepthKey key{target.address, static_cast<std::uint64_t>(target.extent.width) | static_cast<std::uint64_t>(target.extent.height) << 32u, static_cast<std::uint64_t>(format)};
-        if (const auto found = depthSurfaces.find(key); found != depthSurfaces.end()) return found->second;
+        if (const auto found = depthSurfaces.find(key); found != depthSurfaces.end()) {
+            ApplyDepthFills(found->second, target);
+            return found->second;
+        }
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:static_cast<MTLPixelFormat>(format) width:target.extent.width height:target.extent.height mipmapped:NO];
         descriptor.storageMode = MTLStorageModePrivate;
         descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
@@ -1693,7 +1746,7 @@ struct VulkanDevice::State {
         if (texture == nil) throw std::runtime_error("AGC graphics: Metal depth target could not be created");
         texture.label = @"AnyPS5 depth target";
         device->AddResidentAllocation((__bridge void*)texture);
-        return depthSurfaces.emplace(key, DepthSurface{texture, false}).first->second;
+        return depthSurfaces.emplace(key, DepthSurface{texture, false, Graphics::DepthMetadataFillGeneration(), {}, {}}).first->second;
     }
 
     void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key) {
@@ -1717,15 +1770,17 @@ struct VulkanDevice::State {
             attachment.texture = depth->texture;
             attachment.loadAction = load;
             attachment.storeAction = MTLStoreActionStore;
-            attachment.clearDepth = target->clearDepth;
+            attachment.clearDepth = depth->fillDepth.value_or(target->clearDepth);
             if (stencil) {
                 MTLRenderPassStencilAttachmentDescriptor* stencilAttachment = descriptor.stencilAttachment;
                 stencilAttachment.texture = depth->texture;
                 stencilAttachment.loadAction = load;
                 stencilAttachment.storeAction = MTLStoreActionStore;
-                stencilAttachment.clearStencil = target->clearStencil;
+                stencilAttachment.clearStencil = depth->fillStencil.value_or(target->clearStencil);
             }
             depth->initialized = true;
+            depth->fillDepth.reset();
+            depth->fillStencil.reset();
         }
         descriptor.renderTargetWidth = width;
         descriptor.renderTargetHeight = height;
@@ -1873,7 +1928,7 @@ struct VulkanDevice::State {
             if (width == 0 || height == 0) return;
             key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
 
-            const bool reuse = render != nil && key == passKey;
+            const bool reuse = render != nil && key == passKey && (depth == nullptr || depth->initialized);
             std::vector<ImageUse> loads = uses;
             if (!reuse) {
                 for (auto& [surface, resource] : targets) {
