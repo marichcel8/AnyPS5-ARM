@@ -808,6 +808,8 @@ struct VulkanDevice::State {
     std::uint64_t recordedSinceSubmit = 0;
     std::uint32_t cbDraws = 0;
     static constexpr std::chrono::microseconds OpenLabelDeadline{1000};
+    static constexpr std::chrono::microseconds OpenLabelQuiet{150};
+    std::chrono::steady_clock::time_point openLabelsActive;
     std::vector<LabelStore> openLabels;
     std::chrono::steady_clock::time_point openLabelsSince;
     std::condition_variable_any labelTimerWake;
@@ -821,7 +823,7 @@ struct VulkanDevice::State {
                 labelTimerWake.wait(lock);
                 continue;
             }
-            const auto due = openLabelsSince + OpenLabelDeadline;
+            const auto due = std::min(openLabelsSince + OpenLabelDeadline, openLabelsActive + OpenLabelQuiet);
             if (std::chrono::steady_clock::now() < due) {
                 labelTimerWake.wait_until(lock, due);
                 continue;
@@ -2750,7 +2752,11 @@ struct VulkanDevice::State {
         };
         @autoreleasepool {
             std::lock_guard lock(mutex);
-            if (!openLabels.empty() && std::chrono::steady_clock::now() - openLabelsSince >= OpenLabelDeadline) flush(false);
+            if (!openLabels.empty()) {
+                const auto now = std::chrono::steady_clock::now();
+                if (now - openLabelsSince >= OpenLabelDeadline) flush(false);
+                else openLabelsActive = now;
+            }
             lap(0);
             const EncodingScope encoding;
             registry->Refresh();
@@ -3145,7 +3151,8 @@ auto VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::b
     s.reap();
     if (s.open) {
         const bool first = s.openLabels.empty();
-        if (first) s.openLabelsSince = std::chrono::steady_clock::now();
+        s.openLabelsActive = std::chrono::steady_clock::now();
+        if (first) s.openLabelsSince = s.openLabelsActive;
         s.openLabels.push_back({address, std::vector<std::byte>(bytes.begin(), bytes.end())});
         s.noteWrite(address, bytes.size());
         s.labelsOnCompletion.fetch_add(1, std::memory_order_relaxed);
