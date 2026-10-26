@@ -602,6 +602,11 @@ void SharedAtomic(State& state, const IrValue& inst) {
     Line(state, "const uint " + index + " = " + SharedByte(state, inst, mem) + " >> 2u;");
     const auto apply = "aps5_atomic_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")";
     const auto condition = (active.empty() ? std::string() : active + " && ") + index + " < " + U32(state.ldsDwords);
+    if (state.lds64) {
+        state.features |= Lds64 | Atomic64 | Float64 | Lane | LocalIndex;
+        Define(state, inst, "aps5_lds32(&aps5_lds_lock, reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")");
+        return;
+    }
     if (!inst.HasUses()) {
         Line(state, "if (" + condition + ") " + apply + ";");
         DefineZero(state, inst);
@@ -950,7 +955,9 @@ bool EmitMemory(State& state, const IrValue& inst) {
     case IrOpcode::SharedAtomicXor64:
     case IrOpcode::SharedAtomicFMin64:
     case IrOpcode::SharedAtomicFMax64:
-    case IrOpcode::SharedAtomicCmpst64: SharedAtomic64(state, inst); return true;
+    case IrOpcode::SharedAtomicCmpst64:
+    case IrOpcode::SharedAtomicCmpstF64:
+    case IrOpcode::SharedAtomicMskor64: SharedAtomic64(state, inst); return true;
     case IrOpcode::LoadVectorWindow: LoadVectorWindow(state, inst); return true;
     case IrOpcode::StoreVectorWindow: StoreVectorWindow(state, inst); return true;
     default: break;

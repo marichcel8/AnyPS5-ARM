@@ -767,6 +767,18 @@ constexpr std::string_view Lds64Text = R"(static inline ulong aps5_update_lds64(
     }
     return aps5_update64(op, old, a, b);
 }
+static inline uint aps5_lds32(threadgroup atomic_uint* lock, threadgroup atomic_uint* p, uint lane, bool active, uint op, uint a, uint b) {
+    uint old = 0u;
+    for (uint turn = 0u; turn < 32u; ++turn) {
+        if (active && lane == turn) {
+            while (atomic_exchange_explicit(lock, 1u, memory_order_relaxed) != 0u) {}
+            old = atomic_load_explicit(p, memory_order_relaxed);
+            atomic_store_explicit(p, aps5_update(op, old, a, b), memory_order_relaxed);
+            atomic_store_explicit(lock, 0u, memory_order_relaxed);
+        }
+    }
+    return old;
+}
 static inline ulong aps5_lds64(threadgroup atomic_uint* lock, threadgroup atomic_uint* p, uint lane, bool active, uint op, ulong a, ulong b) {
     ulong old = 0ul;
     for (uint turn = 0u; turn < 32u; ++turn) {

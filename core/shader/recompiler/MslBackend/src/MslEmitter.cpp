@@ -240,6 +240,16 @@ std::uint32_t WaveLdsScope(const IrProgram& program, const ShaderWorkgroupInputI
     return threads <= program.WaveSize() ? 1u : 2u;
 }
 
+bool HasSharedAtomic64(const IrProgram& program) {
+    for (const auto* block : program.BlockOrder()) {
+        for (const auto* inst : block->Instructions()) {
+            const auto name = IrOpcodeName(inst->Opcode());
+            if (name.starts_with("SharedAtomic") && name.ends_with("64")) return true;
+        }
+    }
+    return false;
+}
+
 bool HasBarrier(const IrProgram& program) {
     for (const auto* block : program.BlockOrder()) {
         for (const auto* inst : block->Instructions()) {
@@ -379,6 +389,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     state.scratchDwords = program.Info().scratchDwords;
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
+    state.lds64 = HasSharedAtomic64(program);
     state.stopAllowed = compute && state.waveLds == 0u && !HasBarrier(program) && state.lanes == 1u;
     state.stopOnUnlinkedCall = compute && state.waveLds == 0u && !HasBarrier(program);
     if (geometry) {
