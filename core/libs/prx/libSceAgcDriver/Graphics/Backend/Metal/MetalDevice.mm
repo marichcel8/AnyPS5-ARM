@@ -1422,8 +1422,11 @@ struct VulkanDevice::State {
         std::memset(fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
     }
 
-    id<MTLComputePipelineState> pipeline(const ShaderRecompiler::RecompileResult& shader) {
-        const auto identity = shader.Identity();
+    id<MTLComputePipelineState> pipeline(const ShaderRecompiler::RecompileResult& shader, const std::array<std::uint32_t, 3>& base = {}) {
+        auto identity = shader.Identity();
+        if (base != std::array<std::uint32_t, 3>{}) {
+            for (const auto component : base) identity.low = (identity.low ^ (component + 0x9e3779b9u)) * 0x9e3779b97f4a7c15ull;
+        }
         std::shared_ptr<Metal::CompileTicket> ticket;
         {
             std::lock_guard lock(pipelineMutex);
@@ -1440,7 +1443,10 @@ struct VulkanDevice::State {
                 request.function = std::string(ShaderRecompiler::MslEntryPoint);
                 const auto declared = DeclaredConstants(*source);
                 for (const auto& constant : shader.specialization) {
-                    if (declared.contains(constant.id)) request.constants.push_back({constant.id, constant.value, false});
+                    if (!declared.contains(constant.id)) continue;
+                    auto value = constant.value;
+                    if (ShaderRecompiler::PipelineSpecialization::IsWorkgroupOffset(constant.id)) value = base[constant.id - ShaderRecompiler::PipelineSpecialization::WorkgroupOffsetBase];
+                    request.constants.push_back({constant.id, value, false});
                 }
                 request.label = "AnyPS5 guest compute";
                 request.priority = Metal::CompilePriority::Urgent;
@@ -2069,9 +2075,18 @@ struct VulkanDevice::State {
         const std::uint64_t ldsBytes = static_cast<std::uint64_t>(shader.workgroupMemoryDwords) * sizeof(std::uint32_t) * x * y * z;
         const auto threads = shader.hostThreadgroup;
         if (threads[0] == 0 || threads[1] == 0 || threads[2] == 0) throw std::runtime_error("AGC graphics: the MSL result has no threadgroup size");
-        if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error(shader.workgroupMemoryDwords != 0 ? "AGC graphics: Metal dispatch exceeds the threadgroup count limit and a split aliases the device-memory LDS slots" : "AGC graphics: Metal dispatch exceeds the threadgroup count limit (" + std::to_string(y) + "x" + std::to_string(z) + " groups, " + std::to_string(shader.workgroupMemoryDwords) + " workgroup memory dwords)");
+        const bool split = x > groupLimit[0] || y > groupLimit[1] || z > groupLimit[2];
+        if (split && shader.workgroupMemoryDwords != 0) throw std::runtime_error("AGC graphics: Metal dispatch exceeds the threadgroup count limit and a split aliases the device-memory LDS slots");
         if (shader.workgroupMemoryDwords != 0 && (ldsBytes / sizeof(std::uint32_t) / shader.workgroupMemoryDwords != static_cast<std::uint64_t>(x) * y * z || ldsBytes > device->Limits().maxBufferBytes)) throw std::runtime_error("AGC graphics: Metal dispatch needs more device-memory LDS than one buffer holds");
         id<MTLComputePipelineState> state = pipeline(shader);
+        std::map<std::array<std::uint32_t, 3>, id<MTLComputePipelineState>> chunkPipelines;
+        if (split) {
+            for (std::uint32_t zBase = 0; zBase < z; zBase += groupLimit[2]) {
+                for (std::uint32_t yBase = 0; yBase < y; yBase += groupLimit[1]) {
+                    for (std::uint32_t xBase = 0; xBase < x; xBase += groupLimit[0]) chunkPipelines.emplace(std::array<std::uint32_t, 3>{xBase, yBase, zBase}, pipeline(shader, {xBase, yBase, zBase}));
+                }
+            }
+        }
         @autoreleasepool {
             std::lock_guard lock(mutex);
             const EncodingScope encoding;
@@ -2102,9 +2117,23 @@ struct VulkanDevice::State {
                 if (slots[slot] != 0) [table setAddress:slots[slot] atIndex:slot];
             }
             if (ldsAddress != 0) [table setAddress:ldsAddress atIndex:ShaderRecompiler::MetalAbi::WorkgroupMemorySlot];
-            [compute setComputePipelineState:state];
             [compute setArgumentTable:table];
-            [compute dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+            if (!split) {
+                [compute setComputePipelineState:state];
+                [compute dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+            } else {
+                bool firstChunk = true;
+                for (std::uint32_t zBase = 0; zBase < z; zBase += groupLimit[2]) {
+                    for (std::uint32_t yBase = 0; yBase < y; yBase += groupLimit[1]) {
+                        for (std::uint32_t xBase = 0; xBase < x; xBase += groupLimit[0]) {
+                            if (!firstChunk) [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+                            firstChunk = false;
+                            [compute setComputePipelineState:chunkPipelines.at({xBase, yBase, zBase})];
+                            [compute dispatchThreadgroups:MTLSizeMake(std::min(groupLimit[0], x - xBase), std::min(groupLimit[1], y - yBase), std::min(groupLimit[2], z - zBase)) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
+                        }
+                    }
+                }
+            }
             if (Trace()) std::fprintf(stderr, "[metal] dispatch %016llx%016llx: %ux%ux%u groups of %ux%ux%u, %zu snapshots\n", static_cast<unsigned long long>(shader.Identity().high), static_cast<unsigned long long>(shader.Identity().low), x, y, z, threads[0], threads[1], threads[2], snapshots.size());
             if (std::any_of(uses.begin(), uses.end(), [](const ImageUse& use) { return use.written; })) {
                 [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
@@ -2999,10 +3028,8 @@ auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& sha
     std::array<std::uint32_t, 3> groups{};
     std::memcpy(groups.data(), reinterpret_cast<const void*>(arguments), sizeof(groups));
     const auto readMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
-    const auto& limit = state->groupLimit;
-    if (groups[0] > limit[0] || groups[1] > limit[1] || groups[2] > limit[2]) return {0, readMs};
     state->dispatch(shader, groups[0], groups[1], groups[2], snapshots);
-    return {0, readMs};
+    return {shader.workgroupMemoryDwords != 0 ? 8 : 0, readMs};
 }
 
 auto VulkanDevice::PrepareRecipe(const std::shared_ptr<const Recipe>&, bool) -> std::shared_ptr<RecipeHit> { return {}; }
