@@ -722,7 +722,7 @@ void AddressAtomic64(State& state, const IrValue& inst) {
     Define(state, inst, result);
 }
 
-std::uint32_t SharedAtomic64Code(IrOpcode opcode) {
+std::uint32_t SharedAtomic64Code(IrOpcode opcode, bool flush) {
     switch (opcode) {
     case IrOpcode::SharedAtomicSwap64: return 0u;
     case IrOpcode::SharedAtomicCmpst64: return 1u;
@@ -738,10 +738,10 @@ std::uint32_t SharedAtomic64Code(IrOpcode opcode) {
     case IrOpcode::SharedAtomicInc64: return 11u;
     case IrOpcode::SharedAtomicDec64: return 12u;
     case IrOpcode::SharedAtomicRsub64: return 14u;
-    case IrOpcode::SharedAtomicFMin64: return 15u;
-    case IrOpcode::SharedAtomicFMax64: return 16u;
+    case IrOpcode::SharedAtomicFMin64: return flush ? 22u : 15u;
+    case IrOpcode::SharedAtomicFMax64: return flush ? 23u : 16u;
     case IrOpcode::SharedAtomicMskor64: return 18u;
-    case IrOpcode::SharedAtomicCmpstF64: return 20u;
+    case IrOpcode::SharedAtomicCmpstF64: return flush ? 24u : 20u;
     default: throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(opcode)) + " is not emitted");
     }
 }
@@ -749,9 +749,7 @@ std::uint32_t SharedAtomic64Code(IrOpcode opcode) {
 void SharedAtomic64(State& state, const IrValue& inst) {
     const auto& mem = SharedMemory(state, inst);
     const auto opcode = inst.Opcode();
-    const auto op = SharedAtomic64Code(opcode);
-    const bool floating = opcode == IrOpcode::SharedAtomicFMin64 || opcode == IrOpcode::SharedAtomicFMax64 || opcode == IrOpcode::SharedAtomicCmpstF64;
-    if (floating && mem.flushDenormals) throw MslUnsupported("MSL backend: 64-bit floating-point LDS atomics with denormal flushing are not emitted");
+    const auto op = SharedAtomic64Code(opcode, mem.flushDenormals);
     const bool twoOperands = opcode == IrOpcode::SharedAtomicCmpst64 || opcode == IrOpcode::SharedAtomicCmpstF64 || opcode == IrOpcode::SharedAtomicMskor64;
     const auto a = Typed(state, inst, twoOperands ? 2u : 1u);
     const auto b = twoOperands ? Typed(state, inst, 1u) : std::string("0ul");

@@ -758,12 +758,17 @@ constexpr std::string_view Atomic64MinMaxText = R"(    case 5u:
     }
 )";
 
-constexpr std::string_view Lds64Text = R"(static inline ulong aps5_update_lds64(uint op, ulong old, ulong a, ulong b) {
+constexpr std::string_view Lds64Text = R"(static inline ulong aps5_f64_flush(ulong x) { return (x & 0x7ffffffffffffffful) < 0x0010000000000000ul ? (x & 0x8000000000000000ul) : x; }
+static inline bool aps5_f64_equal(ulong a, ulong b) { return (a == b && !aps5_f64_is_nan(a)) || (((a | b) & 0x7ffffffffffffffful) == 0ul); }
+static inline ulong aps5_update_lds64(uint op, ulong old, ulong a, ulong b) {
     switch (op) {
     case 15u: return aps5_f64_min_max(a, old, false);
     case 16u: return aps5_f64_min_max(a, old, true);
     case 18u: return (old & ~b) | a;
-    case 20u: return ((old == b && !aps5_f64_is_nan(old)) || (((old | b) & 0x7ffffffffffffffful) == 0ul)) ? a : old;
+    case 20u: return aps5_f64_equal(old, b) ? a : old;
+    case 22u: return aps5_f64_min_max(aps5_f64_flush(a), aps5_f64_flush(old), false);
+    case 23u: return aps5_f64_min_max(aps5_f64_flush(a), aps5_f64_flush(old), true);
+    case 24u: return aps5_f64_equal(aps5_f64_flush(old), aps5_f64_flush(b)) ? a : old;
     }
     return aps5_update64(op, old, a, b);
 }
