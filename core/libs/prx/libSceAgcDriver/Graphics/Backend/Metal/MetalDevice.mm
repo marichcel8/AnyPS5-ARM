@@ -1114,7 +1114,7 @@ struct VulkanDevice::State {
             const auto pitch = width * 4u;
             const auto bytes = static_cast<std::uint64_t>(pitch) * height;
             const auto scratch = upload(bytes);
-            [compute copyFromTexture:surface->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)scratch.buffer destinationOffset:scratch.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes];
+            [compute copyFromTexture:surface->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)scratch.buffer destinationOffset:scratch.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes options:MTLBlitOptionNone];
             [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
             if (Trace()) depthProbes.emplace_back(reinterpret_cast<const float*>(scratch.data), static_cast<std::size_t>(bytes / 4u));
             if (Trace()) std::fprintf(stderr, "[metal] depth export: texture %p guest %016llx device %016llx, %ux%u, tile %u, format %u, bytes %llu\n", (__bridge void*)surface->texture, static_cast<unsigned long long>(surface->guestAddress), static_cast<unsigned long long>(surface->address), width, height, static_cast<unsigned>(surface->resource.tileMode), surface->resource.format, static_cast<unsigned long long>(surface->guestBytes));
@@ -2107,7 +2107,8 @@ struct VulkanDevice::State {
         throw Graphics::UnrenderableDraw("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
     }
 
-    void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target) {
+    void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target, const Graphics::State& graphics) {
+        if (Trace()) std::fprintf(stderr, "[metal] depth mark state: test %d write %d compare %d clear %f initialized %d fill %d\n", graphics.depthTest ? 1 : 0, graphics.depthWrite ? 1 : 0, static_cast<int>(graphics.depthCompare), target.clearDepth, depth.initialized ? 1 : 0, depth.fillDepth ? 1 : 0);
         if (Trace()) std::fprintf(stderr, "[metal] depth mark: texture %p address %016llx, %ux%u, format %lu, samples %u\n", (__bridge void*)depth.texture, static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
         if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0) return;
         try {
@@ -2420,7 +2421,7 @@ struct VulkanDevice::State {
                 surface->guestBytes = Graphics::DescribeSurface(resource).guestBytes;
                 dirtySurfaces.push_back(surface);
             }
-            if (depth != nullptr && graphics.depthWrite && !depth->dirty && graphics.depth->samples == 1u) markDepthDirty(*depth, *graphics.depth);
+            if (depth != nullptr && graphics.depthWrite && !depth->dirty && graphics.depth->samples == 1u) markDepthDirty(*depth, *graphics.depth, graphics);
             ++recordedSinceSubmit;
             ++cbDraws;
             if (gpuTimeEnabled()) {
