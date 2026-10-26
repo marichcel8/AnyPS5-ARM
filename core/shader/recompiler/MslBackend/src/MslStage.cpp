@@ -408,11 +408,11 @@ void PrepareStage(State& state) {
         DeclareVertexOutputs(state);
     } else {
         const auto& pixel = PixelInfo(state);
-        if (pixel.QuadSampleMaskPartial()) throw MslUnsupported("MSL backend: PA_SC_AA_MASK sample masks are not emitted");
-        if (pixel.quadPixelMask != 0xfu) Argument(state, "aps5_frag_coord", "float4 aps5_frag_coord [[position]]");
+        if (pixel.quadPixelMask != 0xfu || pixel.QuadSampleMaskPartial()) Argument(state, "aps5_frag_coord", "float4 aps5_frag_coord [[position]]");
         if (pixel.psOrderedPixelShader) throw MslUnsupported("MSL backend: primitive-ordered pixel shaders need raster order groups, which are not emitted");
         if (state.program.Metadata().barycentricEmulation) throw MslUnsupported("MSL backend: barycentric emulation is section S7");
         DeclarePixelOutputs(state);
+        if (pixel.QuadSampleMaskPartial()) DeclareCoverage(state);
         for (const auto* block : state.program.BlockOrder()) {
             for (const auto* inst : block->Instructions()) {
                 if (inst->Opcode() != IrOpcode::SetAttribute) continue;
@@ -423,11 +423,12 @@ void PrepareStage(State& state) {
     }
     const bool quadMasked = stage == IrShaderStage::Pixel && PixelInfo(state).quadPixelMask != 0xfu;
     state.quadMasked = quadMasked;
+    const std::string coverageMask = stage == IrShaderStage::Pixel && PixelInfo(state).QuadSampleMaskPartial() ? "aps5_out.mask &= aps5_sample_mask; " : "";
     if (state.validMask || quadMasked) {
         const std::string condition = std::string(quadMasked ? "aps5_quad_masked" : "") + (quadMasked && state.validMask ? " || " : "") + (state.validMask ? "!aps5_valid" : "");
-        state.exit = "if (" + condition + ") discard_fragment(); return aps5_out;";
+        state.exit = "if (" + condition + ") discard_fragment(); " + coverageMask + "return aps5_out;";
     } else {
-        state.exit = "return aps5_out;";
+        state.exit = coverageMask + "return aps5_out;";
     }
 }
 
@@ -531,6 +532,12 @@ std::string StageHeader(const State& state, const std::string& parameters) {
     if (state.validMask) text += "    bool aps5_valid = true;\n";
     if (pixel && PixelInfo(state).quadPixelMask != 0xfu) {
         text += "    const bool aps5_quad_masked = ((" + U32(PixelInfo(state).quadPixelMask) + " >> ((uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u))) & 1u) == 0u;\n";
+    }
+    if (pixel && PixelInfo(state).QuadSampleMaskPartial()) {
+        const auto& masks = PixelInfo(state).quadSampleMask;
+        const auto word = [&](std::uint32_t index) { return masks[index] == 0xffffu ? std::string("0xffffffffu") : U32(masks[index]); };
+        text += "    const uint aps5_sample_masks[4] = {" + word(0u) + ", " + word(1u) + ", " + word(2u) + ", " + word(3u) + "};\n";
+        text += "    const uint aps5_sample_mask = aps5_sample_masks[(uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u)];\n";
     }
     return text;
 }

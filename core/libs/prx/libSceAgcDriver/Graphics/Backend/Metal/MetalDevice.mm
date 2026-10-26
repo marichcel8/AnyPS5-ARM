@@ -709,7 +709,6 @@ std::optional<std::string> MultisampleRejection(const Graphics::State& graphics)
     if (graphics.perSampleShading) return std::string("per-sample shading is not wired on Metal yet");
     if (graphics.sampleLocationGrid) return std::string("per-pixel sample location grids are not wired on Metal (render passes take one position set)");
     if (graphics.ditheredAlphaToCoverage) return std::string("dithered alpha to coverage is not wired on Metal yet");
-    if (Graphics::PartialSampleMask(graphics) && !(Graphics::UniformSampleMask(graphics) && Graphics::HostSampleMask(graphics) == 0u)) return std::string("partial sample masks are not wired on Metal yet");
     return std::nullopt;
 }
 
