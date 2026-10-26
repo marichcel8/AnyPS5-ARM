@@ -758,6 +758,33 @@ constexpr std::string_view Atomic64MinMaxText = R"(    case 5u:
     }
 )";
 
+constexpr std::string_view Lds64Text = R"(static inline ulong aps5_update_lds64(uint op, ulong old, ulong a, ulong b) {
+    switch (op) {
+    case 15u: return aps5_f64_min_max(a, old, false);
+    case 16u: return aps5_f64_min_max(a, old, true);
+    case 18u: return (old & ~b) | a;
+    case 20u: return ((old == b && !aps5_f64_is_nan(old)) || (((old | b) & 0x7ffffffffffffffful) == 0ul)) ? a : old;
+    }
+    return aps5_update64(op, old, a, b);
+}
+static inline ulong aps5_lds64(threadgroup atomic_uint* lock, threadgroup atomic_uint* p, uint lane, bool active, uint op, ulong a, ulong b) {
+    ulong old = 0ul;
+    for (uint turn = 0u; turn < 32u; ++turn) {
+        if (active && lane == turn) {
+            while (atomic_exchange_explicit(lock, 1u, memory_order_relaxed) != 0u) {}
+            const uint low = atomic_load_explicit(p, memory_order_relaxed);
+            const uint high = atomic_load_explicit(p + 1, memory_order_relaxed);
+            old = (ulong(high) << 32u) | ulong(low);
+            const ulong next = aps5_update_lds64(op, old, a, b);
+            atomic_store_explicit(p, uint(next), memory_order_relaxed);
+            atomic_store_explicit(p + 1, uint(next >> 32u), memory_order_relaxed);
+            atomic_store_explicit(lock, 0u, memory_order_relaxed);
+        }
+    }
+    return old;
+}
+)";
+
 constexpr std::string_view Atomic64PointerText = R"(static inline device atomic_uint* aps5_bda_atomic8(thread aps5_ctx& c, ulong address, uint need, uint pc) {
     if ((address & 7ul) != 0ul) { aps5_fault(c, $UNALIGNED, address, 8u, pc); return nullptr; }
     uint reason = 0u;
@@ -1130,6 +1157,7 @@ std::string Prelude(const State& state) {
         auto device = Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "device"), "NAME", "");
         text += Replace(device, "MINMAX", std::string(Atomic64MinMaxText));
         if (has(Lds)) text += Replace(Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "threadgroup"), "NAME", "_lds"), "MINMAX", "");
+        if (has(Lds64)) text += Lds64Text;
     }
     for (std::size_t index = 0; index < state.imageTypes.size(); ++index) text += "struct aps5_img" + std::to_string(index) + " { " + state.imageTypes[index] + " t; };\n";
     if (has(Samplers | Tables)) text += "struct aps5_sampler { sampler s; };\n";

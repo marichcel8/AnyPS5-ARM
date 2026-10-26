@@ -43,7 +43,8 @@ enum Feature : std::uint32_t {
     Atomic64 = 1u << 27u,
     UpdateTable = 1u << 28u,
     Tables = 1u << 29u,
-    Gds = 1u << 30u
+    Gds = 1u << 30u,
+    Lds64 = 1u << 31u
 };
 
 enum : std::uint8_t {
