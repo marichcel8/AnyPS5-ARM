@@ -330,7 +330,9 @@ int main(int argc, char** argv) {
     const int empty = sceSslInit_nid_postfix(256 * 1024);
     const int untrustedSocket = sockets.Open(server.port);
     const int untrusted = sceSslCreateConnection(empty, untrustedSocket, "localhost");
-    Require(sceSslConnect(untrusted) == ErrorUnknownCa, "a server certificate without a loaded CA passed the initial verify options");
+    const int firstConnect = sceSslConnect(untrusted);
+    std::fprintf(stderr, "sceSslConnect returned 0x%x, the verify result is 0x%x\n", static_cast<unsigned>(firstConnect), static_cast<unsigned>(ErrorUnknownCa));
+    Require(firstConnect == ErrorUnknownCa, "a server certificate without a loaded CA passed the initial verify options");
     Require(sceSslConnect(untrusted) == ErrorUnknownCa, "a second connect did not repeat the verification result");
     std::array<char, 16> scratch{};
     Require(Throws([&] { sceSslRead(untrusted, scratch.data(), 1, 0); }), "a connection that failed verification was readable");
