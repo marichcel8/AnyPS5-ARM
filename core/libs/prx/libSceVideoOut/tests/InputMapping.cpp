@@ -284,6 +284,12 @@ void layouts() {
     bool leftFires = false;
     for (const auto& binding : both.shooter.bindings) leftFires = leftFires || (binding.mouseButton == Pad::MouseButton::Left && binding.button == Pad::PadButton::R2);
     require(leftFires, "the left mouse button fires R2 in the shooter layout");
+    for (const auto* layout : {&both.classic, &both.shooter}) {
+        for (const auto& binding : layout->bindings) {
+            const int sources = (binding.key != SDL_SCANCODE_UNKNOWN ? 1 : 0) + (binding.mouseButton != Pad::MouseButton::None ? 1 : 0) + (binding.wheelDirection != 0 ? 1 : 0);
+            require(sources == 1, "every binding has exactly one source: a key, a mouse button or the wheel");
+        }
+    }
     useConfig("Layout = Shooter\n[Shooter]\nCross = KEY:J\n[Classic]\nCircle = KEY:K\n");
     both = Pad::LoadInputLayouts();
     require(both.shooter.startLayout == Pad::Layout::Shooter, "Layout selects the starting layout");
