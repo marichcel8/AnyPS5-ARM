@@ -69,6 +69,8 @@ struct State {
     bool stopAllowed = false;
     bool lds64 = false;
     bool ldsDevice = false;
+    bool ldsFunction = false;
+    std::unordered_map<const IrValue*, std::uint32_t> ldsLaneAddresses;
     std::uint32_t ldsStride = 0;
     bool stopOnUnlinkedCall = false;
     std::uint32_t lanes = 1;
