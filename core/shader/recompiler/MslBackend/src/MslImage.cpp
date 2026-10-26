@@ -483,6 +483,9 @@ std::string ResultVector(Access& access, const std::string& value, IrTextureNume
     for (std::uint32_t index = 0; index < 4u; ++index) {
         if (dref) {
             components[index] = Bits(source, valueClass);
+        } else if (access.image.depthBits && access.image.depthUnorm16) {
+            state.features |= Half;
+            components[index] = "uint(as_type<ushort>(half(" + scalar(index) + ")))";
         } else if (access.image.depthUnorm16) {
             components[index] = "uint(" + scalar(index) + " * 65535.0f + 0.5f)";
         } else {

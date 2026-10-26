@@ -2422,9 +2422,16 @@ struct VulkanDevice::State {
         if (texture == nil) throw std::runtime_error("AGC graphics: Metal depth target could not be created");
         texture.label = @"AnyPS5 depth target";
         device->AddResidentAllocation((__bridge void*)texture);
-        auto& created = depthSurfaces.emplace(key, DepthSurface{texture, false, false, Graphics::DepthMetadataFillGeneration(), {}, {}, {}, {}}).first->second;
+        auto inherited = Graphics::DepthMetadataFillGeneration();
+        if (target.stencilAddress != 0u) {
+            for (const auto& [otherKey, other] : depthSurfaces) {
+                if (other.hasStencilPlane && other.stencilGuestAddress == target.stencilAddress) inherited = std::min(inherited, other.seenFills);
+            }
+        }
+        auto& created = depthSurfaces.emplace(key, DepthSurface{texture, false, false, inherited, {}, {}, {}, {}}).first->second;
         created.stamp = GuestMemory::TrackerGeneration();
         created.freshStencil = target.stencilAddress != 0u && stencilPlanes.insert(target.stencilAddress).second;
+        ApplyDepthFills(created, target);
         return created;
     }
 
