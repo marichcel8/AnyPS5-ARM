@@ -206,6 +206,25 @@ struct X87 {
             else lifter.WriteRegister(X86_REG_AX, word);
             return true;
         }
+        if ((m == "fnstenv" || m == "fstenv") && memory != nullptr) {
+            auto* base = Address(*memory);
+            auto* top = builder.CreateShl(builder.CreateZExt(Top(), builder.getInt16Ty()), 11);
+            auto* status = builder.CreateOr(builder.CreateAnd(Status(), builder.getInt16(static_cast<std::uint16_t>(~0x3800u))), top);
+            lifter.Store(builder.CreateZExt(Control(), builder.getInt32Ty()), base);
+            lifter.Store(builder.CreateZExt(status, builder.getInt32Ty()), builder.CreateAdd(base, builder.getInt64(4)));
+            lifter.Store(builder.getInt32(0xffff), builder.CreateAdd(base, builder.getInt64(8)));
+            for (unsigned offset = 12; offset < 28; offset += 4) lifter.Store(builder.getInt32(0), builder.CreateAdd(base, builder.getInt64(offset)));
+            builder.CreateStore(builder.CreateOr(Control(), builder.getInt16(0x3f)), lifter.Field(StateLayout::X87Control));
+            return true;
+        }
+        if (m == "fldenv" && memory != nullptr) {
+            auto* base = Address(*memory);
+            auto* status = lifter.Load(builder.getInt16Ty(), builder.CreateAdd(base, builder.getInt64(4)));
+            builder.CreateStore(lifter.Load(builder.getInt16Ty(), base), lifter.Field(StateLayout::X87Control));
+            SetStatus(builder.CreateAnd(status, builder.getInt16(static_cast<std::uint16_t>(~0x3800u))));
+            SetTop(builder.CreateTrunc(builder.CreateLShr(status, 11), builder.getInt8Ty()));
+            return true;
+        }
         if (m == "fincstp") {
             SetTop(builder.CreateAdd(Top(), builder.getInt8(1)));
             return true;

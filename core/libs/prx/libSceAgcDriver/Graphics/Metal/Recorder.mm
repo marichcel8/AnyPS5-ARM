@@ -15,6 +15,7 @@ static_assert(static_cast<int>(IndexType::UInt32) == MTLIndexTypeUInt32);
 static_assert(static_cast<int>(CullMode::Back) == MTLCullModeBack);
 static_assert(static_cast<int>(Winding::CounterClockwise) == MTLWindingCounterClockwise);
 static_assert(static_cast<int>(DepthClipMode::Clamp) == MTLDepthClipModeClamp);
+static_assert(static_cast<int>(FillMode::Lines) == MTLTriangleFillModeLines);
 static_assert(static_cast<int>(LoadAction::Clear) == MTLLoadActionClear);
 static_assert(static_cast<int>(StoreAction::Unknown) == MTLStoreActionUnknown);
 static_assert(static_cast<int>(StoreAction::StoreAndMultisampleResolve) == MTLStoreActionStoreAndMultisampleResolve);
@@ -273,6 +274,7 @@ struct Recorder::State final : UploadSource {
         if ((changed & DynamicCull) != 0) [encoder setCullMode:static_cast<MTLCullMode>(dynamic.cull)];
         if ((changed & DynamicWinding) != 0) [encoder setFrontFacingWinding:static_cast<MTLWinding>(dynamic.winding)];
         if ((changed & DynamicDepthClip) != 0) [encoder setDepthClipMode:static_cast<MTLDepthClipMode>(dynamic.depthClip)];
+        if ((changed & DynamicFill) != 0) [encoder setTriangleFillMode:static_cast<MTLTriangleFillMode>(dynamic.fill)];
         boundDynamic = dynamic;
         dynamicValid = true;
     }

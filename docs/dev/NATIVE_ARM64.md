@@ -37,7 +37,7 @@ The relinker already decodes guest code (TLS scan, `--to-intel`). In the arm64 m
 - **Pipeline:** x86-64 is decoded with Capstone and lifted to LLVM IR, one LLVM function per guest function, operating on `GuestState`. LLVM optimizes it and emits arm64.
 - **Flags:** flags are computed into `GuestState` fields; LLVM drops the dead ones.
 - **SIMD:** SSE and AVX map to LLVM vector types, and 256-bit operations are lowered to two 128-bit NEON operations by LLVM.
-- **x87:** the FPU stack is eight doubles in `GuestState` with a dynamic top, plus the control and status words (control word 0x037f at thread start). Loads, stores, arithmetic, comparisons (status word and `fcomi` flags), `fcmov`, rounding by the control word, transcendental instructions, BCD (`fbld`/`fbstp`) and 80-bit memory operands are lifted; 80-bit values are rounded to double precision, and tag words and exceptions are not modeled. `tests/x87_smoke.c` checks the set.
+- **x87:** the FPU stack is eight doubles in `GuestState` with a dynamic top, plus the control and status words (control word 0x037f at thread start). Loads, stores, arithmetic, comparisons (status word and `fcomi` flags), `fcmov`, rounding by the control word, transcendental instructions, BCD (`fbld`/`fbstp`) and 80-bit memory operands are lifted; 80-bit values are rounded to double precision, and tag words and exceptions are not modeled. `tests/x87_smoke.c` checks the set. `fnstenv`/`fldenv` keep the control and status words.
 - **Function discovery:**
   - the ELF entry, `DT_INIT`/`INIT_ARRAY`
   - exported and local symbols
@@ -49,14 +49,15 @@ The relinker already decodes guest code (TLS scan, `--to-intel`). In the arm64 m
 
 ### Calling across the boundary
 
-- **Guest to host:** a call whose target is outside the guest code ranges is a host function. The bridge passes rdi, rsi, rdx, rcx, r8, r9 as x0–x5, guest stack arguments 7 and 8 as x6 and x7, and xmm0–7 as v0–v7. It returns x0/x1 into rax/rdx and v0/v1 into xmm0/xmm1. Both ABIs split integer and vector arguments into separate register files, so this covers every export with up to 8 integer and 8 vector arguments passed in registers. Variadic exports differ (Apple arm64 passes variadic arguments on the stack), and so do `va_list`, structure returns (rdi vs x8) and `long double`. Those exports need per-signature bridges; there are 26 variadic `APS5_VABI` exports.
+- **Guest to host:** a call whose target is outside the guest code ranges is a host function. The bridge passes rdi, rsi, rdx, rcx, r8, r9 as x0–x5, guest stack arguments 7 and 8 as x6 and x7, arguments 9 to 16 as 8-byte slots on the native stack (Apple arm64 packs smaller stack arguments, so an export with more than 8 integer arguments declares the ones past the eighth as 64-bit, like `sceAgcCbReleaseMem`), and xmm0–7 as v0–v7. It returns x0/x1 into rax/rdx and v0/v1 into xmm0/xmm1. Both ABIs split integer and vector arguments into separate register files, so this covers every export with up to 8 integer and 8 vector arguments passed in registers. Variadic exports differ (Apple arm64 passes variadic arguments on the stack), and so do `va_list`, structure returns (rdi vs x8) and `long double`. Those exports need per-signature bridges; there are 26 variadic `APS5_VABI` exports.
 - **Host to guest:** the guest image lives in a data segment, so a host function pointer to guest code faults when it is called. The runtime's SIGBUS/SIGSEGV handler looks the address up in the function table and resumes at `aps5_enter` with the translated function in x16, so the many callback sites (the process entry through `Aps5StartGuest`, thread entries, atexit, library callbacks) need no change. `aps5_enter` builds or reuses the thread's `GuestState` and TLS block, copies the AAPCS arguments into the SysV registers and the guest stack, pushes a return address, runs the translated function, and returns rax/rdx and xmm0/xmm1 as x0/x1 and q0/q1. Faults the redirect does not own go to the previous handler (the write watch chains the same way).
 - **Variadic exports:** Apple arm64 passes variadic arguments on the stack, so a host `printf(fmt, ...)` cannot read the guest's registers. On arm64 the libc exports start a System V va_list over the running guest call instead (`aps5_guest_va_start` in the runtime, `GuestVarargs.hpp` in libc) and format with the same code the Windows build uses.
 - **TLS:** `fs:` accesses read `GuestState.fsBase`, which is set per thread from the guest TLS allocator. The `gs:`/pthread-key stubs of the Rosetta mode are not used.
 
 ### Hard parts, in order of risk
 
-1. **Non-local control flow:** guest `setjmp`/`longjmp`, C++ exception landing pads (a guest unwinder resuming mid-function), and the Fiber and Ult context switches. Translated functions nest native frames, so a guest transfer to an older frame must also unwind native frames. The plan is to resume through the thread's outermost guest entry, or to switch to a dispatch-loop model if that proves insufficient.
+1. **Non-local control flow:** guest `setjmp`/`longjmp` work (see below); C++ exception landing pads (a guest unwinder resuming mid-function), and the Fiber and Ult context switches. Translated functions nest native frames, so a guest transfer to an older frame must also unwind native frames. The plan is to resume through the thread's outermost guest entry, or to switch to a dispatch-loop model if that proves insufficient.
+   `setjmp` and `longjmp` are recognized by address in `aps5_call` (`HostBridge.S`). `setjmp` saves the callee-saved registers, sp and return address of its translated caller in a per-thread table keyed by the guest `jmp_buf`, and stores the x86-64 registers in the buffer in the layout libc used under Rosetta. `longjmp` restores the x86-64 registers and the saved native ones, so the translated caller continues after its `setjmp` call; the native frames in between are discarded without running destructors. Registers a translated caller kept in native callee-saved registers have their value from `setjmp`; guest registers are reloaded from `GuestState` after every call, so only values outside it are affected.
 2. **Memory ordering:** x86 is TSO and arm64 is weakly ordered. The hardware TSO mode of Apple silicon has no public interface. Guest loads and stores can be emitted as acquire and release (`LDAPR`/`STLR`); that costs throughput, so it is a translation option.
 3. **Coverage:** every instruction the titles use must be lifted exactly. Each one gets differential tests against the same code running under Rosetta.
 4. **Tooling at conversion time:** the converter would need LLVM and a linker, about 100 MB. A direct arm64 emitter is the alternative if that size is a problem.
@@ -75,7 +76,9 @@ python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm
 
 ### Large titles
 
-A title's code is split into partitions of about 8k guest instructions. Each partition is lifted, optimized and compiled in its own LLVM context on its own thread, and `ld -r` joins the partition objects into the one `guest.o`. Partition objects are cached under `~/Library/Caches/AnyPS5/translator/<ELF hash>`, keyed by the translator binary, the ELF and the settings, so a repeated or interrupted run only compiles what is missing.
+Functions are found from the entry point, the symbols, the relocations and, when the ELF has a `PT_GNU_EH_FRAME`, every FDE of its unwind table. An FDE gives a function's exact range: exploration stays inside it, a jump to another function's start or out of the range is a tail call, and jump table entries outside it are dropped. Without this, functions ran on into their neighbours through tail jumps and misread jump tables; on Quake II the lifted code shrank from 5.1 to 3.1 million guest instructions.
+
+A title's code is split into partitions of about 4k guest instructions. Each partition is lifted, optimized and compiled in its own LLVM context on its own thread, and `ld -r` joins the partition objects into the one `guest.o`. Partition objects are cached under `~/Library/Caches/AnyPS5/translator/<ELF hash>`, keyed by the translator binary, the ELF and the settings, so a repeated or interrupted run only compiles what is missing.
 
 Three things keep very large guest functions from stalling LLVM:
 
@@ -83,17 +86,25 @@ Three things keep very large guest functions from stalling LLVM:
 - **A small graph.** Only branch targets and instructions control reaches from elsewhere start a basic block. A jump through a bounded jump table switches over that table's targets only; every other indirect jump goes to one shared dispatch per function.
 - **Guest registers in SSA.** In functions up to 2500 guest instructions, the lifter works on a copy of `GuestState` on the native stack and copies the fields the function uses back before each call, runtime call and return, and in again after a call returns. SROA turns the copy into SSA values, so alias analysis no longer sees one memory access per register use.
 - **Optimization tiers.** Functions above 2000 guest instructions are not inlined. Above 2500 they keep `GuestState` in memory, skip the O2 pipeline for a few linear passes (SROA, EarlyCSE, SimplifyCFG, ADCE), and are compiled with fast instruction selection and register allocation, because the greedy allocator's live range splitting grows too fast on them.
-- **Bounded memory.** Partitions run on threads with 256 MB stacks, because alias analysis recurses deeply on large phi webs. The threads together hold at most 16384 guest instructions in flight, taken in order from the largest partition down; a larger partition runs alone.
+- **Bounded memory.** Partitions run on threads with 256 MB stacks, because alias analysis recurses deeply on large phi webs. The threads together hold at most 3072 guest instructions per GB of RAM in flight (24576 on 8 GB), taken in order from the largest partition down. A function compiled with fast codegen counts an eighth of its size, because it needs far less memory than an optimized one, and a partition above the budget runs alone. On macOS the workers run at user-initiated QoS and freed heap pages go back to the system after each partition.
+
+### Quick tier
+
+`APS5_TRANSLATOR_TIER=quick` (the default of `package_native_app.py`) treats every function the profile does not show hot as cold: it gets the light passes, and a partition of only cold functions skips the O2 pipeline and is compiled at `-O0` (GlobalISel and the fast register allocator). Cold partitions compile about four times faster than optimized ones and give about three times the code. Quake II translates in 120 s instead of 342 s on four Linux cores. Each cold function counts its entries and loop iterations in a `{guest offset, count}` row of `__DATA,__aps5_prof`. The runtime of an executable translated this way adds the counts to the profile file every 30 seconds and at exit, one `<offset in hex> <count>` line per function. The next translation with the profile optimizes the functions with at least `APS5_TRANSLATOR_HOT` counts at O2 and without counters; only the partitions whose hot functions changed are compiled again. The profile only grows, so a function stays optimized once it was hot.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `APS5_TRANSLATOR_JOBS` | CPU cores, at most 4 | threads |
+| `APS5_TRANSLATOR_TIER` | `full` | `quick` compiles cold functions quickly and profiles them |
+| `APS5_TRANSLATOR_PROFILE` | `<cache>/profile.txt` | profile file of the quick tier, embedded in the executable |
+| `APS5_TRANSLATOR_HOT` | 1000 | counts from which the quick tier optimizes a function |
+| `APS5_TRANSLATOR_JOBS` | all CPU cores | threads; `max` also lifts the memory budget |
 | `APS5_TRANSLATOR_PARTITION` | 4096 | guest instructions per partition |
 | `APS5_TRANSLATOR_LARGE` / `_HUGE` / `_GIANT` | 2000 / 2500 / 2500 | no inlining / light pipeline and no register promotion / fast codegen, in guest instructions |
-| `APS5_TRANSLATOR_BUDGET` | 16384 | guest instructions compiled at once over all threads |
+| `APS5_TRANSLATOR_BUDGET` | 3072 per GB of RAM | guest instructions compiled at once over all threads |
 | `APS5_TRANSLATOR_CACHE` | `~/Library/Caches/AnyPS5/translator` | cache directory, `off` disables it |
 | `APS5_TRANSLATOR_LD` | `ld` | linker that joins the partitions |
-| `APS5_TRANSLATOR_STATS` | unset | print the time of each partition |
+| `APS5_TRANSLATOR_VERIFY` | unset | verify each lifted partition, as the fixtures do |
+| `APS5_TRANSLATOR_STATS` | unset | print the time of each partition and of each phase |
 
 ## Milestones
 

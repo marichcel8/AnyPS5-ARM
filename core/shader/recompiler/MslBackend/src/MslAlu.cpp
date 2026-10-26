@@ -1,4 +1,5 @@
 #include "MslState.hpp"
+#include "MetalAbi.hpp"
 #include <algorithm>
 
 namespace ShaderRecompiler::Msl {
@@ -57,18 +58,26 @@ std::string GuestIndex() {
     return "(aps5_index + (aps5_index & ~31u) + " + U32(CurrentHalf() * 32u) + ")";
 }
 
+std::string GroupOffset(State& state, std::uint32_t component) {
+    if (state.program.Resources().stage != IrShaderStage::Compute || component >= PipelineSpecialization::WorkgroupOffsetWords) return "0u";
+    return StageConstant(state, PipelineSpecialization::WorkgroupOffsetBase + component, 0u);
+}
+
 std::string Builtin(State& state, const IrValue& inst) {
     const auto kind = static_cast<StageInputKind>(ImmediateValue(inst, 0));
     const auto component = ImmediateValue(inst, 1);
     switch (kind) {
     case StageInputKind::WorkgroupId:
         state.features |= WorkgroupId;
-        return "aps5_group." + Component(component);
+        return "(aps5_group." + Component(component) + " + " + GroupOffset(state, component) + ")";
     case StageInputKind::LocalInvocationId:
     case StageInputKind::GlobalInvocationId: {
         if (state.lanes == 1u) {
             state.features |= kind == StageInputKind::LocalInvocationId ? LocalId : GlobalId;
-            return std::string(kind == StageInputKind::LocalInvocationId ? "aps5_local." : "aps5_global.") + Component(component);
+            if (kind == StageInputKind::LocalInvocationId) return "aps5_local." + Component(component);
+            const auto* compute = state.input.compute;
+            const auto size = compute != nullptr && component < 3u ? std::max(compute->threadsNum[component], 1u) : 1u;
+            return "(aps5_global." + Component(component) + " + " + GroupOffset(state, component) + " * " + U32(size) + ")";
         }
         const auto* workgroup = state.input.compute;
         if (workgroup == nullptr || component >= 3u) Fail(inst, "needs the workgroup size");
@@ -79,7 +88,7 @@ std::string Builtin(State& state, const IrValue& inst) {
         const auto local = "((" + GuestIndex() + " / " + U32(divisor) + ") % " + U32(size) + ")";
         if (kind == StageInputKind::LocalInvocationId) return local;
         state.features |= WorkgroupId;
-        return "(" + local + " + aps5_group." + Component(component) + " * " + U32(size) + ")";
+        return "(" + local + " + (aps5_group." + Component(component) + " + " + GroupOffset(state, component) + ") * " + U32(size) + ")";
     }
     case StageInputKind::LocalInvocationIndex:
         state.features |= LocalIndex;
@@ -133,8 +142,14 @@ bool EmitPrecise(State& state, const IrValue& inst) {
     case IrOpcode::FPSqrt: value("sqrt", 1); return true;
     case IrOpcode::FPSin: value("sin", 1); return true;
     case IrOpcode::FPCos: value("cos", 1); return true;
-    case IrOpcode::FPExp2: value("exp2", 1); return true;
-    case IrOpcode::FPLog2: value("log2", 1); return true;
+    case IrOpcode::FPExp2:
+    case IrOpcode::FPLog2:
+        if ((state.target.experiment & MslExperimentNoPow) != 0u) {
+            Out(state, inst, Typed(state, inst, 0));
+            return true;
+        }
+        value(inst.Opcode() == IrOpcode::FPExp2 ? "exp2" : "log2", 1);
+        return true;
     case IrOpcode::FPRoundEven32: value("rint", 1); return true;
     case IrOpcode::FPFloor32: value("floor", 1); return true;
     case IrOpcode::FPCeil32: value("ceil", 1); return true;
@@ -336,7 +351,8 @@ bool EmitAlu(State& state, const IrValue& inst) {
         return true;
     case IrOpcode::PackFloat2x16Rtz:
         state.features |= Half;
-        Out(state, inst, "aps5_f32_to_f16_rtz(" + Bits(state, inst, 0) + ") | (aps5_f32_to_f16_rtz(" + Bits(state, inst, 1) + ") << 16u)");
+        if ((state.target.experiment & MslExperimentNoPack) != 0u) Out(state, inst, "(" + Bits(state, inst, 0) + " >> 16u) | (" + Bits(state, inst, 1) + " & 0xffff0000u)");
+        else Out(state, inst, "aps5_f32_to_f16_rtz(" + Bits(state, inst, 0) + ") | (aps5_f32_to_f16_rtz(" + Bits(state, inst, 1) + ") << 16u)");
         return true;
     case IrOpcode::FPAdd16x2: state.features |= Half; Out(state, inst, "aps5_half2(" + a(0) + ", " + a(1) + ", false)"); return true;
     case IrOpcode::FPMul16x2: state.features |= Half; Out(state, inst, "aps5_half2(" + a(0) + ", " + a(1) + ", true)"); return true;
@@ -373,8 +389,14 @@ bool EmitAlu(State& state, const IrValue& inst) {
     case IrOpcode::FPSqrt: call("sqrt", 1); return true;
     case IrOpcode::FPSin: Out(state, inst, "sinpi(2.0f * " + a(0) + ")"); return true;
     case IrOpcode::FPCos: Out(state, inst, "cospi(2.0f * " + a(0) + ")"); return true;
-    case IrOpcode::FPExp2: call("exp2", 1); return true;
-    case IrOpcode::FPLog2: call("log2", 1); return true;
+    case IrOpcode::FPExp2:
+    case IrOpcode::FPLog2:
+        if ((state.target.experiment & MslExperimentNoPow) != 0u) {
+            Out(state, inst, a(0));
+            return true;
+        }
+        call(inst.Opcode() == IrOpcode::FPExp2 ? "exp2" : "log2", 1);
+        return true;
     case IrOpcode::FPRoundEven32: call("rint", 1); return true;
     case IrOpcode::FPFloor32: call("floor", 1); return true;
     case IrOpcode::FPCeil32: call("ceil", 1); return true;

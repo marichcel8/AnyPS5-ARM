@@ -16,7 +16,7 @@ While a title has a mouse open (`sceMouseOpen`) and the window is focused, AnyPS
 
 Game-controller bindings are enabled automatically and are not affected by keyboard or mouse overrides in this file.
 
-Supported actions are `Cross`, `Circle`, `Triangle`, `Square`, `L1`, `R1`, `L2`, `R2`, `L3`, `R3`, `Options`, `Up`, `Right`, `Down`, `Left`, `LeftStickLeft`, `LeftStickRight`, `LeftStickUp`, `LeftStickDown`, `RightStickLeft`, `RightStickRight`, `RightStickUp`, `RightStickDown`, `TouchLeft`, `TouchRight`, `StickModifier`, `Shake`, `ToggleMouse`, `ToggleFullscreen` (F11), `TogglePerformanceOverlay` (F10, the [performance overlay](USAGE.md#performance-overlay)), and `Screenshot` (F12, saves the next displayed frame as described in [screenshots](USAGE.md#screenshots)). `ToggleFullscreen`, `TogglePerformanceOverlay` and `Screenshot` accept only keyboard keys.
+Supported actions are `Cross`, `Circle`, `Triangle`, `Square`, `L1`, `R1`, `L2`, `R2`, `L3`, `R3`, `Options`, `Up`, `Right`, `Down`, `Left`, `LeftStickLeft`, `LeftStickRight`, `LeftStickUp`, `LeftStickDown`, `RightStickLeft`, `RightStickRight`, `RightStickUp`, `RightStickDown`, `TouchLeft`, `TouchRight`, `StickModifier`, `Shake`, `ToggleMouse`, `SwitchLayout` (F8), `ToggleFullscreen` (F11), `TogglePerformanceOverlay` (F10, the [performance overlay](USAGE.md#performance-overlay)), and `Screenshot` (F12, saves the next displayed frame as described in [screenshots](USAGE.md#screenshots)). `ToggleFullscreen`, `TogglePerformanceOverlay` and `Screenshot` accept only keyboard keys.
 
 ### Default bindings
 
@@ -41,6 +41,7 @@ Without an `anyps5-input.ini`, or for actions the file does not mention, these b
 | `TouchLeft`, `TouchRight` | Backspace, Tab |
 | `Shake` | X (reports a swinging acceleration and angular velocity while held) |
 | `ToggleMouse` | Middle mouse button, F7 |
+| `SwitchLayout` | F8 |
 | `ToggleFullscreen` | F11 |
 | `TogglePerformanceOverlay` | F10 |
 | `Screenshot` | F12 |
@@ -131,3 +132,32 @@ MouseCurve = 1.3
 Earlier versions sampled the mouse every 33 ms and tilted the stick at least halfway for any movement. `MouseDeadzoneOffset = 0.5`, `MouseSmoothingMs = 0` and `MouseDecayMs = 33` come close to that behavior.
 
 An invalid line reports the file and line number and stops input initialization. If the configured file does not exist or cannot be read, AnyPS5 reports an error. With no `anyps5-input.ini` and no `ANYPS5_INPUT_CONFIG`, the built-in mapping is used.
+
+## Shooter layout
+
+A second built-in layout, `Shooter`, is for playing with mouse and keyboard like a PC game. The default layout, `Classic`, is unchanged. Press F8 (`SwitchLayout`) while playing to switch between them, or start in the shooter layout with `Layout = Shooter` in `anyps5-input.ini`. The first key press or click after the layout starts captures the mouse for mouse look, which drives the right stick; F7 releases it, and a lost window focus releases it and arms the capture again. Titles that open the mouse themselves (`sceMouseOpen`) keep receiving raw mouse input and a keyboard through `libSceKeyboard` in either layout.
+
+| Action | Shooter layout |
+|--------|----------------|
+| `LeftStick*` | W, A, S, D |
+| `Cross` | Space, Return |
+| `Circle` | Left Ctrl, C |
+| `Square` | R, E |
+| `Triangle` | F |
+| `L1`, `R1` | Q, G; mouse button 4 and 5; wheel down and up |
+| `L2`, `R2` | Right mouse button, left mouse button |
+| `L3`, `R3` | Left Shift, V or middle mouse button |
+| `Options` | Escape |
+| `Up`, `Right`, `Down`, `Left` | Arrow keys or 1, 2, 3, 4 |
+| `TouchLeft`, `TouchRight` | Backspace, Tab |
+
+`anyps5-input.ini` lines before any section header change the classic layout as before. Put lines under `[Shooter]` to change the shooter layout, or under `[Classic]` for the classic layout explicitly. Mouse look settings such as `MouseSensitivity` and `MouseCurve` are per layout and follow the same rules.
+
+```ini
+Layout = Shooter
+
+[Shooter]
+MouseSensitivity = 1.5
+Cross = KEY:Space
+Square = KEY:E
+```

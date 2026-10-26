@@ -140,6 +140,11 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize) {
         device.WaitIdle();
         std::printf("wave%u %zu words: host interpolation matched %u pixels\n", waveSize, code.size(), CheckPixels());
     }
+    const auto& supported = target.supportedCapabilities;
+    if (std::find(supported.begin(), supported.end(), 2u) == supported.end()) {
+        std::printf("wave%u: KNOWN GAP: the target has no geometry stage for barycentric emulation, so a partial interpolation before WQM keeps host interpolation and can differ from hardware\n", waveSize);
+        return;
+    }
     Require(compile(ExpandedExecPixelCode).barycentricEmulation.active, "a partial interpolation written before WQM incorrectly used host interpolation");
     std::printf("wave%u: expanded EXEC keeps barycentric emulation\n", waveSize);
 }

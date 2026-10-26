@@ -118,6 +118,34 @@ Pad::KeyboardMouse::KeyboardMouse(InputConfiguration configuration)
       wheelReleaseTimes(this->configuration.bindings.size()),
       mouse(this->configuration.settings) {}
 
+Pad::KeyboardMouse::KeyboardMouse(InputLayouts layouts) : KeyboardMouse(layouts.classic.startLayout == Layout::Shooter ? layouts.shooter : layouts.classic) {
+    current = layouts.classic.startLayout;
+    alternate = current == Layout::Shooter ? std::move(layouts.classic) : std::move(layouts.shooter);
+    hasAlternate = true;
+}
+
+void Pad::KeyboardMouse::adopt(InputConfiguration next) {
+    configuration = std::move(next);
+    pressed.assign(configuration.bindings.size(), false);
+    wheelReleaseTimes.assign(configuration.bindings.size(), Clock::time_point{});
+    stickAxes = {};
+    triggerAxes = {};
+    mouse = MouseStick(configuration.settings);
+}
+
+bool Pad::KeyboardMouse::SwitchLayout() {
+    if (!hasAlternate) return false;
+    auto next = std::move(alternate);
+    alternate = std::move(configuration);
+    adopt(std::move(next));
+    current = current == Layout::Shooter ? Layout::Classic : Layout::Shooter;
+    return true;
+}
+
+Pad::Layout Pad::KeyboardMouse::CurrentLayout() const {
+    return current;
+}
+
 const Pad::InputConfiguration& Pad::KeyboardMouse::Configuration() const {
     return configuration;
 }
@@ -265,6 +293,7 @@ Pad::InputRequests Pad::KeyboardMouse::HandleEvent(const SDL_Event& event, Clock
         if (binding.control == InputControl::TogglePerformanceOverlay && keyboard && down && !pressed[index]) requests.togglePerformanceOverlay = true;
         if (binding.control == InputControl::Screenshot && keyboard && down && !pressed[index]) requests.screenshot = true;
         if (binding.control == InputControl::ToggleMouse && down && !pressed[index]) requests.toggleMouse = true;
+        if (binding.control == InputControl::SwitchLayout && keyboard && down && !pressed[index]) requests.switchLayout = true;
         pressed[index] = down;
     }
     return requests;
@@ -301,6 +330,7 @@ PadInputState Pad::KeyboardMouse::Compose(const PadInputState& controller) const
                 break;
             }
             case InputControl::ToggleMouse: break;
+            case InputControl::SwitchLayout: break;
             case InputControl::ToggleFullscreen: break;
             case InputControl::TogglePerformanceOverlay: break;
             case InputControl::Screenshot: break;

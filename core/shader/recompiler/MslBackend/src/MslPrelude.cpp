@@ -323,8 +323,7 @@ constexpr std::string_view DirectBuffersText = R"(static inline uint aps5_buffer
     device uchar* pointer = buffer.data + byte;
     if (((r.base + ulong(byte)) & ulong(bytes - 1u)) == 0ul) {
         if (bytes == 4u) return *reinterpret_cast<device uint*>(pointer);
-        if (bytes == 2u) return uint(*reinterpret_cast<device ushort*>(pointer));
-        return uint(*pointer);
+        if (bytes == 1u) return uint(*pointer);
     }
     uint value = 0u;
     for (uint part = 0u; part < bytes; ++part) value |= uint(pointer[part]) << (part * 8u);
@@ -335,19 +334,24 @@ static inline void aps5_buffer_store(thread aps5_ctx& c, uint element, aps5_vsha
     if (ulong(byte) + ulong(bytes) > ulong(buffer.size)) return;
     device uchar* pointer = buffer.data + byte;
     if (((r.base + ulong(byte)) & ulong(bytes - 1u)) == 0ul) {
-        if (bytes == 4u) *reinterpret_cast<device uint*>(pointer) = value;
-        else if (bytes == 2u) *reinterpret_cast<device ushort*>(pointer) = ushort(value);
-        else *pointer = uchar(value);
-        return;
+        if (bytes == 4u) { *reinterpret_cast<device uint*>(pointer) = value; return; }
+        if (bytes == 1u) { *pointer = uchar(value); return; }
     }
     for (uint part = 0u; part < bytes; ++part) pointer[part] = uchar(value >> (part * 8u));
 }
 static inline device atomic_uint* aps5_buffer_atomic(thread aps5_ctx& c, uint element, aps5_vsharp r, uint byte, uint pc) {
-    ulong guest = r.base + ulong(byte);
-    if ((guest & 3ul) != 0ul) { aps5_fault(c, $UNALIGNED, guest, 4u, pc); return nullptr; }
     aps5_guest_buffer buffer = c.buffers[element];
     if (ulong(byte) + 4ul > ulong(buffer.size)) return nullptr;
-    return reinterpret_cast<device atomic_uint*>(buffer.data + byte);
+    uint skew = uint((r.base + ulong(byte)) & 3ul);
+    if (skew > byte) return nullptr;
+    return reinterpret_cast<device atomic_uint*>(buffer.data + (byte - skew));
+}
+static inline uint aps5_buffer_peek(thread aps5_ctx& c, uint element, aps5_vsharp r, uint byte) {
+    aps5_guest_buffer buffer = c.buffers[element];
+    if (ulong(byte) + 4ul > ulong(buffer.size)) return 0u;
+    uint skew = uint((r.base + ulong(byte)) & 3ul);
+    if (skew <= byte) return 0u;
+    return *reinterpret_cast<device uint*>(buffer.data + (long(byte) - long(skew)));
 }
 )";
 
@@ -758,6 +762,68 @@ constexpr std::string_view Atomic64MinMaxText = R"(    case 5u:
     }
 )";
 
+constexpr std::string_view Lds64Text = R"(static inline ulong aps5_f64_flush(ulong x) { return (x & 0x7ffffffffffffffful) < 0x0010000000000000ul ? (x & 0x8000000000000000ul) : x; }
+static inline bool aps5_f64_equal(ulong a, ulong b) { return (a == b && !aps5_f64_is_nan(a)) || (((a | b) & 0x7ffffffffffffffful) == 0ul); }
+static inline ulong aps5_update_lds64(uint op, ulong old, ulong a, ulong b) {
+    switch (op) {
+    case 15u: return aps5_f64_min_max(a, old, false);
+    case 16u: return aps5_f64_min_max(a, old, true);
+    case 18u: return (old & ~b) | a;
+    case 20u: return aps5_f64_equal(old, b) ? a : old;
+    case 22u: return aps5_f64_min_max(aps5_f64_flush(a), aps5_f64_flush(old), false);
+    case 23u: return aps5_f64_min_max(aps5_f64_flush(a), aps5_f64_flush(old), true);
+    case 24u: return aps5_f64_equal(aps5_f64_flush(old), aps5_f64_flush(b)) ? a : old;
+    }
+    return aps5_update64(op, old, a, b);
+}
+)";
+
+constexpr std::string_view Lds64LockedText = R"(static inline uint aps5_lds32(threadgroup atomic_uint* lock, threadgroup atomic_uint* p, uint lane, bool active, uint op, uint a, uint b) {
+    uint old = 0u;
+    for (uint turn = 0u; turn < 32u; ++turn) {
+        if (active && lane == turn) {
+            while (atomic_exchange_explicit(lock, 1u, memory_order_relaxed) != 0u) {}
+            old = atomic_load_explicit(p, memory_order_relaxed);
+            atomic_store_explicit(p, aps5_update(op, old, a, b), memory_order_relaxed);
+            atomic_store_explicit(lock, 0u, memory_order_relaxed);
+        }
+    }
+    return old;
+}
+static inline ulong aps5_lds64(threadgroup atomic_uint* lock, threadgroup atomic_uint* p, uint lane, bool active, uint op, ulong a, ulong b) {
+    ulong old = 0ul;
+    for (uint turn = 0u; turn < 32u; ++turn) {
+        if (active && lane == turn) {
+            while (atomic_exchange_explicit(lock, 1u, memory_order_relaxed) != 0u) {}
+            const uint low = atomic_load_explicit(p, memory_order_relaxed);
+            const uint high = atomic_load_explicit(p + 1, memory_order_relaxed);
+            old = (ulong(high) << 32u) | ulong(low);
+            const ulong next = aps5_update_lds64(op, old, a, b);
+            atomic_store_explicit(p, uint(next), memory_order_relaxed);
+            atomic_store_explicit(p + 1, uint(next >> 32u), memory_order_relaxed);
+            atomic_store_explicit(lock, 0u, memory_order_relaxed);
+        }
+    }
+    return old;
+}
+)";
+
+constexpr std::string_view Lds64ThreadText = R"(static inline uint aps5_lds32(thread uint* lock, thread uint* p, uint lane, bool active, uint op, uint a, uint b) {
+    if (!active) return 0u;
+    const uint old = *p;
+    *p = aps5_update(op, old, a, b);
+    return old;
+}
+static inline ulong aps5_lds64(thread uint* lock, thread uint* p, uint lane, bool active, uint op, ulong a, ulong b) {
+    if (!active) return 0ul;
+    const ulong old = (ulong(p[1]) << 32u) | ulong(p[0]);
+    const ulong next = aps5_update_lds64(op, old, a, b);
+    p[0] = uint(next);
+    p[1] = uint(next >> 32u);
+    return old;
+}
+)";
+
 constexpr std::string_view Atomic64PointerText = R"(static inline device atomic_uint* aps5_bda_atomic8(thread aps5_ctx& c, ulong address, uint need, uint pc) {
     if ((address & 7ul) != 0ul) { aps5_fault(c, $UNALIGNED, address, 8u, pc); return nullptr; }
     uint reason = 0u;
@@ -785,6 +851,15 @@ constexpr std::string_view Atomic64GpuText = R"(static inline device atomic_uint
 )";
 
 constexpr std::string_view WaveText = R"(static inline uint aps5_ballot32(bool predicate) { return uint(static_cast<simd_vote::vote_t>(simd_ballot(predicate))); }
+)";
+
+constexpr std::string_view VertexWaveText = R"(#define simd_shuffle(value, lane) (value)
+#define simd_shuffle_xor(value, mask) (value)
+#define simd_shuffle_up(value, delta) (value)
+#define simd_shuffle_down(value, delta) (value)
+#define simd_broadcast_first(value) (value)
+#define simd_any(predicate) (predicate)
+static inline uint aps5_ballot32(bool predicate) { return predicate ? 1u : 0u; }
 )";
 
 constexpr std::string_view PermuteText = R"(static inline uint aps5_permute(uint value, uint address, bool active, uint lane) {
@@ -1034,7 +1109,8 @@ std::string Prelude(const State& state) {
     }
     if (has(Dot2)) text += Dot2Text;
     if (has(Half)) text += state.target.relaxedFloat ? HalfText : ExactHalfText;
-    if (has(Wave)) text += WaveText;
+    if (has(Wave | Lane) && state.program.Resources().stage == IrShaderStage::Vertex) text += VertexWaveText;
+    else if (has(Wave)) text += WaveText;
     if (has(Permute)) text += PermuteText;
     if (has(Fault | Bda | GuestBuffers)) text += FaultText;
     if (has(Tables)) text += Replace(std::string(TableFaultText), "$REASON", Reason(BdaAbi::FaultReason::ImageTable));
@@ -1091,14 +1167,21 @@ std::string Prelude(const State& state) {
             }
         }
     }
+    const std::string ldsSpace = state.ldsFunction ? "thread" : state.ldsDevice ? "device" : "threadgroup";
     if (has(Lds)) {
-        auto lds = Replace(Replace(std::string(LocalMemoryText), "SPACE", "threadgroup"), "NAME", "_lds");
-        lds = Replace(lds, "MERGE(index, ", "aps5_merge_threadgroup(&words[index], ");
-        lds = Replace(lds, "MERGE(index + 1u, ", "aps5_merge_threadgroup(&words[index + 1u], ");
-        text += "static inline void aps5_merge_threadgroup(threadgroup uint* word, uint mask, uint value) {\n"
-                "    atomic_fetch_and_explicit(reinterpret_cast<threadgroup atomic_uint*>(word), ~mask, memory_order_relaxed);\n"
-                "    atomic_fetch_or_explicit(reinterpret_cast<threadgroup atomic_uint*>(word), value, memory_order_relaxed);\n"
-                "}\n";
+        text += "typedef " + ldsSpace + (state.ldsFunction ? " uint* aps5_lds_atomic;\n" : " atomic_uint* aps5_lds_atomic;\n");
+        auto lds = Replace(Replace(std::string(LocalMemoryText), "SPACE", ldsSpace), "NAME", "_lds");
+        if (state.ldsFunction) {
+            lds = Replace(lds, "MERGE(index, uint(mask), uint(data));", "words[index] = (words[index] & ~uint(mask)) | uint(data);");
+            lds = Replace(lds, "MERGE(index + 1u, uint(mask >> 32u), uint(data >> 32u));", "words[index + 1u] = (words[index + 1u] & ~uint(mask >> 32u)) | uint(data >> 32u);");
+        } else {
+            lds = Replace(lds, "MERGE(index, ", "aps5_merge_threadgroup(&words[index], ");
+            lds = Replace(lds, "MERGE(index + 1u, ", "aps5_merge_threadgroup(&words[index + 1u], ");
+            text += "static inline void aps5_merge_threadgroup(" + ldsSpace + " uint* word, uint mask, uint value) {\n"
+                    "    atomic_fetch_and_explicit(reinterpret_cast<aps5_lds_atomic>(word), ~mask, memory_order_relaxed);\n"
+                    "    atomic_fetch_or_explicit(reinterpret_cast<aps5_lds_atomic>(word), value, memory_order_relaxed);\n"
+                    "}\n";
+        }
         text += lds;
     }
     if (has(Scratch)) {
@@ -1110,7 +1193,8 @@ std::string Prelude(const State& state) {
     if (has(Lds | GuestBuffers | Bda | UpdateTable)) {
         text += AtomicsText;
         text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "device"), "NAME", "");
-        if (has(Lds)) text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "threadgroup"), "NAME", "_lds");
+        if (has(Lds) && state.ldsFunction) text += "static inline uint aps5_atomic_lds(thread uint* pointer, uint op, uint a, uint b) {\n    const uint old = *pointer;\n    *pointer = aps5_update(op, old, a, b);\n    return old;\n}\n";
+        else if (has(Lds)) text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", ldsSpace), "NAME", "_lds");
     }
     if (has(Atomic64)) {
         text += Atomic64Text;
@@ -1119,7 +1203,11 @@ std::string Prelude(const State& state) {
         if (has(Bda) && has(Descriptors)) text += Replace(std::string(Atomic64GpuText), "$READ_WRITE", U32(BdaAbi::Read | BdaAbi::Write));
         auto device = Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "device"), "NAME", "");
         text += Replace(device, "MINMAX", std::string(Atomic64MinMaxText));
-        if (has(Lds)) text += Replace(Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "threadgroup"), "NAME", "_lds"), "MINMAX", "");
+        if (has(Lds) && !state.ldsFunction) text += Replace(Replace(Replace(std::string(Atomic64SpaceText), "SPACE", ldsSpace), "NAME", "_lds"), "MINMAX", "");
+        if (has(Lds64)) {
+            text += Lds64Text;
+            text += state.ldsFunction ? std::string(Lds64ThreadText) : Replace(std::string(Lds64LockedText), "threadgroup", ldsSpace);
+        }
     }
     for (std::size_t index = 0; index < state.imageTypes.size(); ++index) text += "struct aps5_img" + std::to_string(index) + " { " + state.imageTypes[index] + " t; };\n";
     if (has(Samplers | Tables)) text += "struct aps5_sampler { sampler s; };\n";

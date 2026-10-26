@@ -273,6 +273,8 @@ TextureHandle TextureManager::Create(const TextureCreateInfo& requested, std::st
         MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
         if (info.shaderWrite) usage |= MTLTextureUsageShaderWrite;
         if (info.renderTarget) usage |= MTLTextureUsageRenderTarget;
+        static const bool compressedTargets = std::getenv("APS5_METAL_COMPRESSED_TARGETS") != nullptr;
+        if (compressedTargets && info.renderTarget) usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         descriptor.usage = usage;
         const auto sizeAndAlign = [s.native heapTextureSizeAndAlignWithDescriptor:descriptor];
         const std::uint64_t bytes = sizeAndAlign.size;
@@ -433,6 +435,27 @@ void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& 
         }
         s.detiler->Encode(computeEncoder, kernel, plan.elementBytes, format.transform, format.texelBytes, job.params, (__bridge void*)view, job.columns, job.rows);
     }
+    s.writebacks.fetch_add(1, std::memory_order_relaxed);
+}
+
+void TextureManager::EncodeTiledToLinear(void* computeEncoder, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::uint64_t linearDeviceAddress, std::uint32_t linearPitchBytes) {
+    auto& s = *state;
+    const auto plan = PlanSurface(descriptor, surfaceDeviceAddress);
+    if (plan.volume || plan.jobs.empty()) throw std::runtime_error("AGC graphics: a single 2D surface is needed to detile into linear data on Metal");
+    auto job = plan.jobs.front();
+    job.params.linear = linearDeviceAddress;
+    job.params.linearPitchBytes = linearPitchBytes;
+    s.detiler->Encode(computeEncoder, DetileKernel::TiledToLinear, plan.elementBytes, TextureTransform::None, plan.texelBytes, job.params, nullptr, job.columns, job.rows);
+}
+
+void TextureManager::EncodeLinearToTiled(void* computeEncoder, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::uint64_t linearDeviceAddress, std::uint32_t linearPitchBytes) {
+    auto& s = *state;
+    const auto plan = PlanSurface(descriptor, surfaceDeviceAddress);
+    if (plan.volume || plan.jobs.empty()) throw std::runtime_error("AGC graphics: linear data can only be tiled into a single 2D surface on Metal");
+    auto job = plan.jobs.front();
+    job.params.linear = linearDeviceAddress;
+    job.params.linearPitchBytes = linearPitchBytes;
+    s.detiler->Encode(computeEncoder, DetileKernel::LinearToTiled, plan.elementBytes, TextureTransform::None, plan.texelBytes, job.params, nullptr, job.columns, job.rows);
     s.writebacks.fetch_add(1, std::memory_order_relaxed);
 }
 

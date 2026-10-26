@@ -758,6 +758,7 @@ void writeMslTarget(Writer& writer, const MslTarget& target) {
     writer.WriteBool(target.float32DenormPreserve);
     writer.WriteBool(target.spannedWaves);
     writer.WriteU32(target.subgroupStages);
+    writer.WriteU32(target.experiment);
 }
 
 MslTarget readMslTarget(Reader& reader) {
@@ -783,6 +784,7 @@ MslTarget readMslTarget(Reader& reader) {
     target.float32DenormPreserve = reader.ReadBool();
     target.spannedWaves = reader.ReadBool();
     target.subgroupStages = reader.ReadU32();
+    target.experiment = reader.ReadU32();
     return target;
 }
 

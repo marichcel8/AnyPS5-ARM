@@ -277,6 +277,11 @@ extension AppModel {
                 self?.update(game) { $0.resolution = index == 0 ? nil : choices[index - 1] }
             }))
         }
+        let outputHeights = [nil, 0, 1440, 1080, 720]
+        let outputNames = [T.text(.outputGame), T.text(.outputDisplay), "1440p", "1080p", "720p"]
+        rows.append(PanelRow(id: "outputResolution", title: T.text(.outputResolution), detail: T.text(.outputResolutionDetail), symbol: "arrow.down.right.and.arrow.up.left", kind: .choice(options: outputNames, selected: outputHeights.firstIndex(of: settings.outputHeight) ?? 0) { [weak self] index in
+            self?.update(game) { $0.outputHeight = outputHeights[index] }
+        }))
         rows.append(PanelRow(id: "display", title: T.text(.display), symbol: "macwindow", kind: .choice(options: [T.text(.windowed), T.text(.fullscreen)], selected: settings.fullscreen ? 1 : 0) { [weak self] index in
             self?.update(game) { $0.fullscreen = index == 1 }
         }))

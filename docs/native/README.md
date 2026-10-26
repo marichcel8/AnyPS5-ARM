@@ -114,7 +114,7 @@ Design details, the hard parts and the plan: [NATIVE_ARM64.md](../dev/NATIVE_ARM
 ## Known limits
 
 - Game-bundled prx modules (`sce_module`) are not translated yet. DOOM's bundled `libc.prx` is only stubs, so it does not matter there; most commercial titles need it.
-- Not ported yet: `setjmp`/`longjmp`, fibers, guest C++ exception unwinding through translated code, `getcontext`/`setcontext`, 80-bit `long double`. They stop the game with a clear message when reached.
+- Not ported yet: fibers, guest C++ exception unwinding through translated code, `getcontext`/`setcontext`, 80-bit `long double`. They stop the game with a clear message when reached.
 - x86 memory ordering is stronger than arm64's. The translator does not add barriers yet, so multithreaded code that relies on x86 ordering can misbehave.
 - New NaNs are positive on arm64 and negative on x86; code that looks at a NaN's sign can differ.
 - Audio has not been checked yet.

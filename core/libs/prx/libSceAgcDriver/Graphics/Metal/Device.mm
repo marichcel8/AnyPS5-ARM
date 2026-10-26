@@ -6,10 +6,13 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace AgcDriver::Graphics::Metal {
@@ -57,6 +60,11 @@ struct Device::State final : WindowBackend {
     std::mutex residencyMutex;
     std::atomic<bool> residencyDirty{false};
     std::atomic<std::uint64_t> residencyCommits{0};
+    std::atomic<std::uint64_t> gpuBusyNs{0};
+    std::atomic<std::uint64_t> gpuMaxNs{0};
+    std::atomic<std::uint64_t> gpuBuffers{0};
+    std::mutex gpuTagMutex;
+    std::string gpuLongestTag;
     mutable std::mutex releaseMutex;
     std::deque<PendingRelease> releases;
     std::atomic<std::uint64_t> driverBytes{0};
@@ -126,11 +134,27 @@ struct Device::State final : WindowBackend {
 
 std::unique_ptr<Device> Device::Create(std::string* failure) {
     @autoreleasepool {
-        const auto fail = [&](const char* what) -> std::unique_ptr<Device> {
+        const auto fail = [&](const std::string& what) -> std::unique_ptr<Device> {
             if (failure != nullptr) *failure = what;
             return nullptr;
         };
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (const char* requested = std::getenv("ANYPS5_GPU"); requested != nullptr && requested[0] != '\0') {
+            const auto lower = [](std::string text) {
+                std::transform(text.begin(), text.end(), text.begin(), [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                return text;
+            };
+            const auto wanted = lower(requested);
+            std::string names;
+            id<MTLDevice> chosen = nil;
+            for (id<MTLDevice> candidate in MTLCopyAllDevices()) {
+                const std::string name = candidate.name != nil ? candidate.name.UTF8String : "";
+                names += (names.empty() ? "" : ", ") + name;
+                if (chosen == nil && lower(name).find(wanted) != std::string::npos) chosen = candidate;
+            }
+            if (chosen == nil) return fail(std::string("no usable device whose name contains ANYPS5_GPU=\"") + requested + "\"; devices: " + names);
+            device = chosen;
+        }
         if (device == nil) return fail("no Metal device");
         if (![device supportsFamily:MTLGPUFamilyMetal4]) return fail("the GPU does not support Metal 4");
         auto state = std::make_unique<State>();
@@ -245,6 +269,32 @@ void Device::FlushResidency() {
     s.residencyCommits.fetch_add(1, std::memory_order_relaxed);
 }
 
+namespace {
+
+bool GpuTimeEnabled() {
+    static const bool enabled = std::getenv("APS5_METAL_GPU_TIME") != nullptr;
+    return enabled;
+}
+
+thread_local std::string submitTag;
+
+MTL4CommitOptions* GpuTimeOptions(std::atomic<std::uint64_t>* busyNs, std::atomic<std::uint64_t>* maxNs, std::atomic<std::uint64_t>* buffers, std::mutex* tagMutex, std::string* longestTag, std::string tag) {
+    MTL4CommitOptions* options = [MTL4CommitOptions new];
+    [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
+        const auto busy = static_cast<std::uint64_t>(std::max(0.0, feedback.GPUEndTime - feedback.GPUStartTime) * 1.0e9);
+        busyNs->fetch_add(busy, std::memory_order_relaxed);
+        buffers->fetch_add(1, std::memory_order_relaxed);
+        std::lock_guard lock(*tagMutex);
+        if (busy > maxNs->load(std::memory_order_relaxed)) {
+            maxNs->store(busy, std::memory_order_relaxed);
+            *longestTag = tag;
+        }
+    }];
+    return options;
+}
+
+}
+
 std::uint64_t Device::Submit(QueueKind queue, void* const* commandBuffers, std::size_t count) {
     auto& s = *state;
     const auto index = queueIndex(queue);
@@ -252,11 +302,13 @@ std::uint64_t Device::Submit(QueueKind queue, void* const* commandBuffers, std::
     std::uint64_t serial = 0;
     {
         std::lock_guard lock(s.submitMutex[index]);
+        MTL4CommitOptions* options = GpuTimeEnabled() ? GpuTimeOptions(&s.gpuBusyNs, &s.gpuMaxNs, &s.gpuBuffers, &s.gpuTagMutex, &s.gpuLongestTag, std::exchange(submitTag, std::string())) : nil;
         for (std::size_t first = 0; first < count; first += InlineCommits) {
             const auto chunk = std::min(InlineCommits, count - first);
             __unsafe_unretained id<MTL4CommandBuffer> list[InlineCommits];
             for (std::size_t item = 0; item < chunk; ++item) list[item] = (__bridge id<MTL4CommandBuffer>)commandBuffers[first + item];
-            [s.queues[index] commit:list count:chunk];
+            if (options != nil) [s.queues[index] commit:list count:chunk options:options];
+            else [s.queues[index] commit:list count:chunk];
         }
         serial = s.submitted[index].load(std::memory_order_relaxed) + 1;
         [s.queues[index] signalEvent:s.timelines[index] value:serial];
@@ -289,6 +341,23 @@ std::uint64_t Device::SubmitPresent(QueueKind queue, void* drawable, void* const
     [target present];
     Collect();
     return serial;
+}
+
+GpuTimeReport Device::TakeGpuTime() {
+    auto& s = *state;
+    GpuTimeReport report;
+    report.enabled = GpuTimeEnabled();
+    report.busyMs = static_cast<double>(s.gpuBusyNs.exchange(0, std::memory_order_relaxed)) / 1.0e6;
+    report.maxMs = static_cast<double>(s.gpuMaxNs.exchange(0, std::memory_order_relaxed)) / 1.0e6;
+    report.commandBuffers = s.gpuBuffers.exchange(0, std::memory_order_relaxed);
+    std::lock_guard lock(s.gpuTagMutex);
+    report.longestTag = std::move(s.gpuLongestTag);
+    s.gpuLongestTag.clear();
+    return report;
+}
+
+void Device::TagNextSubmit(std::string tag) {
+    if (GpuTimeEnabled()) submitTag = std::move(tag);
 }
 
 std::uint64_t Device::SubmittedSerial(QueueKind queue) const {

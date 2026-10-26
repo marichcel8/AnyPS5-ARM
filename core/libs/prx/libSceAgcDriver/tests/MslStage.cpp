@@ -68,10 +68,13 @@ void Rejected(const std::string& name, const std::function<void(RecompileRequest
 void CheckUnsupported() {
     Rejected("a quad pixel mask", [](RecompileRequest& request) { request.context.pixel->quadPixelMask = 0x7u; });
     Rejected("a primitive-ordered pixel shader", [](RecompileRequest& request) { request.context.pixel->orderedPixelShader = true; });
-    Rejected("a wave64 pixel shader", [](RecompileRequest& request) {
-        request.context.waveSize = 64;
-        request.context.pixel->wave32 = false;
-    });
+}
+
+void CheckWave64Pixel() {
+    auto request = MslStagePrograms::InterpolatedPixelRequest(0x24000u);
+    request.context.waveSize = 64;
+    request.context.pixel->wave32 = false;
+    Check(request, "wave64 pixel", {"fragment aps5_stage_out aps5_main("});
 }
 
 }
@@ -81,6 +84,7 @@ int main() {
         CheckVertex();
         CheckPixel();
         CheckUnsupported();
+        CheckWave64Pixel();
     } catch (const std::exception& error) {
         std::fprintf(stderr, "MslStage: %s\n", error.what());
         return 1;

@@ -25,6 +25,16 @@ final class GameSettingsTests: XCTestCase {
         XCTAssertEqual(environment["ANYPS5_PRESENT_MODE"], "fifo", "the generated frame needs presents a refresh apart")
     }
 
+    func testOutputHeightReachesTheEngine() {
+        var settings = GameSettings()
+        XCTAssertNil(settings.environment(launcherLanguage: 1, displayHeight: 1506)["APS5_OUTPUT_HEIGHT"])
+        settings.outputHeight = 0
+        XCTAssertEqual(settings.environment(launcherLanguage: 1, displayHeight: 1506)["APS5_OUTPUT_HEIGHT"], "1506")
+        XCTAssertNil(settings.environment(launcherLanguage: 1)["APS5_OUTPUT_HEIGHT"])
+        settings.outputHeight = 1080
+        XCTAssertEqual(settings.environment(launcherLanguage: 1)["APS5_OUTPUT_HEIGHT"], "1080")
+    }
+
     func testSettingsSavedBeforeTheStyleStillRead() throws {
         let older = #"{"fullscreen":false,"windowSize":75,"vsync":true,"overlay":"topLeft"}"#
         let settings = try JSONDecoder().decode(GameSettings.self, from: Data(older.utf8))

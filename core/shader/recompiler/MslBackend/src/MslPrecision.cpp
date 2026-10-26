@@ -242,7 +242,8 @@ private:
         }
     }
 
-    bool Inspected(const IrValue& bits) const {
+    std::uint8_t Inspected(const IrValue& bits) const {
+        std::uint8_t level = PrecisionFast;
         std::vector<const IrValue*> pending(bits.Uses().begin(), bits.Uses().end());
         std::vector<const IrValue*> seen;
         while (!pending.empty()) {
@@ -257,9 +258,10 @@ private:
             }
             if (opcode == IrOpcode::BitCastF32U32 || Samples(opcode)) continue;
             if (user->MayHaveSideEffects() && !Atomic(opcode)) continue;
-            return true;
+            if (Atomic(opcode)) return PrecisionStrict;
+            level = PrecisionIeee;
         }
-        return false;
+        return level;
     }
 
     void Sink(const IrValue& inst) {
@@ -296,7 +298,7 @@ private:
             return;
         }
         case IrOpcode::BitCastU32F32:
-            if (Inspected(inst)) Observe(inst, PrecisionStrict, {0});
+            if (const auto level = Inspected(inst); level != PrecisionFast) Observe(inst, level, {0});
             return;
         default: return;
         }

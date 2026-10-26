@@ -21,7 +21,7 @@ PixelFormat DepthTargetFormat(VkFormat format);
 bool DepthTargetHasStencil(VkFormat format);
 BlendFactor TranslateBlendFactor(VkBlendFactor factor);
 Winding TranslateFrontFace(VkFrontFace face);
-TranslatedState TranslateState(const State& state);
+TranslatedState TranslateState(const State& state, bool flatInputs = true);
 
 }
 

@@ -24,6 +24,7 @@
 #include <windows.h>
 #else
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 
 namespace {
@@ -31,12 +32,16 @@ namespace {
 using AgcDriver::Graphics::Require;
 namespace Abi = ShaderRecompiler::ImageTableAbi;
 
-constexpr std::uint32_t PageBytes = 4096;
+#ifdef _WIN32
+const std::uint32_t PageBytes = 4096;
+#else
+const std::uint32_t PageBytes = static_cast<std::uint32_t>(sysconf(_SC_PAGESIZE));
+#endif
 constexpr std::uint32_t ReservedBytes = 65536;
 constexpr std::uint32_t Stride = 48;
 constexpr std::uint32_t Records = 4;
 constexpr std::uint32_t TableBytes = Records * Stride;
-constexpr std::uint32_t TableOffset = PageBytes - 2u * Stride;
+const std::uint32_t TableOffset = PageBytes - 2u * Stride;
 constexpr std::uint32_t ImageOffset = 16;
 constexpr std::uint32_t Format8888UNorm = 56;
 constexpr std::uint32_t Type2D = 9;

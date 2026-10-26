@@ -39,6 +39,7 @@ enum class StencilOperation : std::uint8_t { Keep = 0, Zero = 1, Replace = 2, In
 enum class CullMode : std::uint8_t { None = 0, Front = 1, Back = 2 };
 enum class Winding : std::uint8_t { Clockwise = 0, CounterClockwise = 1 };
 enum class DepthClipMode : std::uint8_t { Clip = 0, Clamp = 1 };
+enum class FillMode : std::uint8_t { Fill = 0, Lines = 1 };
 enum class PrimitiveType : std::uint8_t { Point = 0, Line = 1, LineStrip = 2, Triangle = 3, TriangleStrip = 4 };
 enum class TopologyClass : std::uint8_t { Unspecified = 0, Point = 1, Line = 2, Triangle = 3 };
 enum class IndexType : std::uint8_t { UInt16 = 0, UInt32 = 1 };
@@ -182,6 +183,7 @@ struct DynamicState {
     CullMode cull = CullMode::None;
     Winding winding = Winding::Clockwise;
     DepthClipMode depthClip = DepthClipMode::Clip;
+    FillMode fill = FillMode::Fill;
 };
 
 inline constexpr std::uint32_t DynamicViewport = 1u << 0u;
@@ -192,7 +194,8 @@ inline constexpr std::uint32_t DynamicStencilReference = 1u << 4u;
 inline constexpr std::uint32_t DynamicCull = 1u << 5u;
 inline constexpr std::uint32_t DynamicWinding = 1u << 6u;
 inline constexpr std::uint32_t DynamicDepthClip = 1u << 7u;
-inline constexpr std::uint32_t DynamicAll = 0xffu;
+inline constexpr std::uint32_t DynamicFill = 1u << 8u;
+inline constexpr std::uint32_t DynamicAll = 0x1ffu;
 
 inline std::uint32_t DiffDynamic(const DynamicState& current, const DynamicState& next) {
     std::uint32_t changed = 0;
@@ -204,6 +207,7 @@ inline std::uint32_t DiffDynamic(const DynamicState& current, const DynamicState
     if (current.cull != next.cull) changed |= DynamicCull;
     if (current.winding != next.winding) changed |= DynamicWinding;
     if (current.depthClip != next.depthClip) changed |= DynamicDepthClip;
+    if (current.fill != next.fill) changed |= DynamicFill;
     return changed;
 }
 

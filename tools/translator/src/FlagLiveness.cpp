@@ -24,6 +24,7 @@ std::uint8_t ConditionFlags(Condition condition) {
     case Condition::P: case Condition::Np: return 1u << Pf;
     case Condition::L: case Condition::Ge: return (1u << Sf) | (1u << Of);
     case Condition::Le: case Condition::G: return (1u << Zf) | (1u << Sf) | (1u << Of);
+    case Condition::LoopE: case Condition::LoopNe: return 1u << Zf;
     default: return 0;
     }
 }

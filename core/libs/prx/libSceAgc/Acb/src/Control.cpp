@@ -24,7 +24,8 @@ std::uint32_t* RejectUnregisteredWorkloadStream(CommandBuffer* buf, std::uint32_
 
 extern "C" {
 
-std::uint32_t* APS5_VABI sceAgcAcbAtomicGds_0900(CommandBuffer* buf, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, std::uint32_t data, std::uint64_t compareData, std::uint64_t extraData) {
+std::uint32_t* APS5_VABI sceAgcAcbAtomicGds_0900(CommandBuffer* buf, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, std::uint64_t dataSlot, std::uint64_t compareData, std::uint64_t extraData) {
+    const auto data = static_cast<std::uint32_t>(dataSlot);
     const auto operation = (control & 0xffu) | ((control & 0x200u) << 7u) |
         ((control & 0x20u) << 13u) | ((control & 0x40u) << 14u) |
         ((control & 0x20u) == 0 && mode == 1 ? 0x20000u : 0u);

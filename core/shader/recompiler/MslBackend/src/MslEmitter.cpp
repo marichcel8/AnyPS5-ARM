@@ -2,6 +2,7 @@
 #include "BdaAbi.hpp"
 #include "MetalAbi.hpp"
 #include "Recompiler.hpp"
+#include "SpirvBackend/SpirvAnalysis.hpp"
 #include <spirv/unified1/spirv.hpp>
 #include <algorithm>
 #include <array>
@@ -32,6 +33,10 @@ std::string HalfSuffix() {
 
 std::string Name(const IrValue& value) {
     return "v" + std::to_string(value.Id()) + HalfSuffix();
+}
+
+std::string LdsBarrierFlags(const State& state) {
+    return state.ldsDevice ? "mem_flags::mem_device | mem_flags::mem_threadgroup" : "mem_flags::mem_threadgroup";
 }
 
 std::string U32(std::uint32_t value) {
@@ -240,6 +245,28 @@ std::uint32_t WaveLdsScope(const IrProgram& program, const ShaderWorkgroupInputI
     return threads <= program.WaveSize() ? 1u : 2u;
 }
 
+bool HasSharedAtomic64(const IrProgram& program) {
+    for (const auto* block : program.BlockOrder()) {
+        for (const auto* inst : block->Instructions()) {
+            const auto name = IrOpcodeName(inst->Opcode());
+            if (name.starts_with("SharedAtomic") && name.ends_with("64")) return true;
+        }
+    }
+    return false;
+}
+
+bool UsesLds(const IrProgram& program) {
+    for (const auto* block : program.BlockOrder()) {
+        for (const auto* inst : block->Instructions()) {
+            if (SharedAccessOf(inst->Opcode()) == SharedAccess::None) continue;
+            const auto index = inst->Flags<MemoryFlags>().index;
+            const auto& infos = program.Resources().memoryInfo;
+            if (index >= infos.size() || infos[index].kind == ResourceKind::Lds) return true;
+        }
+    }
+    return false;
+}
+
 bool HasBarrier(const IrProgram& program) {
     for (const auto* block : program.BlockOrder()) {
         for (const auto* inst : block->Instructions()) {
@@ -257,6 +284,7 @@ std::string Parameters(const State& state) {
     if (has(PushData)) parameters.push_back("constant uint* aps5_push [[buffer(" + slot(MetalAbi::BufferSlot::PushConstants) + ")]]");
     if (has(Bda)) parameters.push_back("device const aps5_bda_header* aps5_bda_table [[buffer(" + slot(MetalAbi::BufferSlot::BdaPagetable) + ")]]");
     if (has(Fault)) parameters.push_back("device atomic_uint* aps5_fault_buffer [[buffer(" + slot(MetalAbi::BufferSlot::FaultBuffer) + ")]]");
+    if (has(Gds)) parameters.push_back("device atomic_uint* aps5_gds [[buffer(" + slot(MetalAbi::BufferSlot::Gds) + ")]]");
     if (has(FlattenedSrt)) parameters.push_back("device const uint* aps5_srt [[buffer(" + slot(MetalAbi::BufferSlot::FlattenedSrt) + ")]]");
     if (has(GuestBuffers)) parameters.push_back("device const aps5_guest_buffer* aps5_buffers [[buffer(" + slot(MetalAbi::BufferSlot::GuestBuffers) + ")]]");
     if (has(Images)) parameters.push_back("device const ulong* aps5_images [[buffer(" + slot(MetalAbi::BufferSlot::GuestImages) + ")]]");
@@ -267,11 +295,16 @@ std::string Parameters(const State& state) {
         parameters.push_back("device const ulong* aps5_sampler_table [[buffer(" + slot(MetalAbi::BufferSlot::SamplerTable) + ")]]");
         parameters.push_back("device const uint* aps5_table_map [[buffer(" + slot(MetalAbi::BufferSlot::ImageTableMap) + ")]]");
     }
+    if (state.ldsDevice && has(Lds)) {
+        parameters.push_back("device uint* aps5_lds_memory [[buffer(" + std::to_string(MetalAbi::WorkgroupMemorySlot) + ")]]");
+        if (!has(WorkgroupId)) parameters.push_back("uint3 aps5_group [[threadgroup_position_in_grid]]");
+        parameters.push_back("uint3 aps5_lds_groups [[threadgroups_per_grid]]");
+    }
     if (has(WorkgroupId)) parameters.push_back("uint3 aps5_group [[threadgroup_position_in_grid]]");
     if (has(LocalId)) parameters.push_back("uint3 aps5_local [[thread_position_in_threadgroup]]");
     if (has(GlobalId)) parameters.push_back("uint3 aps5_global [[thread_position_in_grid]]");
     if (has(LocalIndex)) parameters.push_back("uint aps5_index [[thread_index_in_threadgroup]]");
-    if (has(Lane)) parameters.push_back("uint aps5_lane [[thread_index_in_simdgroup]]");
+    if (has(Lane) && state.program.Resources().stage != IrShaderStage::Vertex) parameters.push_back("uint aps5_lane [[thread_index_in_simdgroup]]");
     std::string text;
     for (std::size_t index = 0; index < parameters.size(); ++index) {
         text += index == 0u ? "\n    " : ",\n    ";
@@ -295,7 +328,7 @@ void EmitBlockBody(State& state, const IrBlock& block) {
             } else if (access != SharedAccess::None) {
                 const bool writes = access != SharedAccess::Read;
                 if (ldsWritten || (writes && ldsRead)) {
-                    Line(state, state.waveLds == 1u ? "threadgroup_barrier(mem_flags::mem_threadgroup);" : "simdgroup_barrier(mem_flags::mem_threadgroup);");
+                    Line(state, std::string(state.waveLds == 1u ? "threadgroup_barrier(" : "simdgroup_barrier(") + LdsBarrierFlags(state) + ");");
                     ldsWritten = false;
                     ldsRead = false;
                 }
@@ -344,12 +377,12 @@ void EmitInstruction(State& state, const IrValue& inst) {
         return;
     case IrOpcode::Barrier:
         if (IsGeometry(state.program.Resources().stage) && EmitGeometry(state, inst)) return;
-        Line(state, "threadgroup_barrier(mem_flags::mem_threadgroup);");
+        Line(state, "threadgroup_barrier(" + LdsBarrierFlags(state) + ");");
         return;
     case IrOpcode::UnlinkedCall:
         state.features |= Fault;
         Line(state, "aps5_fault(aps5_c, " + U32(static_cast<std::uint32_t>(BdaAbi::FaultReason::UnlinkedCall)) + ", (ulong(" + Arg(state, inst, 1) + ") << 32u) | ulong(" + Arg(state, inst, 0) + "), 0u, " + Arg(state, inst, 2) + ");");
-        if (state.stopAllowed) Line(state, "return;");
+        if (state.stopOnUnlinkedCall) Line(state, "return;");
         return;
     default:
         break;
@@ -367,30 +400,43 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     const bool geometry = IsGeometry(stage);
     if (!compute && !geometry && stage != IrShaderStage::Vertex && stage != IrShaderStage::Pixel) throw MslUnsupported("MSL backend: only compute, vertex, pixel, tessellation and mesh programs are emitted");
     if (target.simdgroupSize != 32u || (program.WaveSize() != 32u && program.WaveSize() != 64u)) throw MslUnsupported("MSL backend: only wave32 and wave64 programs on 32-wide SIMD-groups are emitted");
-    if (program.Info().sharedMemoryBytes != 0u) throw MslUnsupported("MSL backend: LDS in device memory is not emitted (section S9)");
+    if (program.Info().sharedMemoryBytes != 0u && stage != IrShaderStage::Compute) throw MslUnsupported("MSL backend: LDS in device memory is emitted for compute programs only");
     State state{program, inputInfo, bindings.layout, target};
     const bool mesh = stage == IrShaderStage::Mesh;
     if (mesh && inputInfo.vertex == nullptr) throw MslUnsupported("MSL backend: the mesh program has no mesh input info");
     const ShaderWorkgroupInputInfo* workgroup = mesh ? static_cast<const ShaderWorkgroupInputInfo*>(&inputInfo.vertex->mesh) : inputInfo.compute;
-    state.lanes = program.WaveSize() == 64u && !geometry ? 2u : 1u;
+    state.lanes = program.WaveSize() == 64u && !geometry && (compute || mesh) ? 2u : 1u;
     if (state.lanes == 2u && workgroup == nullptr) throw MslUnsupported("MSL backend: a wave64 program needs its workgroup size");
     state.ldsDwords = workgroup != nullptr ? workgroup->ldsSizeDwords : 0u;
     state.scratchDwords = program.Info().scratchDwords;
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
+    state.lds64 = HasSharedAtomic64(program);
+    if (!compute && !geometry && stage != IrShaderStage::Mesh && UsesLds(program)) {
+        state.ldsFunction = true;
+        state.ldsDwords = FunctionLdsDwords(program);
+        state.ldsLaneAddresses = FunctionLdsLaneAddresses(program);
+        if (!state.ldsLaneAddresses.empty()) {
+            std::uint64_t needed = 0;
+            for (const auto& [inst, address] : state.ldsLaneAddresses) needed = std::max<std::uint64_t>(needed, ((std::uint64_t{address} + program.Resources().memoryInfo[inst->Flags<MemoryFlags>().index].offset) >> 2u) + 4u);
+            state.ldsDwords = static_cast<std::uint32_t>(std::min<std::uint64_t>(std::max<std::uint64_t>((needed + 63u) & ~63ull, 64u), FunctionLdsDwordLimit));
+        }
+    }
+    state.ldsDevice = compute && program.Info().sharedMemoryBytes != 0u;
+    state.ldsStride = WorkgroupMemoryStrideDwords(program.Info());
     state.stopAllowed = compute && state.waveLds == 0u && !HasBarrier(program) && state.lanes == 1u;
+    state.stopOnUnlinkedCall = compute && state.waveLds == 0u && !HasBarrier(program);
     if (geometry) {
         PrepareGeometry(state);
     } else if (!compute) {
-        if (state.lanes == 2u) throw MslUnsupported("MSL backend: wave64 vertex and pixel programs need two guest lanes per thread (graphics threads are not laid out that way)");
         PrepareStage(state);
     }
     Hoister{state}.Run();
     AnalyzePrecision(state);
     EmitFlow(state);
     if (geometry) CheckGeometry(state);
-    if (!compute && !geometry && (state.features & (Lds | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
-    if (stage == IrShaderStage::Vertex && (state.features & (Lane | Wave)) != 0u) throw MslUnsupported("MSL backend: SIMD-group operations in vertex functions are not emitted");
+    if (stage == IrShaderStage::Vertex && (state.features & Permute) != 0u) throw MslUnsupported("MSL backend: vertex functions cannot run cross-lane permutes");
+    if (!compute && !geometry && (state.features & ((state.ldsFunction ? 0u : Lds) | WorkgroupId | LocalId | GlobalId | LocalIndex)) != 0u) throw MslUnsupported("MSL backend: a vertex or pixel program uses threadgroup memory or compute builtins");
 
     std::string declarations;
     const auto declare = [&](std::string_view text) {
@@ -402,10 +448,30 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
         const auto pointer = [&](std::uint32_t feature, std::string_view name) { return (state.features & feature) != 0u ? std::string(name) : std::string("nullptr"); };
         declare("aps5_ctx aps5_c = {" + pointer(Bda, "aps5_bda_table") + ", " + pointer(Fault, "aps5_fault_buffer") + ", " + pointer(GuestBuffers, "aps5_buffers") + ", " + U32(static_cast<std::uint32_t>(program.Resources().stage)) + ", false};");
     }
-    if ((state.features & Lds) != 0u) declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
+    if (stage == IrShaderStage::Vertex && (state.features & Lane) != 0u) declare("const uint aps5_lane = 0u;");
+    if ((state.features & Lds) != 0u) {
+        if (state.ldsDevice) {
+            declare("device uint* aps5_lds = aps5_lds_memory + ulong((aps5_group.z * aps5_lds_groups.y + aps5_group.y) * aps5_lds_groups.x + aps5_group.x) * ulong(" + U32(state.ldsStride) + ");");
+        } else if (state.ldsFunction) {
+            declare("uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
+        } else {
+            declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
+        }
+    }
+    if ((state.features & Lds64) != 0u) {
+        if (state.ldsDevice) {
+            declare("device atomic_uint* aps5_lds_lock = reinterpret_cast<device atomic_uint*>(aps5_lds + " + U32(state.ldsDwords) + ");");
+        } else if (state.ldsFunction) {
+            declare("uint aps5_lds_lock_word = 0u;");
+            declare("thread uint* aps5_lds_lock = &aps5_lds_lock_word;");
+        } else {
+            declare("threadgroup atomic_uint aps5_lds_lock_word;");
+            declare("threadgroup atomic_uint* aps5_lds_lock = &aps5_lds_lock_word;");
+        }
+    }
     ForEachHalf(state, [&](std::uint32_t) {
         if ((state.features & Scratch) != 0u) declare("uint aps5_scratch" + HalfSuffix() + "[" + std::to_string(std::max(state.scratchDwords, 1u)) + "];");
-        if ((state.features & VectorWindow) != 0u) declare("uint aps5_window" + HalfSuffix() + "[" + std::to_string(std::max(state.windowDwords, 1u)) + "];");
+        if ((state.features & VectorWindow) != 0u) declare("uint aps5_window" + HalfSuffix() + "[" + std::to_string(std::max(state.windowDwords, 1u)) + "] = {};");
         for (const auto* value : state.hoistOrder) {
             const auto type = TypeName(value->Type());
             if (type.empty()) Fail(*value, "is carried across blocks with a type MSL does not hold");
@@ -418,6 +484,10 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if (!compute) {
         text += StageHeader(state, Parameters(state));
         text += declarations;
+        if (stage == IrShaderStage::Pixel && (state.target.experiment & MslExperimentConstantOutput) != 0u) {
+            text += "    return aps5_out;\n}\n";
+            return text;
+        }
         text += state.body;
         if (!state.body.ends_with(state.exit + "\n")) text += "    " + state.exit + "\n";
         text += "}\n";
@@ -429,6 +499,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     }
     text += "kernel void " + std::string(MslEntryPoint) + "(" + Parameters(state) + ")\n{\n";
     text += declarations;
+    if ((state.features & Lds64) != 0u) text += "    if (aps5_index == 0u) atomic_store_explicit(aps5_lds_lock, 0u, memory_order_relaxed);\n    threadgroup_barrier(" + LdsBarrierFlags(state) + ");\n";
     text += state.body;
     text += "}\n";
     return text;
@@ -446,6 +517,7 @@ SpirvTarget MslFrontendTarget(const MslTarget& target) {
     frontend.maxWorkgroupSize = target.maxThreadgroupSize;
     frontend.maxWorkgroupInvocations = target.maxThreadsPerThreadgroup;
     frontend.maxWorkgroupSharedMemoryBytes = target.maxThreadgroupMemoryBytes;
+    frontend.depthRangeRemap = true;
     frontend.mesh = target.mesh;
     frontend.tessellation = target.tessellation;
     frontend.subgroupStages = target.subgroupStages;

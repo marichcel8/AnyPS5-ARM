@@ -22,7 +22,12 @@ std::uint32_t APS5_VABI sceAgcCbQueueEndOfPipeActionGetSize() {
     return 32;
 }
 
-std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer* buf, std::uint8_t action, std::uint16_t gcrControl, std::uint8_t dst, std::uint8_t cachePolicy, const volatile Label* address, std::uint8_t dataSelect, std::uint64_t data, std::uint16_t gdsOffset, std::uint16_t gdsSize, std::uint8_t interrupt, std::uint32_t interruptContextId) {
+std::uint32_t* APS5_VABI sceAgcCbReleaseMem(CommandBuffer* buf, std::uint8_t action, std::uint16_t gcrControl, std::uint8_t dst, std::uint8_t cachePolicy, const volatile Label* address, std::uint64_t dataSelectSlot, std::uint64_t data, std::uint64_t gdsOffsetSlot, std::uint64_t gdsSizeSlot, std::uint64_t interruptSlot, std::uint64_t interruptContextIdSlot) {
+    const auto dataSelect = static_cast<std::uint8_t>(dataSelectSlot);
+    const auto gdsOffset = static_cast<std::uint16_t>(gdsOffsetSlot);
+    const auto gdsSize = static_cast<std::uint16_t>(gdsSizeSlot);
+    const auto interrupt = static_cast<std::uint8_t>(interruptSlot);
+    const auto interruptContextId = static_cast<std::uint32_t>(interruptContextIdSlot);
     Agc::Command::CheckBits(action, 0x3fu, __func__);
     Agc::Command::CheckBits(gcrControl, 0xfffu, __func__);
     Agc::Command::CheckBits(dst, 1, __func__);

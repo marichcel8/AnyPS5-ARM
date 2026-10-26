@@ -25,6 +25,12 @@ std::string Active(State& state, const IrValue& inst) {
     return Typed(state, inst, inst.ArgumentCount() - 1u);
 }
 
+std::string WriteActive(State& state, const IrValue& inst) {
+    const auto active = Active(state, inst);
+    if (!state.quadMasked) return active;
+    return active.empty() ? std::string("!aps5_quad_masked") : "(" + active + ") && !aps5_quad_masked";
+}
+
 void OpenActive(State& state, const std::string& active) {
     Open(state, active.empty() ? std::string("{") : "if (" + active + ") {");
 }
@@ -81,6 +87,7 @@ std::string VSharp(State& state, const IrValue& inst, const MemoryInfo& mem) {
 }
 
 std::string BufferLoad(State& state, const IrValue& inst, const MemoryInfo& mem, const std::string& resource, const std::string& byte, std::uint32_t bytes) {
+    if ((state.target.experiment & MslExperimentNoUniformLoad) != 0u && state.program.Resources().stage == IrShaderStage::Pixel && bytes == 4u) return "0x3f800000u";
     if (mem.gpuDescriptor) return "aps5_vsharp_load(aps5_c, " + resource + ", " + byte + ", " + U32(bytes) + ", " + Pc(inst) + ")";
     return "aps5_buffer_load(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ", " + U32(bytes) + ")";
 }
@@ -172,6 +179,7 @@ void LoadBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     Line(state, "uint " + byte + " = 0u;");
     for (std::uint32_t component = 0; component < components; ++component) {
         Open(state, "if (aps5_vsharp_byte(" + resource + ", " + offset + " + " + U32(mem.offset + component * 4u) + ", " + soffset + ", " + U32(bytes) + ", " + byte + ")) {");
+        if (!mem.gpuDescriptor && bytes == 4u) Line(state, byte + " &= ~3u;");
         Line(state, Component(result, components, component) + " = " + BufferLoad(state, inst, mem, resource, byte, bytes) + ";");
         Close(state);
     }
@@ -183,7 +191,7 @@ void LoadBuffer(State& state, const IrValue& inst, std::uint32_t components) {
 void StoreBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     const auto& mem = Memory(state, inst);
     if (mem.kind != ResourceKind::Buffer) Fail(inst, "must access a buffer resource");
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     if (mem.formatted) {
         StoreFormatted(state, inst, mem, components);
         Close(state);
@@ -200,6 +208,7 @@ void StoreBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     for (std::uint32_t component = 0; component < components; ++component) {
         const auto value = Component(data, components, component);
         Open(state, "if (aps5_vsharp_byte(" + resource + ", " + offset + " + " + U32(mem.offset + component * 4u) + ", " + soffset + ", " + U32(bytes) + ", " + byte + ")) {");
+        if (!mem.gpuDescriptor && bytes == 4u) Line(state, byte + " &= ~3u;");
         if (mem.gpuDescriptor) {
             state.features |= BdaWrites;
             Line(state, "aps5_vsharp_store(aps5_c, " + resource + ", " + byte + ", " + U32(bytes) + ", " + value + ", " + Pc(inst) + ");");
@@ -227,7 +236,8 @@ void ReadConstBuffer(State& state, const IrValue& inst) {
     const auto byte = Temp(state);
     const auto size = Temp(state);
     Line(state, "const uint " + address + " = " + offset + " + " + U32(mem.offset) + ";");
-    Line(state, "const uint " + byte + " = " + address + " & ~3u;");
+    if (mem.gpuDescriptor) Line(state, "const uint " + byte + " = " + address + " & ~3u;");
+    else Line(state, "const uint " + byte + " = (" + address + " & ~3u) - uint(" + resource + ".base & 3ul);");
     Line(state, "const ulong " + size + " = " + resource + ".stride == 0u ? ulong(" + resource + ".records) : ulong(" + resource + ".stride) * ulong(" + resource + ".records);");
     Open(state, "if (" + address + " >= " + offset + " && " + resource + ".valid && ulong(" + byte + ") + 4ul <= " + size + ") {");
     Line(state, result + " = " + BufferLoad(state, inst, mem, resource, byte, 4u) + ";");
@@ -271,7 +281,7 @@ void BufferAtomic(State& state, const IrValue& inst) {
     if (mem.kind != ResourceKind::Buffer) Fail(inst, "must access a buffer resource");
     const auto atomic = BufferAtomicOf(state, inst);
     const auto result = Result(state, inst);
-    auto active = Active(state, inst);
+    auto active = WriteActive(state, inst);
     if (!inst.HasUses() && ZeroIdentity(atomic.op)) active = (active.empty() ? std::string() : active + " && ") + atomic.a + " != 0u";
     OpenActive(state, active);
     const auto resource = VSharp(state, inst, mem);
@@ -286,6 +296,7 @@ void BufferAtomic(State& state, const IrValue& inst) {
         Line(state, "device atomic_uint* " + pointer + " = aps5_buffer_atomic(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ", " + Pc(inst) + ");");
     }
     Line(state, "if (" + pointer + " != nullptr) " + result + " = aps5_atomic(" + pointer + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ");");
+    if (!mem.gpuDescriptor) Line(state, "else " + result + " = aps5_buffer_peek(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ");");
     Close(state);
     Close(state);
     StopCheck(state);
@@ -411,7 +422,7 @@ void LoadAddress(State& state, const IrValue& inst, std::uint32_t components, st
 void StoreAddress(State& state, const IrValue& inst, std::uint32_t components, std::uint32_t bytes) {
     const auto& mem = Memory(state, inst);
     const auto data = Typed(state, inst, inst.ArgumentCount() - 2u);
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     if (mem.kind == ResourceKind::Scratch) {
         if (components != 1u) Fail(inst, "must write a physical address resource");
         const auto byte = ScratchByte(state, inst, mem);
@@ -479,7 +490,7 @@ void AddressAtomic(State& state, const IrValue& inst) {
     const auto atomic = AddressAtomicOf(state, inst);
     const auto result = Result(state, inst);
     state.features |= BdaWrites;
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     const auto guest = AddressOf(state, inst, mem);
     Open(state, "if (" + guest.ok + ") {");
     const auto global = [&] {
@@ -494,7 +505,7 @@ void AddressAtomic(State& state, const IrValue& inst) {
         Open(state, "if (" + high + " == " + U32(SharedApertureHigh) + ") {");
         LdsArray(state);
         Line(state, unaligned);
-        Line(state, "else if ((" + low + " >> 2u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + low + " >> 2u]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ");");
+        Line(state, "else if ((" + low + " >> 2u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + low + " >> 2u]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ");");
         Close(state, "} else if (" + high + " == " + U32(PrivateApertureHigh) + ") {");
         ++state.depth;
         ScratchArray(state);
@@ -518,12 +529,15 @@ void AddressAtomic(State& state, const IrValue& inst) {
 
 const MemoryInfo& SharedMemory(State& state, const IrValue& inst) {
     const auto& mem = Memory(state, inst);
-    if (mem.kind == ResourceKind::Gds) throw MslUnsupported("MSL backend: GDS access is not emitted (section S9)");
+    if (mem.kind == ResourceKind::Gds) throw MslUnsupported("MSL backend: GDS loads, stores and atomics are not emitted, only append, consume and ordered count");
     if (mem.kind != ResourceKind::Lds) Fail(inst, "must access LDS");
     return mem;
 }
 
 std::string SharedByte(State& state, const IrValue& inst, const MemoryInfo& mem) {
+    if (state.ldsFunction) {
+        if (const auto found = state.ldsLaneAddresses.find(&inst); found != state.ldsLaneAddresses.end()) return U32(found->second + mem.offset);
+    }
     const auto address = Typed(state, inst, 0u);
     return mem.offset == 0u ? address : "(" + address + " + " + U32(mem.offset) + ")";
 }
@@ -599,8 +613,13 @@ void SharedAtomic(State& state, const IrValue& inst) {
     const auto index = Temp(state);
     LdsArray(state);
     Line(state, "const uint " + index + " = " + SharedByte(state, inst, mem) + " >> 2u;");
-    const auto apply = "aps5_atomic_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")";
+    const auto apply = "aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")";
     const auto condition = (active.empty() ? std::string() : active + " && ") + index + " < " + U32(state.ldsDwords);
+    if (state.lds64) {
+        state.features |= Lds64 | Atomic64 | Float64 | Lane | (state.ldsFunction ? 0u : LocalIndex);
+        Define(state, inst, "aps5_lds32(aps5_lds_lock, reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")");
+        return;
+    }
     if (!inst.HasUses()) {
         Line(state, "if (" + condition + ") " + apply + ";");
         DefineZero(state, inst);
@@ -649,7 +668,7 @@ void BufferAtomic64(State& state, const IrValue& inst) {
     const auto op = RequireAtomic64(state, inst);
     const auto data = Typed(state, inst, inst.ArgumentCount() - 2u);
     const auto result = Result(state, inst);
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     const auto resource = VSharp(state, inst, mem);
     const auto byte = Temp(state);
     const auto pointer = Temp(state);
@@ -676,7 +695,7 @@ void AddressAtomic64(State& state, const IrValue& inst) {
     const auto wanted = std::string(inst.HasUses() ? "true" : "false");
     const auto result = Result(state, inst);
     state.features |= BdaWrites;
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     const auto guest = AddressOf(state, inst, mem);
     Open(state, "if (" + guest.ok + ") {");
     const auto global = [&] {
@@ -691,7 +710,7 @@ void AddressAtomic64(State& state, const IrValue& inst) {
         Open(state, "if (" + high + " == " + U32(SharedApertureHigh) + ") {");
         LdsArray(state);
         Line(state, unaligned);
-        Line(state, "else if (((" + low + " >> 2u) + 1u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic64_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + low + " >> 2u]), " + U32(op) + ", " + data + ", " + wanted + ");");
+        Line(state, "else if (((" + low + " >> 2u) + 1u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic64_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + low + " >> 2u]), " + U32(op) + ", " + data + ", " + wanted + ");");
         Close(state, "} else if (" + high + " == " + U32(PrivateApertureHigh) + ") {");
         ++state.depth;
         ScratchArray(state);
@@ -716,22 +735,44 @@ void AddressAtomic64(State& state, const IrValue& inst) {
     Define(state, inst, result);
 }
 
+std::uint32_t SharedAtomic64Code(IrOpcode opcode, bool flush) {
+    switch (opcode) {
+    case IrOpcode::SharedAtomicSwap64: return 0u;
+    case IrOpcode::SharedAtomicCmpst64: return 1u;
+    case IrOpcode::SharedAtomicIAdd64: return 2u;
+    case IrOpcode::SharedAtomicISub64: return 3u;
+    case IrOpcode::SharedAtomicSMin64: return 4u;
+    case IrOpcode::SharedAtomicUMin64: return 5u;
+    case IrOpcode::SharedAtomicSMax64: return 6u;
+    case IrOpcode::SharedAtomicUMax64: return 7u;
+    case IrOpcode::SharedAtomicAnd64: return 8u;
+    case IrOpcode::SharedAtomicOr64: return 9u;
+    case IrOpcode::SharedAtomicXor64: return 10u;
+    case IrOpcode::SharedAtomicInc64: return 11u;
+    case IrOpcode::SharedAtomicDec64: return 12u;
+    case IrOpcode::SharedAtomicRsub64: return 14u;
+    case IrOpcode::SharedAtomicFMin64: return flush ? 22u : 15u;
+    case IrOpcode::SharedAtomicFMax64: return flush ? 23u : 16u;
+    case IrOpcode::SharedAtomicMskor64: return 18u;
+    case IrOpcode::SharedAtomicCmpstF64: return flush ? 24u : 20u;
+    default: throw MslUnsupported("MSL backend: " + std::string(IrOpcodeName(opcode)) + " is not emitted");
+    }
+}
+
 void SharedAtomic64(State& state, const IrValue& inst) {
     const auto& mem = SharedMemory(state, inst);
-    const auto op = RequireAtomic64(state, inst);
-    const auto data = Typed(state, inst, 1u);
+    const auto opcode = inst.Opcode();
+    const auto op = SharedAtomic64Code(opcode, mem.flushDenormals);
+    const bool twoOperands = opcode == IrOpcode::SharedAtomicCmpst64 || opcode == IrOpcode::SharedAtomicCmpstF64 || opcode == IrOpcode::SharedAtomicMskor64;
+    const auto a = Typed(state, inst, twoOperands ? 2u : 1u);
+    const auto b = twoOperands ? Typed(state, inst, 1u) : std::string("0ul");
     const auto active = Active(state, inst);
     const auto index = Temp(state);
     LdsArray(state);
+    state.features |= Lds64 | Atomic64 | Float64 | Lane | (state.ldsFunction ? 0u : LocalIndex);
     Line(state, "const uint " + index + " = " + SharedByte(state, inst, mem) + " >> 2u;");
-    const auto apply = "aps5_atomic64_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), " + U32(op) + ", " + data + ", " + (inst.HasUses() ? "true" : "false") + ")";
-    const auto condition = (active.empty() ? std::string() : active + " && ") + "(" + index + " + 1u) < " + U32(state.ldsDwords);
-    if (!inst.HasUses()) {
-        Line(state, "if (" + condition + ") " + apply + ";");
-        DefineZero(state, inst);
-        return;
-    }
-    Define(state, inst, "(" + condition + ") ? " + apply + " : 0ul");
+    const auto condition = (active.empty() ? std::string() : "(" + active + ") && ") + "(" + index + " + 1u) < " + U32(state.ldsDwords);
+    Define(state, inst, "aps5_lds64(aps5_lds_lock, reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(op) + ", " + a + ", " + b + ")");
 }
 
 void ReadConst(State& state, const IrValue& inst) {
@@ -780,6 +821,15 @@ void StoreVectorWindow(State& state, const IrValue& inst) {
         return;
     }
     Line(state, "if (" + index + " < " + U32(state.windowDwords) + ") aps5_window" + HalfSuffix() + "[" + index + "] = " + data + ";");
+}
+
+void WindowLaneGuard(State& state, const IrValue& inst) {
+    state.features |= Fault | Lane;
+    const auto lane = Typed(state, inst, 4u);
+    const auto slot = Typed(state, inst, 3u);
+    const auto own = "(aps5_lane + " + U32(CurrentHalf() * 32u) + ") == (" + lane + " & " + U32(state.program.WaveSize() - 1u) + ")";
+    const auto overwritten = Typed(state, inst, 0u) + " == " + slot + " && " + Typed(state, inst, 1u) + " != " + Typed(state, inst, 2u);
+    Line(state, "if (" + own + " && " + overwritten + ") aps5_fault(aps5_c, " + U32(static_cast<std::uint32_t>(BdaAbi::FaultReason::WindowLaneSpill)) + ", (ulong(" + lane + ") << 32u) | ulong(" + slot + "), " + Typed(state, inst, 1u) + ", " + Pc(inst) + ");");
 }
 
 }
@@ -925,17 +975,89 @@ bool EmitMemory(State& state, const IrValue& inst) {
     case IrOpcode::SharedAtomicXor64:
     case IrOpcode::SharedAtomicFMin64:
     case IrOpcode::SharedAtomicFMax64:
-    case IrOpcode::SharedAtomicCmpst64: SharedAtomic64(state, inst); return true;
+    case IrOpcode::SharedAtomicCmpst64:
+    case IrOpcode::SharedAtomicCmpstF64:
+    case IrOpcode::SharedAtomicMskor64: SharedAtomic64(state, inst); return true;
     case IrOpcode::LoadVectorWindow: LoadVectorWindow(state, inst); return true;
     case IrOpcode::StoreVectorWindow: StoreVectorWindow(state, inst); return true;
+    case IrOpcode::WindowLaneGuard: WindowLaneGuard(state, inst); return true;
     default: break;
     }
     if (EmitImage(state, inst)) return true;
     const auto name = IrOpcodeName(inst.Opcode());
     if (name.starts_with("Image") || name.starts_with("LoadImage") || name.starts_with("StoreImage")) throw MslUnsupported("MSL backend: " + std::string(name) + " is not emitted (images are section S3)");
     if (name.starts_with("BufferAtomic") || name.starts_with("AddressAtomic") || name.starts_with("SharedAtomic")) throw MslUnsupported("MSL backend: " + std::string(name) + " is not emitted (64-bit atomics are section S5)");
-    if (name.starts_with("Data") || name.starts_with("Gds")) throw MslUnsupported("MSL backend: " + std::string(name) + " is not emitted (GDS is section S9)");
+    if (name.starts_with("Data") || name.starts_with("Gds")) throw MslUnsupported("MSL backend: " + std::string(name) + " is not emitted");
     return false;
+}
+
+bool IsAppendConsume(IrOpcode opcode) {
+    return opcode == IrOpcode::DataAppend || opcode == IrOpcode::DataConsume || opcode == IrOpcode::DataOrderedCount || opcode == IrOpcode::DataOrderedSwap;
+}
+
+void EmitAppendConsume(State& state, const IrValue& inst) {
+    constexpr std::uint32_t GdsDwords = 0x10000u / 4u;
+    const auto& mem = Memory(state, inst);
+    const bool gds = mem.kind == ResourceKind::Gds;
+    if (!gds && mem.kind != ResourceKind::Lds) Fail(inst, "must access LDS or GDS");
+    const auto opcode = inst.Opcode();
+    const bool ordered = opcode == IrOpcode::DataOrderedCount || opcode == IrOpcode::DataOrderedSwap;
+    const bool swap = opcode == IrOpcode::DataOrderedSwap;
+    const bool append = opcode != IrOpcode::DataConsume;
+    const bool m0Address = gds && !ordered;
+    const auto index = Temp(state);
+    std::string bounds;
+    if (m0Address) {
+        const auto m0 = Typed(state, inst, 0u);
+        Line(state, "const uint " + index + " = (((" + m0 + " >> 16u) + " + U32(mem.offset) + ") >> 2u);");
+        bounds = "(" + m0 + " & 0xffffu) != 0u && ";
+    } else {
+        Line(state, "const uint " + index + " = " + U32(mem.offset >> 2u) + ";");
+    }
+    if (gds) state.features |= Gds;
+    else LdsArray(state);
+    bounds += index + " < " + U32(gds ? GdsDwords : state.ldsDwords);
+    state.features |= Lane | Wave;
+    const auto low = Temp(state);
+    const auto high = Temp(state);
+    const auto count = Temp(state);
+    const auto first = Temp(state);
+    const auto source = Temp(state);
+    Line(state, "const uint " + low + " = aps5_ballot32(" + HalfArg(state, inst, 1u, 0u) + ");");
+    Line(state, "const uint " + high + " = " + (state.lanes == 2u ? "aps5_ballot32(" + HalfArg(state, inst, 1u, 1u) + ")" : std::string("0u")) + ";");
+    Line(state, "const uint " + count + " = popcount(" + low + ") + popcount(" + high + ");");
+    Line(state, "const uint " + first + " = " + low + " != 0u ? ctz(" + low + ") : (" + high + " != 0u ? 32u + ctz(" + high + ") : 0u);");
+    Line(state, "const uint " + source + " = " + first + " & 31u;");
+    std::string amount = count;
+    if (ordered) {
+        const auto fromLow = Temp(state);
+        Line(state, "const uint " + fromLow + " = simd_shuffle(" + HalfArg(state, inst, 4u, 0u) + ", ushort(" + source + "));");
+        if (state.lanes == 2u) {
+            const auto fromHigh = Temp(state);
+            Line(state, "const uint " + fromHigh + " = simd_shuffle(" + HalfArg(state, inst, 4u, 1u) + ", ushort(" + source + "));");
+            amount = Temp(state);
+            Line(state, "const uint " + amount + " = " + first + " >= 32u ? " + fromHigh + " : " + fromLow + ";");
+        } else {
+            amount = fromLow;
+        }
+    }
+    const auto old = Temp(state);
+    Line(state, "uint " + old + " = 0u;");
+    Open(state, "if (aps5_lane == " + source + " && " + count + " != 0u && " + bounds + ") {");
+    if (gds) {
+        const char* function = swap ? "atomic_exchange_explicit" : append ? "atomic_fetch_add_explicit" : "atomic_fetch_sub_explicit";
+        Line(state, old + " = " + function + "(&aps5_gds[" + index + "], " + amount + ", memory_order_relaxed);");
+    } else if (state.ldsFunction) {
+        Line(state, old + " = aps5_lds[" + index + "];");
+        Line(state, "aps5_lds[" + index + "] = " + (swap ? amount : old + (append ? " + " : " - ") + count) + ";");
+    } else {
+        Line(state, old + " = aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), " + U32(swap ? 0u : append ? 2u : 3u) + ", " + amount + ", 0u);");
+    }
+    Close(state);
+    const auto result = Temp(state);
+    Line(state, "const uint " + result + " = simd_shuffle(" + old + ", ushort(" + source + "));");
+    if (state.lanes == 2u) DefineHalves(state, inst, result, result);
+    else Define(state, inst, result);
 }
 
 }

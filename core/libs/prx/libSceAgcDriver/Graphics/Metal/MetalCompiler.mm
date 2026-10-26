@@ -381,21 +381,17 @@ std::shared_ptr<CompileTicket> MetalCompiler::Compute(const ComputePipelineReque
             function.library = library;
             function.name = nsString(request.function);
             MTL4ComputePipelineDescriptor* descriptor = [MTL4ComputePipelineDescriptor new];
-            if (request.constants.empty()) {
-                descriptor.computeFunctionDescriptor = function;
-            } else {
-                MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
-                for (const auto& constant : request.constants) {
-                    const std::uint32_t scalar = constant.value;
-                    const bool flag = constant.value != 0;
-                    if (constant.boolean) [values setConstantValue:&flag type:MTLDataTypeBool atIndex:constant.index];
-                    else [values setConstantValue:&scalar type:MTLDataTypeUInt atIndex:constant.index];
-                }
-                MTL4SpecializedFunctionDescriptor* specialized = [MTL4SpecializedFunctionDescriptor new];
-                specialized.functionDescriptor = function;
-                specialized.constantValues = values;
-                descriptor.computeFunctionDescriptor = specialized;
+            MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
+            for (const auto& constant : request.constants) {
+                const std::uint32_t scalar = constant.value;
+                const bool flag = constant.value != 0;
+                if (constant.boolean) [values setConstantValue:&flag type:MTLDataTypeBool atIndex:constant.index];
+                else [values setConstantValue:&scalar type:MTLDataTypeUInt atIndex:constant.index];
             }
+            MTL4SpecializedFunctionDescriptor* specialized = [MTL4SpecializedFunctionDescriptor new];
+            specialized.functionDescriptor = function;
+            specialized.constantValues = values;
+            descriptor.computeFunctionDescriptor = specialized;
             if (!request.label.empty()) descriptor.label = nsString(request.label);
             NSError* failure = nil;
             id<MTLComputePipelineState> pipeline = [(__bridge id<MTL4Compiler>)worker.Compiler() newComputePipelineStateWithDescriptor:descriptor dynamicLinkingDescriptor:nil compilerTaskOptions:(__bridge MTL4CompilerTaskOptions*)worker.TaskOptions() error:&failure];

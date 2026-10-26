@@ -284,6 +284,10 @@ int main() {
         Check(true, true, "both faces pulled closer");
         Draw(*device, -Bias, 0.0f);
         Check(true, false, "only front faces biased");
+        if (ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Spirv) {
+            std::puts("per-face depth bias: the faces passed; the draw recipe replay is a Vulkan-only mechanism the Metal device does not produce, so that part is skipped");
+            return VulkanTestSkipped;
+        }
         DepthDrawRecipe(*device);
         std::puts("per-face depth bias tests passed");
         return 0;

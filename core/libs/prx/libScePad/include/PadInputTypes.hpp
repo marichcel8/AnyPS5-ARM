@@ -22,6 +22,7 @@ enum class InputControl {
     StickModifier,
     Shake,
     ToggleMouse,
+    SwitchLayout,
     ToggleFullscreen,
     TogglePerformanceOverlay,
     Screenshot

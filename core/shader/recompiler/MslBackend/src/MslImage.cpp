@@ -196,7 +196,8 @@ std::string TextureRef(State& state, const ImageResource& image, std::uint32_t e
         return "((device const " + Wrapper(state, type) + "*)" + (image.resourceClass == ImageResourceClass::Storage ? "aps5_storage_table" : "aps5_image_table") + ")[" + table->element + "].t";
     }
     state.features |= Images;
-    return "((device const " + Wrapper(state, type) + "*)aps5_images)[" + U32(MetalAbi::GuestImageIndex(static_cast<std::uint32_t>(kind), element)) + "].t";
+    const auto index = U32(MetalAbi::GuestImageIndex(static_cast<std::uint32_t>(kind), 0u)) + " + " + Constant(state, PipelineSpecialization::DescriptorIndex(static_cast<std::uint32_t>(kind), element), element);
+    return "((device const " + Wrapper(state, type) + "*)aps5_images)[" + index + "].t";
 }
 
 bool PointSampled(const State& state, const ImageResource& image, std::uint32_t sampler) {
@@ -212,7 +213,7 @@ std::string SamplerRef(State& state, const ImageResource& image, std::uint32_t s
     }
     state.features |= Samplers;
     const auto element = ElementOf(state, DescriptorBindingKind::Samplers, sampler) + (point ? 1u : 0u);
-    return "((device const aps5_sampler*)aps5_samplers)[" + U32(element) + "].s";
+    return "((device const aps5_sampler*)aps5_samplers)[" + Constant(state, PipelineSpecialization::DescriptorIndex(static_cast<std::uint32_t>(DescriptorBindingKind::Samplers), element), element) + "].s";
 }
 
 std::string AddressU32(const Access& access, std::uint32_t component) {
@@ -434,7 +435,7 @@ std::string ResultVector(Access& access, const std::string& value, IrTextureNume
                 packed[word] = "((" + Bits(low, valueClass) + " & 0xffffu) | ((" + Bits(high, valueClass) + " & 0xffffu) << 16u))";
             } else {
                 state.features |= Half;
-                packed[word] = "(aps5_f32_to_f16(" + low + ") | (aps5_f32_to_f16(" + high + ") << 16u))";
+                packed[word] = "(aps5_f32_to_f16(as_type<uint>(" + low + ")) | (aps5_f32_to_f16(as_type<uint>(" + high + ")) << 16u))";
             }
         }
         return "uint4(" + packed[0] + ", " + packed[1] + ", " + packed[2] + ", " + packed[3] + ")";
@@ -489,6 +490,7 @@ void EmitQueryDimensions(Access& access, const std::string& texture, const std::
     if (volume) push(texture + ".get_depth(" + lod + ")");
     if (shape.arrayed) push(texture + ".get_array_size()");
     if (access.mem.imageDimension == RdnaImageDimension::Dim3D && access.image.dimension == RdnaImageDimension::Dim2D) values[2] = "1u";
+    if (shape.arrayed && shape.spatial >= 2u && access.mem.imageDimension == RdnaImageDimension::Dim1D) values[2] = "0u";
     if (!shape.multisampled) values[3] = texture + ".get_num_mip_levels()";
     Line(state, result + " = uint4(" + values[0] + ", " + values[1] + ", " + values[2] + ", " + values[3] + ");");
 }
@@ -596,6 +598,8 @@ std::string StoreTexel(Access& access, const std::string& data, bool integer) {
         }
         if (component < sint.componentCount && sint.componentBits[component] < 32u) {
             values[component] = std::string(mem.dataBits == 16u ? "aps5_fmt_encode16(" : "aps5_fmt_encode(") + raw + ", 2u, " + U32(sint.componentBits[component]) + ")";
+        } else if (integer && mem.dataBits == 16u && component < sint.componentCount) {
+            values[component] = "as_type<uint>((as_type<int>(" + raw + ") << 16) >> 16)";
         } else if (integer) {
             values[component] = raw;
         } else if (mem.dataBits == 16u) {
@@ -649,7 +653,6 @@ void EmitWrite(Access& access, const std::string& texture) {
     State& state = access.state;
     const auto shape = ShapeOf(access.image.dimension);
     if (access.image.resourceClass != ImageResourceClass::Storage) Fail(access.inst, "writes a sampled image");
-    if (shape.multisampled) throw MslUnsupported("MSL backend: multisampled storage image writes are not emitted");
     const bool integer = access.image.numericClass == IrTextureNumericClass::Uint;
     if (access.mem.imageDimension == RdnaImageDimension::Dim2DArray && access.image.dimension == RdnaImageDimension::Dim3D) {
         if (access.image.mipMode == ImageMipMode::DynamicStorage) throw MslUnsupported("MSL backend: a 2D-array address stored to a 3D image with dynamic mips is not emitted");
@@ -660,7 +663,8 @@ void EmitWrite(Access& access, const std::string& texture) {
     const auto coord = Temp(state);
     Line(state, "const auto " + coord + " = " + CoordU32(access) + ";");
     const auto texel = access.mem.imagePacked ? PackedStoreTexel(access, Typed(state, access.inst, 2u)) : StoreTexel(access, Typed(state, access.inst, 2u), integer);
-    if (shape.arrayed) Line(state, texture + ".write(" + texel + ", " + HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ");");
+    if (shape.multisampled) Line(state, texture + ".write(" + texel + ", " + SpatialPart(coord, shape) + (shape.arrayed ? ", " + coord + ".z" : "") + ", " + SampleIndex(access) + ");");
+    else if (shape.arrayed) Line(state, texture + ".write(" + texel + ", " + HostPlane(SpatialPart(coord, shape), shape, false) + ", " + coord + (shape.spatial == 1u ? ".y" : ".z") + ");");
     else Line(state, texture + ".write(" + texel + ", " + HostPlane(coord, shape, false) + ");");
     Close(state);
 }
@@ -848,9 +852,8 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     const auto shape = ShapeOf(image.dimension);
     const bool gather = access.inst.Opcode() == IrOpcode::ImageGatherRaw;
     if (shape.multisampled) throw MslUnsupported("MSL backend: multisampled images cannot be sampled");
-    if (image.numericClass != IrTextureNumericClass::Float && !image.depthCompare && !gather) throw MslUnsupported("MSL backend: sampling integer images has no Metal sample function");
     const auto conversion = ConversionFormat(image);
-    if (conversion.format != IrBufferFormat::Invalid && !gather) throw MslUnsupported("MSL backend: sampling a converted image needs filtering in the shader and is not emitted");
+    if (conversion.format != IrBufferFormat::Invalid && !gather && NormalizedConversion(conversion)) throw MslUnsupported("MSL backend: sampling a converted unorm or float image needs filtering in the shader and is not emitted");
     const auto layout = LayoutOf(mem);
     const bool dref = HasFlag(mem, RdnaImageSampleFlagCompare);
     if (dref && (image.emulatedCompare & EmulatedCompare::Enabled) != 0u) throw MslUnsupported("MSL backend: depth comparison of a color texture is emulated in the shader and is not emitted");
@@ -874,11 +877,18 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
             return;
         }
     } else if (HasFlag(mem, RdnaImageSampleFlagDerivative)) {
-        if (shape.spatial == 1u) throw MslUnsupported("MSL backend: gradients on 1D images have no Metal sample option");
         const auto gradX = CoordF32(access, layout.gradX, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
         const auto gradY = CoordF32(access, layout.gradY, shape.spatial, ShapeOf(mem.imageDimension).spatial, true);
-        options = std::string(shape.spatial == 3u ? "gradient3d(" : "gradient2d(") + gradX + ", " + gradY + ")";
-        if (layout.clamp != NoComponent) options += ", min_lod_clamp(" + AddressF32(access, layout.clamp) + ")";
+        if (shape.spatial == 1u) {
+            const auto footprint = Temp(state);
+            Line(state, "const float " + footprint + " = max(abs(float(" + gradX + ")), abs(float(" + gradY + "))) * float(" + texture + ".get_width());");
+            std::string lod = "log2(max(" + footprint + ", 1.0e-30f))";
+            if (layout.clamp != NoComponent) lod = "max(" + lod + ", " + AddressF32(access, layout.clamp) + ")";
+            options = "level(" + lod + ")";
+        } else {
+            options = std::string(shape.spatial == 3u ? "gradient3d(" : "gradient2d(") + gradX + ", " + gradY + ")";
+            if (layout.clamp != NoComponent) options += ", min_lod_clamp(" + AddressF32(access, layout.clamp) + ")";
+        }
     } else if (explicitLod) {
         auto lod = HasFlag(mem, RdnaImageSampleFlagLod) ? AddressF32(access, layout.lod) : std::string("0.0f");
         if (layout.clamp != NoComponent) lod = "max(" + lod + ", " + AddressF32(access, layout.clamp) + ")";
@@ -919,8 +929,10 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
         const auto converted = shape.spatial == 2u ? "float2(" + offset + ")" : "float3(" + offset + ")";
         return SpatialPart(coordinate, shape) + " + " + converted;
     };
-    const auto assign = [&](const std::string& expression) {
+    const auto assign = [&](const std::string& sampled) {
+        const auto expression = (state.target.experiment & MslExperimentNoSample) != 0u && !gather ? std::string("float4(0.5f)") : sampled;
         if (gather && conversion.format != IrBufferFormat::Invalid) Line(state, result + " = " + ResultVector(access, UnpackGather(access, expression), IrTextureNumericClass::Uint, false, true) + ";");
+        else if (conversion.format != IrBufferFormat::Invalid) Line(state, result + " = " + ResultVector(access, UnpackTexel(access, expression), IrTextureNumericClass::Uint, false, false) + ";");
         else Line(state, result + " = " + ResultVector(access, expression, image.numericClass, dref && !gather, gather) + ";");
     };
 
@@ -1113,7 +1125,9 @@ bool EmitImage(State& state, const IrValue& inst) {
         if (base.table != NoTable) tableSelector = "(" + access.valid + " ? ((" + access.flags + " >> " + U32(ImageTableAbi::ModeShift) + ") & " + U32(ImageTableAbi::ModeMask) + ") : 0xffffffffu)";
         else tableSelector = "(" + access.valid + " ? " + Constant(state, PipelineSpecialization::ImageBase + mem.resource * PipelineSpecialization::ImageWords, 0u) + " : 0xffffffffu)";
     }
-    Open(state, always ? std::string("{") : "if (" + Typed(state, inst, inst.ArgumentCount() - 1u) + ") {");
+    const bool writes = opcode == IrOpcode::ImageWrite || info.access == ImageAccess::Atomic;
+    if (state.quadMasked && writes) Open(state, "if (" + std::string(always ? "" : Typed(state, inst, inst.ArgumentCount() - 1u) + " && ") + "!aps5_quad_masked) {");
+    else Open(state, always ? std::string("{") : "if (" + Typed(state, inst, inst.ArgumentCount() - 1u) + ") {");
 
     const auto emitMode = [&](const ImageResource& mode, std::uint32_t element, const std::function<void(Access&, const std::string&)>& body) {
         Access access{state, inst, mem, mode, *address, element, tables ? &table : nullptr};
@@ -1126,6 +1140,24 @@ bool EmitImage(State& state, const IrValue& inst) {
         if (mode.packedFormat == IrBufferFormat::Fmask8_S2_F1) throw MslUnsupported("MSL backend: " + std::string(name) + " reads FMASK, which is not emitted");
         if (mode.srgbDecode) throw MslUnsupported("MSL backend: " + std::string(name) + " decodes an sRGB image in the shader, which is not emitted");
         if (mode.table != NoTable && ShapeOf(mode.dimension).multisampled) throw MslUnsupported("MSL backend: " + std::string(name) + " reads a multisampled image through an image table, which is not emitted");
+        if (mode.constantSwizzle) {
+            if (opcode != IrOpcode::ImageSampleRaw && opcode != IrOpcode::ImageGatherRaw) throw MslUnsupported("MSL backend: " + std::string(name) + " reads an image with a constant channel swizzle, which is not emitted");
+            const bool isFloat = mode.numericClass == IrTextureNumericClass::Float;
+            const bool isSint = mode.numericClass == IrTextureNumericClass::Sint;
+            const bool gather = opcode == IrOpcode::ImageGatherRaw;
+            const auto gatherDmask = EffectiveDmask(mem);
+            if (gather && gatherDmask != 1u && gatherDmask != 2u && gatherDmask != 4u && gatherDmask != 8u) Fail(inst, "gathers a dmask that selects several components");
+            std::string channels;
+            for (std::uint32_t channel = 0; channel < 4u; ++channel) {
+                const auto source = gather ? DmaskComponent(inst, gatherDmask, 0u) : channel;
+                const auto selector = Constant(state, PipelineSpecialization::ImageBase + mem.resource * PipelineSpecialization::ImageWords + 1u + source, source + 4u);
+                channels += std::string(channel ? ", " : "") + "(" + selector + " == 1u ? " + (isFloat ? "1.0f" : isSint ? "1" : "1u") + " : " + (isFloat ? "0.0f" : isSint ? "0" : "0u") + ")";
+            }
+            const std::string vector = std::string(isFloat ? "float4(" : isSint ? "int4(" : "uint4(") + channels + ")";
+            Access constantAccess{state, inst, mem, mode, *address, 0u, nullptr};
+            Line(state, result + " = " + ResultVector(constantAccess, vector, mode.numericClass, false, gather) + ";");
+            return;
+        }
         const auto kind = DescriptorBindingForImage(mode);
         const auto element = mode.table != NoTable ? 0u : ElementOf(state, kind, mem.resource);
         const auto sampled = [&](Access& access, const std::string& texture) {

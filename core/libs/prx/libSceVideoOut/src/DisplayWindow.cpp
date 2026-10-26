@@ -91,6 +91,13 @@ void DisplayWindow::create(std::uint32_t sourceWidth, std::uint32_t sourceHeight
     constexpr Uint32 GpuWindowFlag = SDL_WINDOW_VULKAN;
 #endif
     AgcDriverLockVulkanLoader_nid_postfix();
+#if defined(__APPLE__) && !defined(ANYPS5_GPU_BACKEND_METAL)
+    if (SDL_Vulkan_LoadLibrary(nullptr) != 0) {
+        for (const char* path : {"/opt/homebrew/lib/libvulkan.1.dylib", "/usr/local/lib/libvulkan.1.dylib"}) {
+            if (SDL_Vulkan_LoadLibrary(path) == 0) break;
+        }
+    }
+#endif
     window = SDL_CreateWindow(title.value, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, static_cast<int>(initialSize.width), static_cast<int>(initialSize.height), SDL_WINDOW_SHOWN | GpuWindowFlag | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
     AgcDriverUnlockVulkanLoader_nid_postfix();
     require(window != nullptr, SDL_GetError());

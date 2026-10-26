@@ -52,6 +52,7 @@ private:
     };
 
     explicit PadInput(Pad::InputConfiguration configuration);
+    explicit PadInput(Pad::InputLayouts layouts);
     void publish(std::uint64_t frame);
     void setMouseMode(bool enabled);
     void openAvailableControllers();
@@ -67,6 +68,7 @@ private:
     void leave(std::uint32_t device);
 
     Pad::KeyboardMouse keyboardMouse;
+    bool mouseLookArmed = false;
     std::vector<Controller> controllers;
     std::vector<Remote> remotes;
     RemotePad::Seats seats;

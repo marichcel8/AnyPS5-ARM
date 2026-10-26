@@ -298,6 +298,7 @@ private:
         append(key, value.float32DenormPreserve);
         append(key, value.spannedWaves);
         append(key, value.subgroupStages);
+        append(key, value.experiment);
     }
 
     static void appendFeatureDigest(std::vector<std::uint64_t>& key, std::span<const std::uint32_t> capabilities, std::span<const std::string_view> extensions) {

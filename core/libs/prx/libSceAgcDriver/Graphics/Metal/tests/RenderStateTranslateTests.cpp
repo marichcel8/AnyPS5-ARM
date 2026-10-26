@@ -150,6 +150,7 @@ void TestRasterAndRejections() {
     state = BaseState();
     state.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT;
     Require(M::TranslateState(state).rejection != nullptr, "last provoking vertex is rejected");
+    Require(M::TranslateState(state, false).rejection == nullptr, "last provoking vertex is ignored without flat inputs");
     state = BaseState();
     state.colors[0].format = VK_FORMAT_R8G8B8_UNORM;
     Require(M::TranslateState(state).rejection != nullptr, "three-component targets are rejected");

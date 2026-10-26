@@ -167,15 +167,15 @@ int main() {
         Draw(*device, VK_POLYGON_MODE_FILL);
         Expect(Interior, true, "filled triangle");
         Expect(Outside, false, "filled triangle");
-        if (Unsupported(*device, VK_POLYGON_MODE_POINT)) return VulkanTestSkipped;
-        ExpectExactly(CornerPixels, "point polygon mode");
         if (Unsupported(*device, VK_POLYGON_MODE_LINE)) return VulkanTestSkipped;
         Expect(StraightEdges(), true, "line polygon mode");
         Expect(Interior, false, "line polygon mode");
         Expect(Outside, false, "line polygon mode");
+        const bool points = !Unsupported(*device, VK_POLYGON_MODE_POINT);
+        if (points) ExpectExactly(CornerPixels, "point polygon mode");
         Draw(*device, VK_POLYGON_MODE_FILL);
-        Expect(Interior, true, "filled triangle after the point and line modes");
-        std::puts("point and line polygon modes drew the triangle's corners and edges");
+        Expect(Interior, true, "filled triangle after the line and point modes");
+        std::puts(points ? "point and line polygon modes drew the triangle's corners and edges" : "line polygon mode drew the triangle's edges; the point mode is not available on this device");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

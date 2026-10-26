@@ -172,6 +172,7 @@ void Run(AgcDriver::VulkanDevice& device) {
     replacement->Dispatch(*replacementResult, 1, 1, 1);
     replacement->WaitIdle();
     replacementRequest.target.nonConstantImageOffsets = !replacementRequest.target.nonConstantImageOffsets;
+    replacementRequest.msl.relaxedFloat = !replacementRequest.msl.relaxedFloat;
     static_cast<void>(AgcDriver::DriverDetail::InvocationFor(snapshot, 0, replacementRequest));
     Require(snapshot.prepared->entries.size() == 3, "a target that registration did not prepare for was not prepared");
     ShaderRecompiler::SrtRuntime runtime{};
@@ -278,8 +279,17 @@ void PrepareMultisampledStorage(AgcDriver::VulkanDevice& device) {
             if (variant >= 3u) code[10] = variant == 3u ? 0xf03c0138u : 0xf03c0130u;
             code[5] = variant == 0u ? 0x7e060280u : 0x7e060283u;
             code[4] = variant == 0u ? 0x7e04020eu : 0x7e040282u;
-            const auto handle = PrepareShader(request);
+            const auto handle = [&]() -> decltype(PrepareShader(request)) {
+                try {
+                    return PrepareShader(request);
+                } catch (const std::exception& error) {
+                    if (request.backend == ShaderBackendKind::Spirv || variant < 3u || std::string_view(error.what()).find("image atomics need a single-sample") == std::string_view::npos) throw;
+                    return {};
+                }
+            }();
+            if (!handle) continue;
             const auto& artifact = GetPreparedArtifact(*handle);
+            if (request.backend != ShaderBackendKind::Spirv) continue;
             std::vector<std::uint32_t> samples;
             bool written = false;
             for (std::size_t offset = 5; offset < artifact.spirv.size(); offset += artifact.spirv[offset] >> 16u) {

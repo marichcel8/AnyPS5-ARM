@@ -202,7 +202,7 @@ Winding TranslateFrontFace(VkFrontFace face) {
     return face == VK_FRONT_FACE_CLOCKWISE ? Winding::Clockwise : Winding::CounterClockwise;
 }
 
-TranslatedState TranslateState(const State& state) {
+TranslatedState TranslateState(const State& state, bool flatInputs) {
     TranslatedState result;
     auto reject = [&](const char* reason) {
         if (result.rejection == nullptr) result.rejection = reason;
@@ -211,8 +211,10 @@ TranslatedState TranslateState(const State& state) {
     if (state.rectList) reject("rect lists need the vertex-stage expansion");
     if (!TranslatePrimitive(state.topology, result.primitive)) reject("topology needs primitive conversion on Metal");
     if (state.depthBoundsTest) reject("depth bounds test is not available on Metal");
-    if (state.conservativeRasterization != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) reject("conservative rasterization is not available on Metal");
-    if (state.provokingVertexMode != VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT) reject("last provoking vertex is not available on Metal");
+    if (state.colorRop != 0xccu) reject("device does not support color logic operations: Metal render pipelines have no logic op");
+    if (state.conservativeRasterization != VK_CONSERVATIVE_RASTERIZATION_MODE_DISABLED_EXT) reject("conservative rasterization requires VK_EXT_conservative_rasterization, which Metal does not provide");
+    if (state.polygonMode == VK_POLYGON_MODE_POINT) reject("a point polygon mode needs the fillModeNonSolid feature, which Metal draws do not provide");
+    if (flatInputs && state.provokingVertexMode != VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT) reject("last provoking vertex is not available on Metal");
     if (state.customSampleLocations || state.sampleLocationGrid) reject("custom sample locations are not mapped on Metal");
     if (state.blends.size() > MaxColorAttachments) reject("more color targets than Metal attachments");
 
@@ -270,6 +272,7 @@ TranslatedState TranslateState(const State& state) {
     if (triangles && (state.cullMode & VK_CULL_MODE_FRONT_AND_BACK) == VK_CULL_MODE_FRONT_AND_BACK) result.cullsEverything = true;
     else if (triangles && (state.cullMode & VK_CULL_MODE_FRONT_BIT) != 0) dynamic.cull = CullMode::Front;
     else if (triangles && (state.cullMode & VK_CULL_MODE_BACK_BIT) != 0) dynamic.cull = CullMode::Back;
+    if (triangles && state.polygonMode == VK_POLYGON_MODE_LINE) dynamic.fill = FillMode::Lines;
     dynamic.winding = TranslateFrontFace(state.frontFace);
     dynamic.depthClip = state.depthClamp ? DepthClipMode::Clamp : DepthClipMode::Clip;
     result.restartOnLists = !state.primitiveRestart;

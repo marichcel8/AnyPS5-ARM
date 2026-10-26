@@ -42,7 +42,9 @@ enum Feature : std::uint32_t {
     Dot2 = 1u << 26u,
     Atomic64 = 1u << 27u,
     UpdateTable = 1u << 28u,
-    Tables = 1u << 29u
+    Tables = 1u << 29u,
+    Gds = 1u << 30u,
+    Lds64 = 1u << 31u
 };
 
 enum : std::uint8_t {
@@ -65,6 +67,12 @@ struct State {
     std::uint32_t windowDwords = 0;
     std::uint32_t waveLds = 0;
     bool stopAllowed = false;
+    bool lds64 = false;
+    bool ldsDevice = false;
+    bool ldsFunction = false;
+    std::unordered_map<const IrValue*, std::uint32_t> ldsLaneAddresses;
+    std::uint32_t ldsStride = 0;
+    bool stopOnUnlinkedCall = false;
     std::uint32_t lanes = 1;
     std::unordered_set<const IrValue*> hoisted;
     std::unordered_set<const IrValue*> defined;
@@ -78,6 +86,7 @@ struct State {
     std::map<std::string, std::string> stageArguments;
     std::map<std::string, std::string> stageGlobals;
     bool validMask = false;
+    bool quadMasked = false;
     std::uint32_t zeroClip = 0xffffffffu;
     std::map<std::uint32_t, std::uint32_t> localFetches;
     std::vector<std::string> prologue;
@@ -95,6 +104,7 @@ std::string Value(State& state, const IrValue* value);
 std::string Arg(State& state, const IrValue& inst, std::size_t index);
 std::string Typed(State& state, const IrValue& inst, std::size_t index);
 std::string U32(std::uint32_t value);
+std::string LdsBarrierFlags(const State& state);
 std::string Temp(State& state);
 void Line(State& state, std::string_view text);
 void Open(State& state, std::string_view text);
@@ -109,6 +119,8 @@ bool EmitAlu(State& state, const IrValue& inst);
 bool EmitMemory(State& state, const IrValue& inst);
 bool EmitWave(State& state, const IrValue& inst);
 bool IsCrossLane(IrOpcode opcode);
+bool IsAppendConsume(IrOpcode opcode);
+void EmitAppendConsume(State& state, const IrValue& inst);
 std::string WaveLane(State& state);
 std::string WaveAny(State& state, const std::string& zero, const std::string& one);
 std::string HalfArg(State& state, const IrValue& inst, std::size_t index, std::uint32_t half);
