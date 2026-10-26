@@ -413,7 +413,6 @@ void PrepareStage(State& state) {
         if (pixel.psOrderedPixelShader) throw MslUnsupported("MSL backend: primitive-ordered pixel shaders need raster order groups, which are not emitted");
         if (state.program.Metadata().barycentricEmulation) throw MslUnsupported("MSL backend: barycentric emulation is section S7");
         DeclarePixelOutputs(state);
-        // Metal shades per sample only when the function takes [[sample_id]]; the guest's iterating pixel shaders must not run per pixel.
         if (pixel.psIteratesSamples) Argument(state, "aps5_sample", "uint aps5_sample [[sample_id]]");
         for (const auto* block : state.program.BlockOrder()) {
             for (const auto* inst : block->Instructions()) {
