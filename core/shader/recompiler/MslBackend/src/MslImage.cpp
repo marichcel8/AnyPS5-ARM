@@ -490,6 +490,7 @@ void EmitQueryDimensions(Access& access, const std::string& texture, const std::
     if (volume) push(texture + ".get_depth(" + lod + ")");
     if (shape.arrayed) push(texture + ".get_array_size()");
     if (access.mem.imageDimension == RdnaImageDimension::Dim3D && access.image.dimension == RdnaImageDimension::Dim2D) values[2] = "1u";
+    if (shape.arrayed && shape.spatial >= 2u && access.mem.imageDimension == RdnaImageDimension::Dim1D) values[2] = "0u";
     if (!shape.multisampled) values[3] = texture + ".get_num_mip_levels()";
     Line(state, result + " = uint4(" + values[0] + ", " + values[1] + ", " + values[2] + ", " + values[3] + ");");
 }

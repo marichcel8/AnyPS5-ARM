@@ -2591,6 +2591,7 @@ auto VulkanDevice::PresentCounts() -> PresentStatistics { return {}; }
 auto VulkanDevice::PresyncCounts() -> PresyncStatistics { return {}; }
 
 auto VulkanDevice::PrepareDispatch(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot>, std::uint64_t, std::uint64_t) -> std::shared_ptr<PreparedDispatch> {
+    ShaderRecompiler::RuntimeAbi::RequireVersion(shader.runtimeAbiVersion);
     if (shader.backend == ShaderRecompiler::ShaderBackendKind::Msl && !shader.msl.empty()) static_cast<void>(state->pipeline(shader));
     return {};
 }
@@ -2601,15 +2602,19 @@ auto VulkanDevice::PreparePhaseMs(const PreparedDispatch&) -> std::span<const do
 }
 
 auto VulkanDevice::Dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*, std::optional<std::pair<std::uint64_t, std::size_t>>) -> void {
+    ShaderRecompiler::RuntimeAbi::RequireVersion(shader.runtimeAbiVersion);
     state->dispatch(shader, x, y, z, snapshots);
 }
 
 auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& shader, std::uint64_t arguments, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint64_t, std::shared_ptr<PreparedDispatch>, std::shared_ptr<const Recipe>*, const std::array<std::uint32_t, 3>&) -> IndirectOutcome {
+    ShaderRecompiler::RuntimeAbi::RequireVersion(shader.runtimeAbiVersion);
     const auto started = std::chrono::steady_clock::now();
     WaitIdle();
     std::array<std::uint32_t, 3> groups{};
     std::memcpy(groups.data(), reinterpret_cast<const void*>(arguments), sizeof(groups));
     const auto readMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+    const auto& limit = state->groupLimit;
+    if (groups[0] > limit[0] || groups[1] > limit[1] || groups[2] > limit[2]) return {0, readMs};
     state->dispatch(shader, groups[0], groups[1], groups[2], snapshots);
     return {1, readMs};
 }
@@ -2631,6 +2636,7 @@ auto VulkanDevice::NoteRecipe(RecipeEvent, RecipeKind) -> void {}
 auto VulkanDevice::NoteDrawRecipeMiss(DrawRecipePrecheck) -> void {}
 
 auto VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::shared_ptr<const DrawRecipe>*) -> void {
+    for (const auto& shader : shaders) ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
     state->draw(graphics, draw, shaders, snapshots);
 }
 
@@ -2643,6 +2649,7 @@ auto VulkanDevice::DrawFromRecipe(const Graphics::State&, const Pm4::DrawParamet
 auto VulkanDevice::DrawIndirectSupport() const -> IndirectDrawSupport { return {false, false, false}; }
 
 auto VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) -> void {
+    for (const auto& shader : shaders) ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
     state->draw(graphics, draw, shaders, snapshots);
 }
 
