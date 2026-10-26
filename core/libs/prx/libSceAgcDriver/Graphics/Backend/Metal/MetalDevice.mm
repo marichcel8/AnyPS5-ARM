@@ -263,6 +263,8 @@ struct DepthSurface {
     std::optional<std::uint32_t> htilePattern;
     std::vector<std::uint32_t> htileWords;
     bool dirty = false;
+    bool clearRequested = false;
+    std::uint64_t stamp = 0;
     Graphics::GuestTextureResource resource{};
     std::uint64_t address = 0;
     std::uint64_t guestAddress = 0;
@@ -307,6 +309,7 @@ void ScanHtile(DepthSurface& surface, const Graphics::DepthTarget& target) {
     surface.htileWords = std::move(words);
     if (depthCleared) {
         surface.initialized = false;
+        surface.clearRequested = true;
         surface.fillDepth.reset();
     }
     if (stencilCleared) {
@@ -328,6 +331,7 @@ void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target)
             else surface.htilePattern.reset();
             if (depthCleared) {
                 surface.initialized = false;
+                surface.clearRequested = true;
                 surface.fillDepth.reset();
             }
             if (stencilCleared) {
@@ -345,6 +349,7 @@ void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target)
             }
             if (value) {
                 surface.initialized = false;
+                surface.clearRequested = true;
                 surface.fillDepth = value;
             }
         }
@@ -1122,6 +1127,7 @@ struct VulkanDevice::State {
             [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             cbMovedBytes += surface->guestBytes;
             surface->dirty = false;
+            surface->stamp = GuestMemory::TrackerGeneration();
         }
         writebackSurfaces += surfaces.size();
         cbWritebacks += static_cast<std::uint32_t>(surfaces.size());
@@ -2107,27 +2113,61 @@ struct VulkanDevice::State {
         throw Graphics::UnrenderableDraw("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
     }
 
-    void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target, const Graphics::State& graphics) {
-        if (Trace()) std::fprintf(stderr, "[metal] depth mark state: test %d write %d compare %d clear %f initialized %d fill %d\n", graphics.depthTest ? 1 : 0, graphics.depthWrite ? 1 : 0, static_cast<int>(graphics.depthCompare), target.clearDepth, depth.initialized ? 1 : 0, depth.fillDepth ? 1 : 0);
-        if (Trace()) std::fprintf(stderr, "[metal] depth mark: texture %p address %016llx, %ux%u, format %lu, samples %u\n", (__bridge void*)depth.texture, static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
-        if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0) return;
+    struct DepthPlane {
+        Graphics::GuestTextureResource resource;
+        std::uint64_t bytes = 0;
+    };
+
+    std::optional<DepthPlane> depthPlane(const DepthSurface& depth, const Graphics::DepthTarget& target) {
+        if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0 || target.samples != 1u) return std::nullopt;
         try {
             const auto resource = Graphics::DecodeTextureResource(Graphics::DepthCopySourceWords(target));
             const auto* format = Metal::FindFormat(resource.format);
-            if (format == nullptr || !format->uploadable || format->guestElementBytes != 4u) return;
-            const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
-            const auto address = resolve(target.address, bytes, true, {}, nullptr, false);
-            if (Trace()) std::fprintf(stderr, "[metal] depth mark: %llu bytes resolved to %016llx\n", static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(address));
-            if (address == 0) return;
-            depth.resource = resource;
-            depth.address = address;
-            depth.guestAddress = target.address;
-            depth.guestBytes = bytes;
-            depth.dirty = true;
-            dirtyDepths.push_back(&depth);
+            if (format == nullptr || !format->uploadable || format->guestElementBytes != 4u) return std::nullopt;
+            return DepthPlane{resource, Graphics::DescribeSurface(resource).guestBytes};
         } catch (const std::exception& error) {
-            if (Trace() || Verbose()) std::fprintf(stderr, "[metal] depth export skipped: %s\n", error.what());
+            if (Trace() || Verbose()) std::fprintf(stderr, "[metal] depth plane skipped: %s\n", error.what());
+            return std::nullopt;
         }
+    }
+
+    void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target) {
+        const auto plane = depthPlane(depth, target);
+        if (!plane) return;
+        const auto address = resolve(target.address, plane->bytes, true, {}, nullptr, false);
+        if (Trace()) std::fprintf(stderr, "[metal] depth mark: %llu bytes resolved to %016llx\n", static_cast<unsigned long long>(plane->bytes), static_cast<unsigned long long>(address));
+        if (address == 0) return;
+        depth.resource = plane->resource;
+        depth.address = address;
+        depth.guestAddress = target.address;
+        depth.guestBytes = plane->bytes;
+        depth.dirty = true;
+        dirtyDepths.push_back(&depth);
+    }
+
+    void importDepth(DepthSurface& depth, const Graphics::DepthTarget& target) {
+        if (depth.dirty || (!depth.initialized && depth.clearRequested)) return;
+        const auto plane = depthPlane(depth, target);
+        if (!plane) return;
+        if (depth.initialized && depth.stamp != 0 && GuestMemory::UnchangedSinceCollected(target.address, plane->bytes, depth.stamp)) return;
+        const auto source = resolve(target.address, plane->bytes, false, {});
+        if (source == 0) return;
+        const auto width = static_cast<std::uint32_t>(depth.texture.width);
+        const auto height = static_cast<std::uint32_t>(depth.texture.height);
+        const auto pitch = width * 4u;
+        const auto bytes = static_cast<std::uint64_t>(pitch) * height;
+        const auto scratch = upload(bytes);
+        auto compute = computeEncoder();
+        [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        textures->EncodeTiledToLinear((__bridge void*)compute, plane->resource, source, scratch.gpuAddress, pitch);
+        [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        [compute copyFromBuffer:(__bridge id<MTLBuffer>)scratch.buffer sourceOffset:scratch.offset sourceBytesPerRow:pitch sourceBytesPerImage:bytes sourceSize:MTLSizeMake(width, height, 1) toTexture:depth.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        if (Trace()) std::fprintf(stderr, "[metal] depth import: guest %016llx, %ux%u\n", static_cast<unsigned long long>(target.address), width, height);
+        depth.initialized = true;
+        depth.clearRequested = false;
+        depth.stamp = GuestMemory::TrackerGeneration();
+        cbMovedBytes += plane->bytes;
     }
 
     DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
@@ -2187,6 +2227,7 @@ struct VulkanDevice::State {
             depth->htileWords.clear();
             depth->htilePattern.reset();
             depth->initialized = true;
+            depth->clearRequested = false;
             if (stencil) depth->stencilInitialized = true;
             depth->fillDepth.reset();
             depth->fillStencil.reset();
@@ -2370,6 +2411,7 @@ struct VulkanDevice::State {
                     loads.push_back({surface, resource, surface->address, false});
                 }
             }
+            if (!reuse && depth != nullptr && graphics.depth) importDepth(*depth, *graphics.depth);
             if (!reuse || needsUpload(uses)) {
                 const auto& pending = reuse ? uses : loads;
                 if (needsUpload(pending)) {
@@ -2423,7 +2465,7 @@ struct VulkanDevice::State {
                 surface->guestBytes = Graphics::DescribeSurface(resource).guestBytes;
                 dirtySurfaces.push_back(surface);
             }
-            if (depth != nullptr && graphics.depthWrite && !depth->dirty && graphics.depth->samples == 1u) markDepthDirty(*depth, *graphics.depth, graphics);
+            if (depth != nullptr && graphics.depthWrite && !depth->dirty && graphics.depth->samples == 1u) markDepthDirty(*depth, *graphics.depth);
             ++recordedSinceSubmit;
             ++cbDraws;
             if (gpuTimeEnabled()) {
