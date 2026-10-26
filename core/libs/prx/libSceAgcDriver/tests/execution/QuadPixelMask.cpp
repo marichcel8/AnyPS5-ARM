@@ -178,9 +178,9 @@ int main() {
                 Require(std::string(error.what()).find("shaderDemoteToHelperInvocation") != std::string::npos, std::string("an implicit-LOD sample under a quad pixel mask failed for another reason: ") + error.what());
                 continue;
             }
-            Require(false, "an implicit-LOD sample under quad pixel mask " + std::to_string(mask) + " was drawn without demote to helper invocation");
+            Check("implicit-LOD sample", mask, LevelColor(SampledLevel));
         }
-        std::printf("quad pixel mask tests passed (%s)\n", demote ? "demote to helper invocation" : "kill, derivatives refused");
+        std::printf("quad pixel mask tests passed (%s)\n", demote ? "demote to helper invocation" : "kept helper lanes or derivatives refused");
         return 0;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

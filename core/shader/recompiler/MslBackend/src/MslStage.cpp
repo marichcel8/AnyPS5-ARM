@@ -421,7 +421,13 @@ void PrepareStage(State& state) {
             }
         }
     }
-    state.exit = state.validMask ? "if (!aps5_valid) discard_fragment(); return aps5_out;" : "return aps5_out;";
+    const bool quadMasked = stage == IrShaderStage::Pixel && PixelInfo(state).quadPixelMask != 0xfu;
+    if (state.validMask || quadMasked) {
+        const std::string condition = std::string(quadMasked ? "aps5_quad_masked" : "") + (quadMasked && state.validMask ? " || " : "") + (state.validMask ? "!aps5_valid" : "");
+        state.exit = "if (" + condition + ") discard_fragment(); return aps5_out;";
+    } else {
+        state.exit = "return aps5_out;";
+    }
 }
 
 std::string StageBuiltin(State& state, StageInputKind kind, std::uint32_t component) {
@@ -523,7 +529,7 @@ std::string StageHeader(const State& state, const std::string& parameters) {
     }
     if (state.validMask) text += "    bool aps5_valid = true;\n";
     if (pixel && PixelInfo(state).quadPixelMask != 0xfu) {
-        text += "    if (((" + U32(PixelInfo(state).quadPixelMask) + " >> ((uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u))) & 1u) == 0u) discard_fragment();\n";
+        text += "    const bool aps5_quad_masked = ((" + U32(PixelInfo(state).quadPixelMask) + " >> ((uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u))) & 1u) == 0u;\n";
     }
     return text;
 }
