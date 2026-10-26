@@ -2103,19 +2103,23 @@ struct VulkanDevice::State {
     }
 
     void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target) {
-        if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float) return;
-        const auto resource = Graphics::DecodeTextureResource(Graphics::DepthCopySourceWords(target));
-        const auto* format = Metal::FindFormat(resource.format);
-        if (format == nullptr || !format->uploadable || format->guestElementBytes != 4u) return;
-        const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
-        const auto address = resolve(target.address, bytes, true, {}, nullptr, false);
-        if (address == 0) return;
-        depth.resource = resource;
-        depth.address = address;
-        depth.guestAddress = target.address;
-        depth.guestBytes = bytes;
-        depth.dirty = true;
-        dirtyDepths.push_back(&depth);
+        if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0) return;
+        try {
+            const auto resource = Graphics::DecodeTextureResource(Graphics::DepthCopySourceWords(target));
+            const auto* format = Metal::FindFormat(resource.format);
+            if (format == nullptr || !format->uploadable || format->guestElementBytes != 4u) return;
+            const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
+            const auto address = resolve(target.address, bytes, true, {}, nullptr, false);
+            if (address == 0) return;
+            depth.resource = resource;
+            depth.address = address;
+            depth.guestAddress = target.address;
+            depth.guestBytes = bytes;
+            depth.dirty = true;
+            dirtyDepths.push_back(&depth);
+        } catch (const std::exception& error) {
+            if (Verbose()) std::fprintf(stderr, "[metal] depth export skipped: %s\n", error.what());
+        }
     }
 
     DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
