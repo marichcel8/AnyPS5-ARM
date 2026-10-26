@@ -707,7 +707,6 @@ std::optional<std::string> MultisampleRejection(const Graphics::State& graphics)
     if (!multisampled) return std::nullopt;
     if (samples != 2u && samples != 4u && samples != 8u) return std::string("the draw's sample count is not 2, 4 or 8");
     if (graphics.sampleLocationGrid) return std::string("per-pixel sample location grids are not wired on Metal (render passes take one position set)");
-    if (Graphics::PartialSampleMask(graphics) && !(Graphics::UniformSampleMask(graphics) && Graphics::HostSampleMask(graphics) == 0u)) return std::string("partial sample masks are not wired on Metal yet");
     return std::nullopt;
 }
 
