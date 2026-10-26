@@ -689,8 +689,7 @@ int APS5_VABI sceNetCtlRegisterCallbackForNpToolkit(NetCtlCallback callback, voi
 }
 
 int APS5_VABI sceNetCtlRegisterCallbackIpcInt(NetCtlCallback callback, void* argument, int* callbackId) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlRegisterCallback(callback, argument, callbackId);
 }
 
 int APS5_VABI sceNetCtlRegisterCallbackForLibIpcInt(NetCtlCallback callback, void* argument, int* callbackId) {
@@ -703,8 +702,7 @@ int APS5_VABI sceNetCtlUnregisterCallbackForNpToolkit(int callbackId) {
 }
 
 int APS5_VABI sceNetCtlUnregisterCallbackIpcInt(int callbackId) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlUnregisterCallback(callbackId);
 }
 
 int APS5_VABI sceNetCtlUnregisterCallbackForLibIpcInt(int callbackId) {
@@ -737,13 +735,11 @@ int APS5_VABI sceNetCtlClearEventForLibIpcInt(int event) {
 }
 
 int APS5_VABI sceNetCtlGetResultIpcInt(int event, int* result) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlGetResult(event, result);
 }
 
 int APS5_VABI sceNetCtlGetStateIpcInt(int* state) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlGetState(state);
 }
 
 int APS5_VABI sceNetCtlGetState2IpcInt(int* state) {
@@ -752,8 +748,7 @@ int APS5_VABI sceNetCtlGetState2IpcInt(int* state) {
 }
 
 int APS5_VABI sceNetCtlGetInfoIpcInt(std::uint32_t code, NetCtlInfo* info) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlGetInfo(static_cast<int>(code), info);
 }
 
 int APS5_VABI sceNetCtlGetEtherLinkMode(int* mode) {
@@ -822,13 +817,11 @@ int APS5_VABI sceNetCtlSetErrorNotificationEnabledIpcInt(int enabled) {
 }
 
 int APS5_VABI sceNetCtlRegisterCallbackV6IpcInt(NetCtlCallback callback, void* argument, int* callbackId) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlRegisterCallbackV6(callback, argument, callbackId);
 }
 
 int APS5_VABI sceNetCtlUnregisterCallbackV6IpcInt(int callbackId) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlUnregisterCallbackV6(callbackId);
 }
 
 int APS5_VABI sceNetCtlGetResultV6(int event_type, int* error_code) {
@@ -843,18 +836,15 @@ int APS5_VABI sceNetCtlGetResultV6(int event_type, int* error_code) {
 }
 
 int APS5_VABI sceNetCtlGetResultV6IpcInt(int event, int* result) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlGetResultV6(event, result);
 }
 
 int APS5_VABI sceNetCtlGetStateV6IpcInt(int* state) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlGetStateV6(state);
 }
 
 int APS5_VABI sceNetCtlGetInfoV6IpcInt(std::uint32_t code, NetCtlInfoV6* info) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+    return sceNetCtlGetInfoV6(code, info);
 }
 
 int APS5_VABI sceNetCtlGetNatInfoIpcInt(NetCtlNatInfoInternal* info) {

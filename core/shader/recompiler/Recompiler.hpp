@@ -15,6 +15,7 @@
 #include <span>
 #include <stdexcept>
 #include <ranges>
+#include <functional>
 #include <utility>
 #include <string>
 #include <string_view>
@@ -134,7 +135,8 @@ enum class ColorExportPacking : std::uint8_t {
     None,
     Unorm10_11_11,
     Float11_11_10,
-    Unorm4_4_4_4
+    Unorm4_4_4_4,
+    Uint
 };
 
 enum class RasterPrimitive : std::uint8_t {
@@ -949,6 +951,9 @@ struct MeshOutputBudget {
 
 struct ResourceCapture;
 [[nodiscard]] std::shared_ptr<const RecompileResult> Recompile(const RecompileRequest& request, const ResourceCapture& capture, bool* memoHit = nullptr);
+void SetResultMemoBudget(std::uint64_t bytes);
+[[nodiscard]] std::uint64_t ResultMemoBytes();
+void SetResultMemoTrimHook(std::function<void()> hook);
 
 // Debug aid (see DebugProbe in Translation/TranslationContext.hpp): the APS5_PROBE register probe is
 // only applied while a driver has it active, so it can be limited to one dispatch; the recompile

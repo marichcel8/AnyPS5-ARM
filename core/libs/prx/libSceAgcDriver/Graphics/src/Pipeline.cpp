@@ -127,10 +127,6 @@ Framebuffer::~Framebuffer() {
     if (framebuffer) context.Function<PFN_vkDestroyFramebuffer>("vkDestroyFramebuffer")(context.device, framebuffer, nullptr);
 }
 
-void ValidateDepthBounds(const Context& context, const State& state) {
-    Require(!state.depthBoundsTest || !context.depthBounds || context.depthRangeUnrestricted || (state.minDepthBounds >= 0.0f && state.minDepthBounds <= 1.0f && state.maxDepthBounds >= 0.0f && state.maxDepthBounds <= 1.0f), "depth bounds outside [0, 1] require VK_EXT_depth_range_unrestricted");
-}
-
 namespace {
 
 struct Decorations {

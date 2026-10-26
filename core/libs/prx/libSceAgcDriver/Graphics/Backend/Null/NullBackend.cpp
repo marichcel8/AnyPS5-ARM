@@ -254,6 +254,10 @@ auto StorageTexture::StoreSmallPending(const char*) -> std::size_t { return 0; }
 
 auto StorageTexture::StoreReadbackBeforeLabel(const char*) -> void {}
 
+auto StorageTexture::StoreDrawnLinear(const char*) -> std::size_t { return 0; }
+
+auto StorageTexture::StoreDrawnLinearTouching(const char*, const std::function<bool(std::uint64_t, std::uint64_t)>&, bool) -> std::size_t { return 0; }
+
 bool DrawPipelineEnabled() { return false; }
 
 std::optional<MultisampledSingleClear> MatchMultisampledSingleClear(std::span<const std::uint32_t>, std::span<const std::uint32_t>, const std::array<std::uint32_t, 3>&) { return std::nullopt; }

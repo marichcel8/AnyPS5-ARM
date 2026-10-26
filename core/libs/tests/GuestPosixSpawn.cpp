@@ -1,3 +1,6 @@
+#ifdef __APPLE__
+#include <crt_externs.h>
+#endif
 #include "prx/libc/include/Api.hpp"
 #include "prx/libSceLibcInternal/include/Api.hpp"
 #include "prx/libSceLibcInternal/include/Spawn.hpp"
@@ -228,8 +231,10 @@ static std::int32_t SpawnChild(const char* role) {
     char program[] = "/app0/child.bin";
     char* arguments[] = {program, nullptr};
     std::vector<std::string> entries;
-#ifdef _WIN32
+#if defined(_WIN32)
     char** const parentEnvironment = _environ;
+#elif defined(__APPLE__)
+    char** const parentEnvironment = *_NSGetEnviron();
 #else
     char** const parentEnvironment = environ;
 #endif

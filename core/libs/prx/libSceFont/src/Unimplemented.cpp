@@ -5,6 +5,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceFont/include/FontGraphics.hpp"
 #include "prx/libSceFont/include/FontTypes.hpp"
+#include "prx/libSceFont/include/FontWords.hpp"
 
 static_assert(sizeof(FontGraphicsRegion) == 32);
 static_assert(offsetof(FontGraphicsRegion, x) == 0);
@@ -81,6 +82,10 @@ int APS5_VABI sceFontCreateGraphicsServiceWithEdition(const FontMemory* memory, 
     return 0;
 }
 
+int APS5_VABI sceFontCreateWords(const FontMemory* memory, FontTextSource* source, std::uint64_t unusedSlot, FontWords** words) {
+    return Font::CreateWords(memory, source, words);
+}
+
 int APS5_VABI sceFontDestroyGraphicsDevice(FontGraphicsDevice** device) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
@@ -91,7 +96,27 @@ int APS5_VABI sceFontDestroyGraphicsService(FontGraphicsService** service) {
     return 0;
 }
 
+int APS5_VABI sceFontDestroyWords(FontWords** words) {
+    return Font::DestroyWords(words);
+}
+
+
 int APS5_VABI sceFontGetGlyphExpandBufferState(FontHandle font, FontGlyphExpandBufferState* state) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceFontGlyphRenderImage(FontGlyph glyph, const FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* output) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceFontGlyphRenderImageHorizontal(FontGlyph glyph, const FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* output) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI sceFontGlyphRenderImageVertical(FontGlyph glyph, const FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* output) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -344,13 +369,16 @@ int APS5_VABI sceFontSupportGlyphs(const FontGlyphSupport* support) {
     return 0;
 }
 
+int APS5_VABI sceFontWordsFindWordCharacters(FontWords* words, FontTextCharacter* firstCharacter, FontTextCharacter* endCharacter, FontTextCharacter** lastCharacter, FontTextCharacter** nextCharacter) {
+    return Font::WordsFindWordCharacters(words, firstCharacter, endCharacter, lastCharacter, nextCharacter);
+}
+
 int APS5_VABI sceFontGraphicsDrawupFillTextureImageObject(FontGraphicsFrame* frame, const void* data, std::uint32_t dataSize, float x, float y, float width, float height, FontGraphicsFill** fill) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
 
-int APS5_VABI sceFontGraphicsDrawupFillTexturePatternObject(FontGraphicsFrame* frame, const void* data, std::uint32_t dataSize, std::uint32_t firstMode, std::uint32_t secondMode, std::int32_t firstCount, std::int32_t firstLayout, std::int32_t secondLayout, std::uint64_t secondCountSlot, FontGraphicsFill** fill) {
-    const auto secondCount = static_cast<std::int32_t>(secondCountSlot);
+int APS5_VABI sceFontGraphicsDrawupFillTexturePatternObject(FontGraphicsFrame* frame, const void* data, std::uint32_t dataSize, std::uint32_t firstMode, std::uint32_t secondMode, std::int32_t firstCount, std::int32_t firstLayout, std::int32_t secondLayout, std::int32_t secondCount, FontGraphicsFill** fill) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }

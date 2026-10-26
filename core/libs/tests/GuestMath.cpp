@@ -630,6 +630,27 @@ static void CheckLog1pConsoleBits() {
     }
 }
 
+static void CheckTanhConsoleBits() {
+    constexpr std::uint64_t cases[][2] = {
+        {0x0000000000000000ull, 0x0000000000000000ull}, {0x8000000000000000ull, 0x8000000000000000ull},
+        {0x3e2fffffffffffffull, 0x3e2fffffffffffffull}, {0x3e30000000000000ull, 0x3e30000000000000ull},
+        {0xbe30000000000000ull, 0xbe30000000000000ull}, {0x3fefffffffffffffull, 0x3fe85efab514f394ull},
+        {0x3ff0000000000000ull, 0x3fe85efab514f394ull}, {0xbff0000000000000ull, 0xbfe85efab514f394ull},
+        {0x3fe0000000000000ull, 0x3fdd9353d7568af3ull}, {0x4035ffffffffffffull, 0x3ff0000000000000ull},
+        {0x4036000000000000ull, 0x3ff0000000000000ull}, {0xc036000000000000ull, 0xbff0000000000000ull},
+        {0x4049000000000000ull, 0x3ff0000000000000ull}, {0x7fefffffffffffffull, 0x3ff0000000000000ull},
+        {0x7ff0000000000000ull, 0x3ff0000000000000ull}, {0xfff0000000000000ull, 0xbff0000000000000ull},
+        {0x7ff8000000000001ull, 0x7ff8000000000001ull}, {0xfff8000000000002ull, 0xfff8000000000002ull},
+        {0x3f927ed0db8370b1ull, 0x3f927e4d1092a580ull}, {0x3f95d74e4cee78bfull, 0x3f95d67547d523a0ull},
+        {0x3f18f1b062cb523cull, 0x3f18f1b06187faaeull}, {0x3f937129f25ae835ull, 0x3f937090dd8c9cb3ull},
+        {0x3facb0d89f8aa91cull, 0x3faca92afe31a32bull}, {0x3f07f462f020acdeull, 0x3f07f462efd91530ull},
+    };
+    for (const auto& [input, expected] : cases) {
+        errno = 1234;
+        Require(std::bit_cast<std::uint64_t>(tanh_nid_postfix(std::bit_cast<double>(input))) == expected && errno == 1234);
+    }
+}
+
 static void CheckRoundingNaNConsoleBits() {
     constexpr std::uint64_t cases[][2] = {
         {0x7ff0000000000001ull, 0x7ff8000000000001ull}, {0xfff4000000000123ull, 0xfffc000000000123ull}, {0x7ff8000000000456ull, 0x7ff8000000000456ull},
@@ -1454,6 +1475,44 @@ static void CheckAcosfMsun() {
     Require(std::bit_cast<std::uint32_t>(acosf_nid_postfix(std::bit_cast<float>(0x32800000u))) == 0x3fc90fdbu);
 }
 
+static void CheckLongDoubleHyperbolic() {
+    const long double infinity = std::numeric_limits<long double>::infinity();
+    const long double nan = std::numeric_limits<long double>::quiet_NaN();
+    Require(_LCosh_nid_postfix(0.0L, 2.0L) == 2.0L);
+    Require(Near(_LCosh_nid_postfix(1.0L, 2.0L), 3.08616126963048755696L));
+    Require(Near(_LCosh_nid_postfix(-1.0L, -2.0L), -3.08616126963048755696L));
+    Require(std::isinf(_LCosh_nid_postfix(infinity, -1.0L)) && std::signbit(_LCosh_nid_postfix(infinity, -1.0L)));
+    Require(std::isnan(_LCosh_nid_postfix(infinity, 0.0L)));
+    Require(std::isnan(_LCosh_nid_postfix(nan, 1.0L)));
+    Require(_LCosh_nid_postfix(720.0L, 0.0L) == 0.0L && !std::signbit(_LCosh_nid_postfix(720.0L, 0.0L)));
+    Require(_LCosh_nid_postfix(720.0L, -0.0L) == 0.0L && std::signbit(_LCosh_nid_postfix(720.0L, -0.0L)));
+    Require(Near(_LCosh_nid_postfix(11357.0L, 0x1p-16000L), 0xc.e2773666cc8cc68p+380L));
+    Require(Near(_LCosh_nid_postfix(-11357.0L, 0x1p-16000L), 0xc.e2773666cc8cc68p+380L));
+    Require(Near(_LCosh_nid_postfix(11360.0L, 0x1p-16384L), 0x8.165ba1f5c0ff231p+1L));
+    Require(std::isinf(_LCosh_nid_postfix(11360.0L, 1.0L)));
+    Require(_LSinh_nid_postfix(0.0L, 2.0L) == 0.0L && !std::signbit(_LSinh_nid_postfix(0.0L, 2.0L)));
+    Require(_LSinh_nid_postfix(0.0L, -2.0L) == 0.0L && std::signbit(_LSinh_nid_postfix(0.0L, -2.0L)));
+    Require(Near(_LSinh_nid_postfix(1.0L, 2.0L), 2.35040238728760291376L));
+    Require(Near(_LSinh_nid_postfix(-1.0L, -2.0L), 2.35040238728760291376L));
+    Require(Near(_LSinh_nid_postfix(1.0L, -2.0L), -2.35040238728760291376L));
+    Require(std::isinf(_LSinh_nid_postfix(infinity, -1.0L)) && std::signbit(_LSinh_nid_postfix(infinity, -1.0L)));
+    Require(std::isinf(_LSinh_nid_postfix(-infinity, -1.0L)) && !std::signbit(_LSinh_nid_postfix(-infinity, -1.0L)));
+    Require(std::isnan(_LSinh_nid_postfix(infinity, 0.0L)));
+    Require(std::isnan(_LSinh_nid_postfix(nan, 1.0L)));
+    Require(_LSinh_nid_postfix(720.0L, 0.0L) == 0.0L && !std::signbit(_LSinh_nid_postfix(720.0L, 0.0L)));
+    Require(_LSinh_nid_postfix(720.0L, -0.0L) == 0.0L && std::signbit(_LSinh_nid_postfix(720.0L, -0.0L)));
+    Require(_LSinh_nid_postfix(-720.0L, 0.0L) == 0.0L && std::signbit(_LSinh_nid_postfix(-720.0L, 0.0L)));
+    Require(_LSinh_nid_postfix(-720.0L, -0.0L) == 0.0L && !std::signbit(_LSinh_nid_postfix(-720.0L, -0.0L)));
+    Require(Near(_LSinh_nid_postfix(11357.0L, 0x1p-16000L), 0xc.e2773666cc8cc68p+380L));
+    Require(Near(_LSinh_nid_postfix(-11357.0L, 0x1p-16000L), -0xc.e2773666cc8cc68p+380L));
+    Require(Near(_LSinh_nid_postfix(11357.0L, -0x1p-16000L), -0xc.e2773666cc8cc68p+380L));
+    Require(Near(_LSinh_nid_postfix(-11357.0L, -0x1p-16000L), 0xc.e2773666cc8cc68p+380L));
+    Require(Near(_LSinh_nid_postfix(11360.0L, 0x1p-16384L), 0x8.165ba1f5c0ff231p+1L));
+    Require(Near(_LSinh_nid_postfix(-11360.0L, 0x1p-16384L), -0x8.165ba1f5c0ff231p+1L));
+    Require(std::isinf(_LSinh_nid_postfix(11360.0L, 1.0L)));
+    Require(std::isinf(_LSinh_nid_postfix(-11360.0L, 1.0L)) && std::signbit(_LSinh_nid_postfix(-11360.0L, 1.0L)));
+}
+
 static void CheckLongDoubleFunctions() {
     const long double infinity = std::numeric_limits<long double>::infinity();
     const long double nan = std::numeric_limits<long double>::quiet_NaN();
@@ -1793,6 +1852,7 @@ int main() {
     CheckExpm1ConsoleBits();
     CheckLog1pConsoleBits();
     CheckNextafterConsoleBits();
+    CheckTanhConsoleBits();
     CheckRoundingNaNConsoleBits();
     CheckAsinl();
     Require(scalbn_nid_postfix(0.75, -2) == 0.1875);
@@ -1934,5 +1994,6 @@ int main() {
     CheckIntegerAbsAndDivision();
     CheckScaling();
     CheckLongDoubleFunctions();
+    CheckLongDoubleHyperbolic();
     CheckDinkumwareFloatCharacteristics();
 }
