@@ -2300,7 +2300,11 @@ struct VulkanDevice::State {
                         scaleRefused[use.resource.baseAddress] = true;
                         continue;
                     }
-                    textures->EncodeWriteback((__bridge void*)compute, use.surface->texture, use.resource, use.address);
+                    std::vector<std::uint32_t> covered;
+                    for (const auto& [layeredUse, slices] : layered) {
+                        if (layeredUse->surface == use.surface) for (const auto& slice : slices) covered.push_back(slice.layer);
+                    }
+                    textures->EncodeWriteback((__bridge void*)compute, use.surface->texture, use.resource, use.address, covered);
                 }
                 for (const auto& [use, slices] : layered) encodeLayeredDepthCopies(compute, (__bridge id<MTLTexture>)use->surface->texture.texture, slices, false);
             }
