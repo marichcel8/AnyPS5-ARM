@@ -2564,6 +2564,28 @@ struct VulkanDevice::State {
         return library;
     }
 
+    void awaitRenderPipeline(const Metal::RenderPipelineRequest& request) {
+        const auto key = Metal::PipelineCache::RenderKey(request);
+        auto found = drawPipelines.find(key);
+        if (found == drawPipelines.end()) {
+            found = drawPipelines.emplace(key, pipelineCache().Render(request)).first;
+            pipelinesCreated.fetch_add(1, std::memory_order_relaxed);
+        }
+        const auto handle = found->second;
+        if (handle->Native() != nullptr) return;
+        pipelineCache().Promote(*handle, Metal::CompilePriority::Urgent);
+        flush(false);
+        mutex.unlock();
+        try {
+            handle->Wait(PipelineTimeoutMs);
+        } catch (...) {
+            mutex.lock();
+            throw;
+        }
+        mutex.lock();
+        begin();
+    }
+
     void* renderPipeline(const Metal::RenderPipelineRequest& request) {
         const auto key = Metal::PipelineCache::RenderKey(request);
         auto found = drawPipelines.find(key);
@@ -2902,18 +2924,24 @@ struct VulkanDevice::State {
             }
             request.label = "AnyPS5 guest draw";
             request.priority = Metal::CompilePriority::Urgent;
-            std::vector<std::uint64_t> vertexBuffers;
+            struct VertexFetch {
+                std::uint64_t address;
+                std::uint64_t extent;
+                std::uint32_t packed;
+                bool fetched;
+            };
+            std::vector<VertexFetch> vertexFetches;
             for (const auto& attribute : vertex->program->vertexAttributes) {
                 const auto decoded = Graphics::DecodeVertexFormat(attribute);
                 const auto format = NativeVertexFormat(decoded.format);
                 if (format == MTLVertexFormatInvalid) throw std::runtime_error("AGC graphics: vertex format " + std::to_string(static_cast<int>(decoded.format)) + " has no Metal vertex format");
-                const auto buffer = FirstVertexBuffer + static_cast<std::uint32_t>(vertexBuffers.size());
+                const auto buffer = FirstVertexBuffer + static_cast<std::uint32_t>(vertexFetches.size());
                 if (buffer >= RenderSlots) throw std::runtime_error("AGC graphics: Metal draw has more vertex streams than buffer slots");
                 request.vertexAttributes.push_back({attribute.location, static_cast<std::uint32_t>(format), buffer, 0});
                 const auto packed = (decoded.bytes + 3u) & ~3u;
                 if (Graphics::NullVertexDescriptor(attribute) || Graphics::VertexFetchOutOfRange(attribute) || attribute.resource.fields[2] == 0u) {
                     request.vertexBuffers.push_back({buffer, packed, Metal::VertexStep::Constant});
-                    vertexBuffers.push_back(uploadBytes(nullptr, 0, std::max<std::size_t>(packed, 16u)));
+                    vertexFetches.push_back({0u, 0u, packed, false});
                     continue;
                 }
                 const auto& fields = attribute.resource.fields;
@@ -2922,7 +2950,16 @@ struct VulkanDevice::State {
                 if (stride % 4u != 0u) throw std::runtime_error("AGC graphics: Metal vertex stride " + std::to_string(stride) + " is not a multiple of four");
                 const auto step = stride == 0u ? Metal::VertexStep::Constant : attribute.fetchIndex == 0u ? Metal::VertexStep::Vertex : Metal::VertexStep::Instance;
                 request.vertexBuffers.push_back({buffer, stride == 0u ? packed : stride, step});
-                const auto resolved = resolve(address, Graphics::VertexBufferExtent(attribute), false, snapshots);
+                vertexFetches.push_back({address, Graphics::VertexBufferExtent(attribute), packed, true});
+            }
+            awaitRenderPipeline(request);
+            std::vector<std::uint64_t> vertexBuffers;
+            for (const auto& fetch : vertexFetches) {
+                if (!fetch.fetched) {
+                    vertexBuffers.push_back(uploadBytes(nullptr, 0, std::max<std::size_t>(fetch.packed, 16u)));
+                    continue;
+                }
+                const auto resolved = resolve(fetch.address, fetch.extent, false, snapshots);
                 if (resolved % 4u != 0u) throw std::runtime_error("AGC graphics: Metal vertex buffer address is not four-byte aligned");
                 vertexBuffers.push_back(resolved);
             }
