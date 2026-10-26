@@ -541,12 +541,18 @@ void EmitQueryDimensions(Access& access, const std::string& texture, const std::
     Line(state, result + " = uint4(" + values[0] + ", " + values[1] + ", " + values[2] + ", " + values[3] + ");");
 }
 
+std::string LineLayerCondition(const Access& access) {
+    if (access.image.dimension != RdnaImageDimension::Dim1D || access.mem.imageDimension != RdnaImageDimension::Dim2DArray) return {};
+    return AddressU32(access, 2u) + " == 0u";
+}
+
 void EmitRead(Access& access, const std::string& texture, const std::string& result) {
     State& state = access.state;
     const auto shape = ShapeOf(access.image.dimension);
     if (access.image.resourceClass != ImageResourceClass::Sampled) Fail(access.inst, "reads a storage image");
     std::string condition;
     if (access.mem.imageDimension == RdnaImageDimension::Dim3D && (access.image.dimension == RdnaImageDimension::Dim2D || access.image.dimension == RdnaImageDimension::Dim1D)) condition = AddressU32(access, 2u) + " == 0u";
+    if (const auto line = LineLayerCondition(access); !line.empty()) condition = line;
     const bool volumeSlice = access.mem.imageDimension == RdnaImageDimension::Dim2DArray && access.image.dimension == RdnaImageDimension::Dim3D;
     if (volumeSlice) condition += std::string(condition.empty() ? "" : " && ") + AddressU32(access, 2u) + " < " + texture + ".get_depth(" + LodU32(access) + ")";
     const auto coord = Temp(state);
@@ -703,6 +709,8 @@ void EmitWrite(Access& access, const std::string& texture) {
     if (access.mem.imageDimension == RdnaImageDimension::Dim2DArray && access.image.dimension == RdnaImageDimension::Dim3D) {
         if (access.image.mipMode == ImageMipMode::DynamicStorage) throw MslUnsupported("MSL backend: a 2D-array address stored to a 3D image with dynamic mips is not emitted");
         Open(state, "if (" + AddressU32(access, 2u) + " < " + texture + ".get_depth()) {");
+    } else if (const auto line = LineLayerCondition(access); !line.empty()) {
+        Open(state, "if (" + line + ") {");
     } else {
         Open(state, "{");
     }
