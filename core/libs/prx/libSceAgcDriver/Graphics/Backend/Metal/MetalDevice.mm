@@ -605,6 +605,59 @@ bool HasFlatInputs(std::span<const Graphics::CompiledShader> shaders) {
     return false;
 }
 
+bool RewritesLastProvokingVertex(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
+    if (graphics.provokingVertexMode != VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT || graphics.rectList || graphics.quadList || graphics.stages.path != Graphics::ShaderPath::Vertex || graphics.stages.mesh || graphics.stages.tessellation) return false;
+    switch (graphics.topology) {
+    case VK_PRIMITIVE_TOPOLOGY_LINE_LIST:
+    case VK_PRIMITIVE_TOPOLOGY_LINE_STRIP:
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST:
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP:
+    case VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN: break;
+    default: return false;
+    }
+    return HasFlatInputs(shaders);
+}
+
+struct LastProvokingDraw {
+    Graphics::State state;
+    Pm4::DrawParameters draw;
+    std::vector<std::uint32_t> list;
+};
+
+LastProvokingDraw RewriteLastProvokingVertex(const Graphics::State& graphics, const Pm4::DrawParameters& draw) {
+    std::vector<std::uint32_t> source(draw.indexCount);
+    std::optional<std::uint32_t> restart;
+    if (draw.indexed) {
+        const auto bytes = static_cast<std::size_t>(draw.indexCount) * draw.indexSize;
+        GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), bytes, draw.indexSize);
+        GuestMemory::FlushGpuWrites(draw.indexAddress, bytes);
+        std::vector<std::byte> raw(bytes);
+        GuestMemory::Read(draw.indexAddress, raw, draw.indexSize);
+        for (std::size_t i = 0; i < source.size(); ++i) {
+            if (draw.indexSize == 2u) {
+                std::uint16_t index = 0;
+                std::memcpy(&index, raw.data() + i * 2u, 2u);
+                source[i] = index;
+            } else {
+                std::memcpy(&source[i], raw.data() + i * 4u, 4u);
+            }
+        }
+        if (graphics.primitiveRestart) restart = draw.indexSize == 2u ? 0xffffu : 0xffffffffu;
+    } else {
+        for (std::uint32_t i = 0; i < draw.indexCount; ++i) source[i] = i;
+    }
+    LastProvokingDraw result{graphics, draw, Graphics::LastVertexFirstList(graphics.topology, source, restart)};
+    result.state.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+    result.state.topology = graphics.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || graphics.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    result.state.primitiveRestart = false;
+    result.draw.indexed = true;
+    result.draw.indexAddress = 0;
+    result.draw.indexSize = 4;
+    result.draw.indexCount = static_cast<std::uint32_t>(result.list.size());
+    result.draw.flags = 0;
+    return result;
+}
+
 std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
     for (const auto& shader : shaders) {
         if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex and pixel stages");
@@ -614,7 +667,12 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
             if (NativeVertexFormat(format) == MTLVertexFormatInvalid) return "vertex format " + std::to_string(static_cast<int>(format)) + " has no Metal vertex format";
         }
     }
-    const auto translated = Metal::TranslateState(graphics, HasFlatInputs(shaders));
+    std::optional<Graphics::State> adjusted;
+    if (RewritesLastProvokingVertex(graphics, shaders)) {
+        adjusted = graphics;
+        adjusted->provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+    }
+    const auto translated = Metal::TranslateState(adjusted ? *adjusted : graphics, HasFlatInputs(shaders));
     if (translated.rejection != nullptr) return std::string(translated.rejection);
     if (graphics.samples > 1 || std::any_of(graphics.colors.begin(), graphics.colors.end(), [](const Graphics::ColorTarget& color) { return color.samples > 1; }) || (graphics.depth && graphics.depth->samples > 1)) return std::string("multisampled Metal draws are not wired yet");
     return std::nullopt;
@@ -2088,10 +2146,17 @@ struct VulkanDevice::State {
         dynamicValid = true;
     }
 
-    void draw(const Graphics::State& graphics, const Pm4::DrawParameters& params, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
-        if (params.indirect) throw std::runtime_error("AGC graphics: Metal indirect draws are not wired yet");
-        if (params.indexCount == 0 || params.instanceCount == 0) return;
-        if (params.indexed && params.indexSize != 2u && params.indexSize != 4u) throw std::runtime_error("AGC graphics: only uint16 and uint32 index buffers are supported");
+    void draw(const Graphics::State& submitted, const Pm4::DrawParameters& submittedParams, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+        if (submittedParams.indirect) throw std::runtime_error("AGC graphics: Metal indirect draws are not wired yet");
+        if (submittedParams.indexCount == 0 || submittedParams.instanceCount == 0) return;
+        if (submittedParams.indexed && submittedParams.indexSize != 2u && submittedParams.indexSize != 4u) throw std::runtime_error("AGC graphics: only uint16 and uint32 index buffers are supported");
+        std::optional<LastProvokingDraw> provoking;
+        if (RewritesLastProvokingVertex(submitted, shaders)) {
+            provoking = RewriteLastProvokingVertex(submitted, submittedParams);
+            if (provoking->list.empty()) return;
+        }
+        const Graphics::State& graphics = provoking ? provoking->state : submitted;
+        const Pm4::DrawParameters& params = provoking ? provoking->draw : submittedParams;
         const Graphics::CompiledShader* vertex = nullptr;
         const Graphics::CompiledShader* fragment = nullptr;
         for (const auto& shader : shaders) {
@@ -2258,7 +2323,7 @@ struct VulkanDevice::State {
             const auto primitive = static_cast<MTLPrimitiveType>(translated.primitive);
             if (params.indexed) {
                 const auto bytes = static_cast<std::uint64_t>(params.indexCount) * params.indexSize;
-                const auto indices = resolve(params.indexAddress, bytes, false, snapshots, nullptr, false);
+                const auto indices = provoking ? uploadBytes(provoking->list.data(), bytes, bytes) : resolve(params.indexAddress, bytes, false, snapshots, nullptr, false);
                 [render drawIndexedPrimitives:primitive indexCount:params.indexCount indexType:params.indexSize == 2u ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferLength:bytes instanceCount:params.instanceCount baseVertex:static_cast<NSInteger>(params.firstVertex) baseInstance:params.firstInstance];
             } else {
                 [render drawPrimitives:primitive vertexStart:params.firstVertex vertexCount:params.indexCount instanceCount:params.instanceCount baseInstance:params.firstInstance];
