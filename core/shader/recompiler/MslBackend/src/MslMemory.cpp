@@ -173,6 +173,7 @@ void LoadBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     Line(state, "uint " + byte + " = 0u;");
     for (std::uint32_t component = 0; component < components; ++component) {
         Open(state, "if (aps5_vsharp_byte(" + resource + ", " + offset + " + " + U32(mem.offset + component * 4u) + ", " + soffset + ", " + U32(bytes) + ", " + byte + ")) {");
+        if (!mem.gpuDescriptor && bytes == 4u) Line(state, byte + " &= ~3u;");
         Line(state, Component(result, components, component) + " = " + BufferLoad(state, inst, mem, resource, byte, bytes) + ";");
         Close(state);
     }
@@ -201,6 +202,7 @@ void StoreBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     for (std::uint32_t component = 0; component < components; ++component) {
         const auto value = Component(data, components, component);
         Open(state, "if (aps5_vsharp_byte(" + resource + ", " + offset + " + " + U32(mem.offset + component * 4u) + ", " + soffset + ", " + U32(bytes) + ", " + byte + ")) {");
+        if (!mem.gpuDescriptor && bytes == 4u) Line(state, byte + " &= ~3u;");
         if (mem.gpuDescriptor) {
             state.features |= BdaWrites;
             Line(state, "aps5_vsharp_store(aps5_c, " + resource + ", " + byte + ", " + U32(bytes) + ", " + value + ", " + Pc(inst) + ");");
