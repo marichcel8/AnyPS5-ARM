@@ -144,6 +144,23 @@ float ClampWeightDelta(float scale) {
 
 extern "C" {
 
+int APS5_VABI sceFontDefineAttribute(FontHandle fontHandle, int attribute, int* oldAttribute) {
+    return AccessFontSettings(fontHandle, [&](FontState& state) {
+        if (oldAttribute) *oldAttribute = state.attribute;
+        state.attribute = attribute;
+        return SCE_FONT_OK;
+    });
+}
+
+int APS5_VABI sceFontGetAttribute(FontHandle fontHandle, int attribute, int* nowAttribute) {
+    (void)attribute;
+    if (!nowAttribute) return SCE_FONT_ERROR_INVALID_PARAMETER;
+    return AccessFontSettings(fontHandle, [&](FontState& state) {
+        *nowAttribute = state.attribute;
+        return SCE_FONT_OK;
+    });
+}
+
 int APS5_VABI sceFontSetScriptLanguage(FontHandle fontHandle, int fontScript, int fontLanguage) {
     const int result = AccessFontSettings(fontHandle, [&](FontState&) {
         return IsScriptLanguageValid(fontScript, fontLanguage) ? SCE_FONT_OK : SCE_FONT_ERROR_INVALID_PARAMETER;
@@ -180,40 +197,6 @@ int APS5_VABI sceFontGetTypographicDesign(FontHandle fontHandle, int typographic
     if (feature) *feature = 0;
     if (result != SCE_FONT_OK) return result;
     throw std::logic_error("sceFontGetTypographicDesign: driver typography query is not implemented");
-}
-
-int APS5_VABI sceFontDefineAttribute(FontHandle fontHandle, int attribute, int* oldAttribute) {
-    if (oldAttribute) *oldAttribute = ATTRIBUTE_NONE;
-    auto* font = GetNativeFont(fontHandle);
-    std::uint32_t fontLock = 0;
-    if (!font || font->magic != HANDLE_MAGIC || !AcquireFontLock(font, fontLock)) return SCE_FONT_ERROR_INVALID_FONT_HANDLE;
-    FontState* state = TryGetState(fontHandle);
-    int rc = SCE_FONT_ERROR_INVALID_FONT_HANDLE;
-    if (state && !ValidAttribute(attribute)) {
-        rc = SCE_FONT_ERROR_INVALID_PARAMETER;
-    } else if (state) {
-        std::uint8_t& slot = AttributeSlot(state->attributes, attribute);
-        if (oldAttribute) *oldAttribute = slot;
-        slot = static_cast<std::uint8_t>(attribute);
-        if (attribute == ATTRIBUTE_WRITING_VERTICAL) {
-            font->flags = static_cast<std::uint16_t>(font->flags | HANDLE_FLAG_VERTICAL);
-        } else if (attribute == ATTRIBUTE_WRITING_HORIZONTAL) {
-            font->flags = static_cast<std::uint16_t>(font->flags & ~HANDLE_FLAG_VERTICAL);
-        }
-        rc = SCE_FONT_OK;
-    }
-    ReleaseFontLock(font, fontLock);
-    return rc;
-}
-
-int APS5_VABI sceFontGetAttribute(FontHandle fontHandle, int attribute, int* nowAttribute) {
-    if (!nowAttribute) return SCE_FONT_ERROR_INVALID_PARAMETER;
-    *nowAttribute = ATTRIBUTE_NONE;
-    return AccessFontSettings(fontHandle, [&](FontState& state) {
-        if (!ValidAttribute(attribute)) return SCE_FONT_ERROR_INVALID_PARAMETER;
-        *nowAttribute = AttributeSlot(state.attributes, attribute);
-        return SCE_FONT_OK;
-    });
 }
 
 int APS5_VABI sceFontSetScalePixel(FontHandle fontHandle, float w, float h) {
