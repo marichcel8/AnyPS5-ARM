@@ -77,6 +77,7 @@ public:
 
     void EncodeUpload(void* computeEncoder, const TextureHandle& texture, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, UploadPath path);
     void EncodeWriteback(void* computeEncoder, const TextureHandle& texture, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress);
+    void EncodeLinearToTiled(void* computeEncoder, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::uint64_t linearDeviceAddress, std::uint32_t linearPitchBytes);
     void Seal(QueueKind queue, std::uint64_t serial);
 
     UploadPath DefaultUploadPath() const;
