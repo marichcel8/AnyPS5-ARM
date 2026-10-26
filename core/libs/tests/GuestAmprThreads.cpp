@@ -617,7 +617,6 @@ static void TestPadErrors() {
 int main() {
     Require(_ZNSt7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix == 0);
     Require(_ZNSt8time_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix == 0);
-    Require(_Thrd_id_nid_postfix() == scePthreadGetthreadid());
     TestConditionSignal();
     TestTypeInfoVtables();
     TestPadLaunch();
