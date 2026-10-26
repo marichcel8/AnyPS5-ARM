@@ -56,6 +56,7 @@ struct InputRequests {
     bool togglePerformanceOverlay = false;
     bool screenshot = false;
     bool toggleMouse = false;
+    bool switchLayout = false;
     bool releaseMouse = false;
 };
 
@@ -64,6 +65,9 @@ public:
     using Clock = std::chrono::steady_clock;
 
     explicit KeyboardMouse(InputConfiguration configuration);
+    explicit KeyboardMouse(InputLayouts layouts);
+    bool SwitchLayout();
+    Layout CurrentLayout() const;
     InputRequests HandleEvent(const SDL_Event& event, Clock::time_point now);
     bool Advance(Clock::time_point now);
     void SetMouseMode(bool enabled);
@@ -83,7 +87,12 @@ private:
     std::array<double, 2> triggerTargets() const;
     bool advanceAxes(Clock::time_point now);
 
+    void adopt(InputConfiguration next);
+
     InputConfiguration configuration;
+    InputConfiguration alternate;
+    Layout current = Layout::Classic;
+    bool hasAlternate = false;
     std::vector<bool> pressed;
     std::vector<Clock::time_point> wheelReleaseTimes;
     MouseStick mouse;

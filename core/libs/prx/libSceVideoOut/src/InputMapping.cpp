@@ -54,6 +54,7 @@ constexpr auto actions = std::array{
     InputAction{"StickModifier", Pad::InputControl::StickModifier, Pad::PadButton::None},
     InputAction{"Shake", Pad::InputControl::Shake, Pad::PadButton::None},
     InputAction{"ToggleMouse", Pad::InputControl::ToggleMouse, Pad::PadButton::None},
+    InputAction{"SwitchLayout", Pad::InputControl::SwitchLayout, Pad::PadButton::None},
     InputAction{"ToggleFullscreen", Pad::InputControl::ToggleFullscreen, Pad::PadButton::None},
     InputAction{"TogglePerformanceOverlay", Pad::InputControl::TogglePerformanceOverlay, Pad::PadButton::None},
     InputAction{"Screenshot", Pad::InputControl::Screenshot, Pad::PadButton::None}
@@ -117,6 +118,9 @@ Pad::InputBinding parseBinding(const InputAction& action, std::string_view sourc
         }
         if (action.control == Pad::InputControl::TogglePerformanceOverlay) {
             throw std::runtime_error("TogglePerformanceOverlay can only use a keyboard key");
+        }
+        if (action.control == Pad::InputControl::SwitchLayout) {
+            throw std::runtime_error("SwitchLayout can only use a keyboard key");
         }
         if (action.control == Pad::InputControl::Screenshot) {
             throw std::runtime_error("Screenshot can only use a keyboard key");
@@ -279,8 +283,13 @@ std::array<std::uint8_t, 2> Pad::StickWithDeadzone(std::int16_t x, std::int16_t 
     return {axis(normalizedX), axis(normalizedY)};
 }
 
-Pad::InputConfiguration Pad::LoadInputMapping() {
-    InputConfiguration configuration{{InputMapping.begin(), InputMapping.end()}, {}};
+namespace {
+
+Pad::InputConfiguration loadLayout(Pad::Layout layout) {
+    using namespace Pad;
+    InputConfiguration configuration = layout == Layout::Shooter
+        ? InputConfiguration{{ShooterMapping.begin(), ShooterMapping.end()}, {}}
+        : InputConfiguration{{InputMapping.begin(), InputMapping.end()}, {}};
     auto& bindings = configuration.bindings;
     const auto configured = configuredPath();
     const bool explicitPath = !configured.empty();
@@ -297,17 +306,32 @@ Pad::InputConfiguration Pad::LoadInputMapping() {
     std::array<bool, settingNames.size()> configuredSettings{};
     std::string line;
     std::size_t lineNumber = 0;
+    bool active = layout == Layout::Classic;
     while (std::getline(file, line)) {
         ++lineNumber;
         if (lineNumber == 1 && line.starts_with("\xEF\xBB\xBF")) line.erase(0, 3);
         const auto comment = line.find_first_of("#;");
         const std::string_view content = trim(std::string_view(line).substr(0, comment));
         if (content.empty()) continue;
+        if (content.front() == '[' && content.back() == ']') {
+            const auto section = upper(trim(content.substr(1, content.size() - 2)));
+            if (section != "CLASSIC" && section != "SHOOTER") invalidLine(path, lineNumber, "unknown section '" + std::string(content) + "'");
+            active = section == (layout == Layout::Shooter ? "SHOOTER" : "CLASSIC");
+            continue;
+        }
         const auto separator = content.find('=');
         if (separator == std::string_view::npos) invalidLine(path, lineNumber, "expected Action = TYPE:VALUE");
 
         const auto actionName = trim(content.substr(0, separator));
         const auto source = trim(content.substr(separator + 1));
+        if (upper(actionName) == "LAYOUT") {
+            const auto value = upper(source);
+            if (value == "CLASSIC") configuration.startLayout = Layout::Classic;
+            else if (value == "SHOOTER") configuration.startLayout = Layout::Shooter;
+            else invalidLine(path, lineNumber, "layout must be Classic or Shooter");
+            continue;
+        }
+        if (!active) continue;
         if (const auto* setting = findSetting(actionName)) {
             auto& configured = configuredSettings[static_cast<std::size_t>(setting->setting)];
             if (configured) invalidLine(path, lineNumber, std::string(setting->name) + " is set more than once");
@@ -342,4 +366,17 @@ Pad::InputConfiguration Pad::LoadInputMapping() {
     if (file.bad()) throw std::runtime_error("Pad: cannot read input mapping '" + pathToUtf8(path) + "'");
 
     return configuration;
+}
+
+}
+
+Pad::InputConfiguration Pad::LoadInputMapping() {
+    return loadLayout(Layout::Classic);
+}
+
+Pad::InputLayouts Pad::LoadInputLayouts() {
+    auto classic = loadLayout(Layout::Classic);
+    auto shooter = loadLayout(Layout::Shooter);
+    shooter.startLayout = classic.startLayout;
+    return {std::move(classic), std::move(shooter)};
 }

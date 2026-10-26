@@ -31,9 +31,20 @@ struct InputSettings {
     double triggerRampMs = 0.0;
 };
 
+enum class Layout {
+    Classic,
+    Shooter
+};
+
 struct InputConfiguration {
     std::vector<InputBinding> bindings;
     InputSettings settings;
+    Layout startLayout = Layout::Classic;
+};
+
+struct InputLayouts {
+    InputConfiguration classic;
+    InputConfiguration shooter;
 };
 
 inline constexpr std::array InputMapping{
@@ -69,6 +80,7 @@ inline constexpr std::array InputMapping{
     InputBinding{SDL_SCANCODE_BACKSPACE, MouseButton::None, InputControl::TouchLeft},
     InputBinding{SDL_SCANCODE_TAB, MouseButton::None, InputControl::TouchRight},
     InputBinding{SDL_SCANCODE_F7, MouseButton::None, InputControl::ToggleMouse},
+    InputBinding{SDL_SCANCODE_F8, MouseButton::None, InputControl::SwitchLayout},
     InputBinding{SDL_SCANCODE_X, MouseButton::None, InputControl::Shake},
     InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Middle, InputControl::ToggleMouse},
     InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Left, InputControl::Button, PadButton::Square},
@@ -78,7 +90,49 @@ inline constexpr std::array InputMapping{
     InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::None, InputControl::Button, PadButton::Down, -1}
 };
 
+inline constexpr std::array ShooterMapping{
+    InputBinding{SDL_SCANCODE_F11, MouseButton::None, InputControl::ToggleFullscreen},
+    InputBinding{SDL_SCANCODE_F10, MouseButton::None, InputControl::TogglePerformanceOverlay},
+    InputBinding{SDL_SCANCODE_F12, MouseButton::None, InputControl::Screenshot},
+    InputBinding{SDL_SCANCODE_F7, MouseButton::None, InputControl::ToggleMouse},
+    InputBinding{SDL_SCANCODE_F8, MouseButton::None, InputControl::SwitchLayout},
+    InputBinding{SDL_SCANCODE_W, MouseButton::None, InputControl::LeftStickUp},
+    InputBinding{SDL_SCANCODE_A, MouseButton::None, InputControl::LeftStickLeft},
+    InputBinding{SDL_SCANCODE_S, MouseButton::None, InputControl::LeftStickDown},
+    InputBinding{SDL_SCANCODE_D, MouseButton::None, InputControl::LeftStickRight},
+    InputBinding{SDL_SCANCODE_RETURN, MouseButton::None, InputControl::Button, PadButton::Cross},
+    InputBinding{SDL_SCANCODE_SPACE, MouseButton::None, InputControl::Button, PadButton::Cross},
+    InputBinding{SDL_SCANCODE_LCTRL, MouseButton::None, InputControl::Button, PadButton::Circle},
+    InputBinding{SDL_SCANCODE_C, MouseButton::None, InputControl::Button, PadButton::Circle},
+    InputBinding{SDL_SCANCODE_R, MouseButton::None, InputControl::Button, PadButton::Square},
+    InputBinding{SDL_SCANCODE_E, MouseButton::None, InputControl::Button, PadButton::Square},
+    InputBinding{SDL_SCANCODE_F, MouseButton::None, InputControl::Button, PadButton::Triangle},
+    InputBinding{SDL_SCANCODE_Q, MouseButton::None, InputControl::Button, PadButton::L1},
+    InputBinding{SDL_SCANCODE_G, MouseButton::None, InputControl::Button, PadButton::R1},
+    InputBinding{SDL_SCANCODE_LSHIFT, MouseButton::None, InputControl::Button, PadButton::L3},
+    InputBinding{SDL_SCANCODE_V, MouseButton::None, InputControl::Button, PadButton::R3},
+    InputBinding{SDL_SCANCODE_ESCAPE, MouseButton::None, InputControl::Button, PadButton::Options},
+    InputBinding{SDL_SCANCODE_UP, MouseButton::None, InputControl::Button, PadButton::Up},
+    InputBinding{SDL_SCANCODE_RIGHT, MouseButton::None, InputControl::Button, PadButton::Right},
+    InputBinding{SDL_SCANCODE_DOWN, MouseButton::None, InputControl::Button, PadButton::Down},
+    InputBinding{SDL_SCANCODE_LEFT, MouseButton::None, InputControl::Button, PadButton::Left},
+    InputBinding{SDL_SCANCODE_1, MouseButton::None, InputControl::Button, PadButton::Up},
+    InputBinding{SDL_SCANCODE_2, MouseButton::None, InputControl::Button, PadButton::Right},
+    InputBinding{SDL_SCANCODE_3, MouseButton::None, InputControl::Button, PadButton::Down},
+    InputBinding{SDL_SCANCODE_4, MouseButton::None, InputControl::Button, PadButton::Left},
+    InputBinding{SDL_SCANCODE_TAB, MouseButton::None, InputControl::TouchRight},
+    InputBinding{SDL_SCANCODE_BACKSPACE, MouseButton::None, InputControl::TouchLeft},
+    InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Left, InputControl::Button, PadButton::R2},
+    InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Right, InputControl::Button, PadButton::L2},
+    InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::Middle, InputControl::Button, PadButton::R3},
+    InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::X1, InputControl::Button, PadButton::L1},
+    InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::X2, InputControl::Button, PadButton::R1},
+    InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::None, InputControl::Button, PadButton::R1, 1},
+    InputBinding{SDL_SCANCODE_UNKNOWN, MouseButton::None, InputControl::Button, PadButton::L1, -1}
+};
+
 InputConfiguration LoadInputMapping();
+InputLayouts LoadInputLayouts();
 std::array<std::uint8_t, 2> StickWithDeadzone(std::int16_t x, std::int16_t y, int deadzonePercent);
 
 }
