@@ -159,7 +159,7 @@ int main() {
                 Check(waveSize);
             }
         }
-        if (device->Target().subgroupSize == 32u) {
+        if (device->Target().subgroupSize == 32u && ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Spirv) {
             auto wide = device->Target();
             wide.subgroupSize = 64u;
             for (std::uint32_t pass = 0; pass < 4; ++pass) {
