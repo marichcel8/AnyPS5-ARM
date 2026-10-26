@@ -3,6 +3,7 @@
 #include "prx/libSceNetCtl/include/OnlineObserver.hpp"
 #include "prx/libSceAgcDriver/TraceRevision.hpp"
 #include "prx/libc/include/General.hpp"
+#include <atomic>
 #include <memory>
 #include <mutex>
 #include <unistd.h>
@@ -90,4 +91,41 @@ extern "C" void OnlineSetDatagramReceiver_nid_no_patch(void (*receiver)(const On
     } else {
         bridge->SetDatagramReceiver({});
     }
+}
+
+extern "C" bool OnlineSendStream_nid_no_patch(const Online::Wire::Stream& stream) {
+    auto* bridge = services().bridge.get();
+    return bridge && bridge->SendStream(stream);
+}
+
+extern "C" void OnlineSetStreamReceiver_nid_no_patch(void (*receiver)(const Online::Wire::Stream& stream)) {
+    auto* bridge = services().bridge.get();
+    if (!bridge) return;
+    if (receiver) {
+        bridge->SetStreamReceiver([receiver](const Online::Wire::Stream& stream) { receiver(stream); });
+    } else {
+        bridge->SetStreamReceiver({});
+    }
+}
+
+namespace {
+std::atomic<void (*)()> pushDispatcher{nullptr};
+}
+
+extern "C" void OnlineSetPushReceiver_nid_no_patch(void (*receiver)(const Online::Wire::PushEvent& event)) {
+    auto* bridge = services().bridge.get();
+    if (!bridge) return;
+    if (receiver) {
+        bridge->SetPushReceiver([receiver](const Online::Wire::PushEvent& event) { receiver(event); });
+    } else {
+        bridge->SetPushReceiver({});
+    }
+}
+
+extern "C" void OnlineSetPushDispatcher_nid_no_patch(void (*dispatcher)()) {
+    pushDispatcher.store(dispatcher, std::memory_order_release);
+}
+
+extern "C" void OnlineDispatchPush_nid_no_patch() {
+    if (auto* dispatcher = pushDispatcher.load(std::memory_order_acquire)) dispatcher();
 }

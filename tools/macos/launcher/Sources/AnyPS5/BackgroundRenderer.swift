@@ -106,6 +106,42 @@ final class BackgroundView: MTKView, MTKViewDelegate {
         commands.commit()
     }
 
+    /// The GPU time of one frame of a theme at a drawable size, averaged over `frames` (the
+    /// preview renderer's bench).
+    static func gpuMilliseconds(theme: Theme, width: Int, height: Int, frames: Int) -> Double? {
+        guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
+              let library = try? device.makeLibrary(source: shader, options: nil) else { return nil }
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = library.makeFunction(name: "background_vertex")
+        descriptor.fragmentFunction = library.makeFunction(name: "background_fragment")
+        descriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
+        guard let pipeline = try? device.makeRenderPipelineState(descriptor: descriptor) else { return nil }
+        let textureDescriptor = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .bgra8Unorm, width: width, height: height, mipmapped: false)
+        textureDescriptor.usage = [.renderTarget]
+        textureDescriptor.storageMode = .private
+        guard let texture = device.makeTexture(descriptor: textureDescriptor) else { return nil }
+        var total = 0.0
+        for frame in 0..<(frames + 3) {
+            guard let commands = queue.makeCommandBuffer() else { return nil }
+            let pass = MTLRenderPassDescriptor()
+            pass.colorAttachments[0].texture = texture
+            pass.colorAttachments[0].loadAction = .dontCare
+            pass.colorAttachments[0].storeAction = .store
+            guard let encoder = commands.makeRenderCommandEncoder(descriptor: pass) else { return nil }
+            let palette = theme.palette
+            var uniforms = Uniforms(deep: SIMD4(palette.0, 1), middle: SIMD4(palette.1, 1), bright: SIMD4(palette.2, 1), size: SIMD2(Float(width), Float(height)), time: 200 + Float(frame) / 60, theme: Int32(theme.rawValue))
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setFragmentBytes(&uniforms, length: MemoryLayout<Uniforms>.stride, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            encoder.endEncoding()
+            commands.commit()
+            commands.waitUntilCompleted()
+            // The first frames warm the GPU up.
+            if frame >= 3 { total += commands.gpuEndTime - commands.gpuStartTime }
+        }
+        return total * 1000 / Double(frames)
+    }
+
     /// One frame of a theme, drawn offscreen.
     static func still(theme: Theme, palette custom: (SIMD3<Float>, SIMD3<Float>, SIMD3<Float>)? = nil, width: Int, height: Int, time: Float) -> NSImage? {
         guard let device = MTLCreateSystemDefaultDevice(), let queue = device.makeCommandQueue(),
@@ -253,13 +289,57 @@ final class BackgroundView: MTKView, MTKViewDelegate {
         return color;
     }
 
+    // Glass: soft fields of glacier light seen through a pane of frosted ice. They drift very
+    // slowly; two streaks of light cross where the pane refracts, cold at one edge; frost gathers
+    // towards the corners; a fine grain that stays still, as frost does.
+    float3 glass(float2 uv, float aspect, float time, constant Uniforms& u, float2 pixel) {
+        float2 p = float2(uv.x * aspect, uv.y);
+        float3 color = mix(u.middle.rgb * 0.8, u.deep.rgb, smoothstep(-0.15, 1.05, uv.y * 0.85 + 0.15 * (1.0 - uv.x)));
+        for (int field = 0; field < 5; field++) {
+            float f = float(field);
+            float2 center = float2((0.12 + 0.2 * f) * aspect + 0.16 * sin(time * (0.019 + 0.005 * f) + f * 1.7),
+                                   0.38 + 0.28 * sin(time * (0.015 + 0.004 * f) + f * 2.3));
+            float radius = 0.34 + 0.1 * sin(f * 3.1);
+            float light = exp(-dot(p - center, p - center) / (radius * radius));
+            float3 tint = field == 1 ? float3(0.56, 0.62, 1.0) : (field == 3 ? float3(0.30, 0.82, 0.86) : u.bright.rgb);
+            color += tint * light * (field == 1 ? 0.11 : 0.15);
+        }
+        color += u.bright.rgb * 0.24 * exp(-2.3 * length(float2((uv.x - 0.86) * aspect, uv.y + 0.12)));
+        for (int streak = 0; streak < 2; streak++) {
+            float s = float(streak);
+            float along = uv.x * aspect * 0.55 + uv.y;
+            float d = along - (0.62 + 0.62 * s + 0.05 * sin(time * 0.045 + s * 2.0));
+            float band = exp(-d * d * (70.0 + 50.0 * s));
+            float rim = exp(-(d - 0.03) * (d - 0.03) * 900.0);
+            float fade = smoothstep(1.05, 0.2, uv.y);
+            color += float3(0.80, 0.93, 1.0) * band * (0.085 - 0.03 * s) * fade;
+            color += float3(0.45, 0.88, 1.0) * rim * 0.06 * fade;
+        }
+        // Crystals: the distance to the second nearest point less the nearest draws their edges.
+        float2 grid = p * 7.0;
+        float2 cell = floor(grid);
+        float nearest = 8.0, second = 8.0;
+        for (int y = -1; y <= 1; y++) for (int x = -1; x <= 1; x++) {
+            float2 here = cell + float2(x, y);
+            float2 site = here + hash2(here + 5.0);
+            float distance = length(grid - site);
+            if (distance < nearest) { second = nearest; nearest = distance; } else if (distance < second) { second = distance; }
+        }
+        float edge = smoothstep(0.09, 0.0, second - nearest);
+        float corner = smoothstep(0.62, 1.2, length((uv - 0.5) * float2(aspect, 1.0)));
+        float frost = fbm(p * 5.0 + 3.0);
+        color += float3(0.72, 0.87, 1.0) * corner * (0.13 * frost + 0.07 * edge);
+        color += (hash(floor(pixel)) - 0.5) * 0.03;
+        return color;
+    }
+
     fragment float4 background_fragment(Varyings in [[stage_in]], constant Uniforms& u [[buffer(0)]]) {
         float aspect = u.size.x / max(u.size.y, 1.0);
         float2 uv = in.uv;
         float time = u.time;
-        float3 color = u.theme == 1 ? aurora(uv, aspect, time, u) : u.theme == 2 ? sunset(uv, aspect, time, u) : cosmic(uv, aspect, time, u);
+        float3 color = u.theme == 1 ? aurora(uv, aspect, time, u) : u.theme == 2 ? sunset(uv, aspect, time, u) : u.theme == 3 ? glass(uv, aspect, time, u, in.position.xy) : cosmic(uv, aspect, time, u);
         float2 centered = (uv - 0.5) * float2(aspect, 1.0);
-        color *= 1.0 - 0.45 * smoothstep(0.35, 1.25, length(centered));
+        color *= 1.0 - (u.theme == 3 ? 0.3 : 0.45) * smoothstep(0.35, 1.25, length(centered));
         color = color / (1.0 + color * 0.35);
         color += (hash(in.position.xy + fract(time) * 91.0) - 0.5) / 255.0 * 2.0;
         return float4(color, 1.0);

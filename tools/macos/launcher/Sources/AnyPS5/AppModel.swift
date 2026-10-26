@@ -4,6 +4,7 @@ import AppKit
 import Combine
 import SwiftUI
 import UniformTypeIdentifiers
+import os
 
 /// What the user chose, kept in UserDefaults.
 struct Preferences: Codable, Equatable {
@@ -18,6 +19,11 @@ struct Preferences: Codable, Equatable {
     var backdrop = Backdrop.theme
     var backdropFile: String?
     var gameArtwork = true
+    /// The Glass theme's window: how much of the desktop shows through, in percent (nil for
+    /// GlassWindowRecipe.defaultTransparency), and whether the selected game's key art is laid
+    /// over it (nil means off: the desktop is Glass's background).
+    var glassTransparency: Int?
+    var glassArtwork: Bool?
     var reducedMotion = false
     var sounds = true
     /// Interface sounds and the selected game's theme song, in percent; nil keeps the default.
@@ -32,6 +38,9 @@ struct Preferences: Codable, Equatable {
     var pushToTalk: Bool?
     /// A session friends can join while a game runs; nil means on.
     var friendsJoin: Bool?
+    /// Play from a browser (BrowserPlay.swift): nil is on; browserPlayAlways keeps its server up.
+    var browserPlay: Bool?
+    var browserPlayAlways: Bool?
     /// Another AnyTogether server than AnyTogether's own; nil is AnyTogether's.
     var togetherServer: String?
     /// The running game on the user's Discord profile; nil means on.
@@ -60,11 +69,35 @@ struct Preferences: Codable, Equatable {
     var cjkGames: [String]?
     /// Hidden trophies show what they are before they are earned; nil means off.
     var alwaysShowHiddenTrophies: Bool?
+    /// Soft pulses in the controller for select, back, errors, trophies, calls and the end of a
+    /// row; nil means on.
+    var controllerVibration: Bool?
+    /// Settings → Steam: the account the shortcuts go to ("<Steam folder>|<account ID>"; nil for
+    /// the one signed in last), each unlocked game its own shortcut too (nil: off), the launcher
+    /// full screen when Steam starts it (nil: on).
+    var steamUser: String?
+    var steamGames: Bool?
+    var steamFullscreen: Bool?
+    /// Settings → Controllers: the light bar's colour (PadLight; nil is the theme's accent),
+    /// Circle confirming (nil means Cross) and the sticks' dead zone in percent (nil is none).
+    var controllerLight: String?
+    var confirmCircle: Bool?
+    var stickDeadzone: Int?
     /// The engine toolkit that unlocks games without one of their own (EngineChoice: nil is
     /// the built-in one, "custom" the folder below, else a downloaded version).
     var engine: String?
     /// A toolkit folder the user built (Settings → Engine → Engine Folder), nil for none.
     var customToolkit: String?
+    /// Settings → Game Library: new games unlocked in the background (PrepareQueue); nil means on.
+    var prepareNewGames: Bool?
+    /// The window full screen at start (WindowStart): nil the first time, then as it was left.
+    var fullScreen: Bool?
+    /// Settings → Behaviour → Pause Game When Opening the Menu: nil means on.
+    var pauseOnMenu: Bool?
+    /// Settings → Shortcuts: what differs from the defaults; nil for none.
+    var shortcuts: ShortcutMap?
+    /// Settings → Battery & Heat (PowerProfiles); nil for the defaults.
+    var powerProfiles: PowerProfiles?
     var games: [String: GameSettings] = [:]
     var lastPlayed: [String: Date] = [:]
 
@@ -95,8 +128,23 @@ enum GameState: Equatable {
 
 enum HomeFocus: Equatable {
     case top(Int)
+    /// The update notice's buttons, left of the top bar's: 0 Restart Now, 1 Later.
+    case notice(Int)
     case tiles
     case actions(Int)
+}
+
+extension Overlay {
+    /// Panels drawn over the whole screen rather than sliding in at its side.
+    var coversScreen: Bool {
+        switch self {
+        case .settings, .library, .log, .messages, .profile, .compare, .feed, .leaderboard, .crashReport, .cropPicture, .trophies, .gallery, .findPlayers, .gameHub, .controllerTest,
+             .profilePicker, .addProfile, .signIn:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 enum Overlay: Equatable {
@@ -107,6 +155,10 @@ enum Overlay: Equatable {
     case confirmUninstall
     /// Play on a game an older toolkit made: update it first, or play it as it is.
     case updateChoice
+    /// AnyTogether no longer answers this launcher's version: update (UpdateRequired.swift).
+    case updateRequired
+    /// An unlock that did not start for want of room (spaceShortage): how much, and what to do.
+    case noSpace
     case controls
     case trophies
     case advanced
@@ -143,12 +195,40 @@ enum Overlay: Equatable {
     case cropPicture
     /// Settings → Cloud Storage: the usage, the cloud saves and the media on AnyTogether.
     case cloudStorage
+    /// Trophies compared with someone: the games, then one game's trophies side by side.
+    case compare
+    /// Settings → Controllers → Test Buttons and Sticks.
+    case controllerTest
+    /// Settings → Advanced → Play from a browser: the QR code a phone scans (BrowserPlay.swift).
+    case browserPlay
+    /// PS in a game: Resume, Game Settings, Close Game, over the launcher (HomeMenus.swift).
+    case quickMenu
+    /// PS held in a game: "Close <game>?".
+    case closeGame
+    /// PS held in the launcher: Switch Profile, Quit AnyPS5.
+    case homeMenu
+    /// "Who's playing?": the profiles' tiles and Add Profile (Profiles.swift).
+    case profilePicker
+    /// A new profile: its name, then offline or online.
+    case addProfile
+    /// Signing in to AnyTogether for a profile (a new one, one going online or signing in again).
+    case signIn
+    /// Options (or a right click) on Home: the game's settings, Switch Profile, online or offline.
+    case profileMenu
+}
+
+/// A newer launcher downloaded and checked, unpacked in a folder of its own, waiting for a restart.
+struct ReadyUpdate: Equatable {
+    var release: Updates.Release
+    var app: URL
 }
 
 struct Toast: Identifiable, Equatable {
     let id = UUID()
     let text: String
     let symbol: String
+    /// A game's icon in place of the symbol.
+    var icon: URL? = nil
 }
 
 @MainActor
@@ -167,11 +247,27 @@ final class AppModel: ObservableObject {
     @Published var selected = 0
     @Published var focus = HomeFocus.tiles
     @Published var overlay: Overlay? {
-        didSet { if oldValue != overlay { discoverOverlayChanged() } }
+        didSet {
+            if oldValue != overlay {
+                discoverOverlayChanged()
+                // Friends' private picture links run out (6 to 12 hours): the list is read again.
+                if let overlay, [.friends, .party, .profile].contains(overlay), togetherUser != nil, identityBook.learnedAt != nil, identityBook.stale() { refreshFriends() }
+                askingRow = nil
+                if rowEditor.editing != nil { rowEditor.stop() }
+                if shortcutCapture != nil { endShortcutCapture() }
+            }
+            // The controller test takes the pads' buttons: only PS acts while it is open.
+            Input.shared.testing = overlay == .controllerTest
+        }
     }
     @Published var panelCategory = 0
+    /// Controllers.shared's roster changes redraw the screens (ControllersPanel.swift).
+    var controllerSink: AnyCancellable?
     @Published var panelRow = 0 {
-        didSet { if !keepingFocus { panelFocusID = nil } }
+        didSet {
+            if !keepingFocus { panelFocusID = nil }
+            if panelRow != oldValue, rowEditor.editing != nil { rowEditor.stop() }
+        }
     }
     /// The item the panel's focus is on, so rows coming in above it do not move it to another.
     var panelFocusID: String?
@@ -180,14 +276,24 @@ final class AppModel: ObservableObject {
     /// Focuses row `index` of `rows`, remembering which item that is.
     func focusRow(_ index: Int, in rows: [PanelRow]) {
         keepingFocus = true
-        panelRow = index
-        panelFocusID = rows.indices.contains(index) ? rows[index].id : nil
+        // Only what changes is written, so a move that went nowhere changes nothing.
+        if panelRow != index { panelRow = index }
+        let id = rows.indices.contains(index) ? rows[index].id : nil
+        if panelFocusID != id { panelFocusID = id }
         keepingFocus = false
     }
 
     /// Where the focused item is in `rows` now.
     func focusedRow(in rows: [PanelRow]) -> Int { ListFocus.index(of: panelFocusID, in: rows.map(\.id), fallback: panelRow) }
     @Published var panelInRows = false
+    /// The choice row the pad is changing (✕ starts, ✕ or ○ end).
+    @Published var rowEditor = RowEditor()
+    /// The focused item of the quick menu, the close question and the home menu.
+    @Published var menuIndex = 0
+    /// The shortcut waiting for a key or a chord in Settings → Shortcuts.
+    @Published var shortcutCapture: ShortcutCapture?
+    /// The quick menu went up after the launcher pressed Options in the game.
+    @Published var pausedGame = false
     /// The pad action waiting for a key in the controls panel.
     @Published var capturing: PadAction?
     @Published var libraryIndex = 0
@@ -205,9 +311,20 @@ final class AppModel: ObservableObject {
     @Published private(set) var progress: [String: (Installer.Step, Double)] = [:]
     @Published private(set) var queue: [String] = []
     @Published private(set) var failures: [String: String] = [:]
-    @Published private(set) var running: (game: Game, app: NSRunningApplication)?
+    @Published private(set) var running: (game: Game, app: NSRunningApplication)? {
+        didSet { if (oldValue == nil) != (running == nil) { prepareSoon() } }
+    }
     /// The game from the press of Play until its first window shows.
-    @Published private(set) var starting: Game?
+    @Published private(set) var starting: Game? {
+        didSet { if (oldValue == nil) != (starting == nil) { prepareSoon() } }
+    }
+
+    /// A game starting or ending: the background preparation stops for it or goes on, once the
+    /// change has settled.
+    private func prepareSoon() {
+        guard persists else { return }
+        DispatchQueue.main.async { [weak self] in self?.stepPrepare() }
+    }
     @Published private(set) var sizes: [String: Int64] = [:]
     @Published private(set) var installedRecords: [String: InstallRecord] = [:]
     @Published private(set) var trophies: [String: TrophySet] = [:]
@@ -246,6 +363,13 @@ final class AppModel: ObservableObject {
     /// The phones allowed so far, for the settings.
     @Published private(set) var phones: [PairedDevice] = []
     @Published var toast: Toast?
+    /// Settings → Steam (SteamPanel.swift).
+    @Published var steam = SteamState()
+    /// How this launch came from Steam (set before the app starts, from the arguments).
+    static var steamLaunch = SteamLaunch()
+    var steamLaunch: SteamLaunch { Self.steamLaunch }
+    /// The game a Steam shortcut started: the launcher quits when it ends well, so Steam sees it end.
+    var steamQuitAfter: String?
     @Published var active = true
     @Published private(set) var rosettaMissing = false
     @Published private(set) var logText = ""
@@ -281,9 +405,22 @@ final class AppModel: ObservableObject {
     var fontLogOffsets: [String: UInt64] = [:]
     var fontWatch: Task<Void, Never>?
     private var installer: Installer?
+    /// New games prepared in the background (PrepareQueue) and the unlock doing it.
+    @Published private(set) var prepare = PrepareQueue()
+    private var preparer: Installer?
+    private var prepareTimer: Timer?
+    /// The unlock the no-space panel is about.
+    @Published var spaceShortage: (game: Game, shortage: SpaceShortage)?
     private var installLog: [String: [String]] = [:]
-    private var watcher: DispatchSourceFileSystemObject?
-    private var lastScan = Date.distantPast
+    /// Watches the games folder and scans it again when something is copied in (LibraryWatch.swift).
+    private var libraryMonitor: LibraryMonitor?
+    /// Bumped whenever an unlock or an uninstall changes the records, so a scan read before does
+    /// not put back what they replaced.
+    private nonisolated let recordsStamp = OSAllocatedUnfairLock(initialState: 0)
+    private var recordsGeneration: Int {
+        get { recordsStamp.withLock { $0 } }
+        set { recordsStamp.withLock { $0 = newValue } }
+    }
     private var trophiesRead: Set<String> = []
     let discord = DiscordPresence(applicationID: DiscordPresence.applicationID)
     private var starts: [String: Date] = [:]
@@ -292,7 +429,9 @@ final class AppModel: ObservableObject {
     private var cable: UsbTunnel?
     /// Android phones on a cable, through adb when it is installed.
     private var androidCable: AdbTunnel?
-    private let pairedDevices = PairedDevices()
+    let pairedDevices = PairedDevices()
+    /// Play from a browser's server and what its screen shows.
+    let browserPlay = BrowserPlay()
     /// The library the phone was told last, and what keeps it told.
     private var phoneLibrary: RemoteMessage?
     private var librarySink: AnyCancellable?
@@ -301,6 +440,20 @@ final class AppModel: ObservableObject {
     /// A newer launcher on GitHub, and how far its download is once asked for.
     @Published private(set) var availableUpdate: Updates.Release?
     @Published private(set) var updateProgress: Double?
+    /// The newer launcher downloaded, its signature and sums checked, unpacked and waiting for a
+    /// restart (or for the launcher to quit).
+    @Published private(set) var readyUpdate: ReadyUpdate?
+    /// The last check found no answer (offline, a rate limit).
+    @Published private(set) var updateCheckFailed = false
+    /// Later on the home screen's notice, by version.
+    @Published var updateNotice = UpdateNotice()
+    /// Restart Now with a game running: the restart waits for the game to close.
+    @Published private(set) var restartAfterGame = false
+    /// The update was handed to the replacement script already.
+    private var updatePlaced = false
+    /// Counts every change of the model, for Input's edge bump.
+    private(set) var changeCount = 0
+    private var changeSink: AnyCancellable?
     /// The game the phone asked for while another one was still playing.
     private var launchAfterExit: String?
     /// The game to start as soon as its update finishes.
@@ -308,10 +461,24 @@ final class AppModel: ObservableObject {
     private var toastTask: Task<Void, Never>?
     private var startWatch: Task<Void, Never>?
     private var exitWatch: DispatchSourceProcess?
+    /// The Mac's power and the battery and heat profiles in force (PowerWatch.swift).
+    let power = PowerWatch()
 
     init(preferences: Preferences? = nil) {
         self.persists = preferences == nil
-        self.preferences = preferences ?? Preferences.load()
+        let loaded = preferences ?? Preferences.load()
+        self.preferences = loaded
+        // Profiles: a launcher set up before them becomes its first profile at once, its session
+        // moving from the old file into that profile's Keychain item.
+        let vault: SecretVault = preferences == nil ? KeychainVault() : MemoryVault()
+        self.vault = vault
+        let legacyUser = preferences == nil ? TokenStore(file: TokenStore.legacyFile).user : nil
+        profiles = ProfileStore(folder: preferences == nil ? ProfileStore.defaultFolder : FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-profiles-\(UUID().uuidString)"),
+                                existing: .init(onboarded: loaded.onboarded, user: legacyUser, name: loaded.profileName), persists: preferences == nil)
+        if preferences == nil, let owner = profiles.book.legacyOwner {
+            _ = TokenStore.migrate(file: TokenStore.legacyFile, into: vault, account: ProfileSessions.account(for: owner))
+        }
+        if preferences == nil, let current = profiles.book.currentProfile { ProfilePicture.file = profiles.pictureFile(for: current.id) }
         toolkitStore = preferences == nil ? ToolkitStore() : ToolkitStore(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-toolkits-\(UUID().uuidString)"))
         themes = preferences == nil ? ThemeLibrary() : ThemeLibrary(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-themes"))
         let fonts = preferences == nil ? FontDownloads.root : FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-fonts-\(UUID().uuidString)")
@@ -319,20 +486,33 @@ final class AppModel: ObservableObject {
         gameFonts = fonts.appendingPathComponent("Games")
         cjkInstalled = fontDownloads.installed
         designs = themes.all
+        profileBook = profiles.book
         if persists {
-            togetherUser = together.user
+            // An offline profile keeps its session (if it has one) unused.
+            togetherUser = currentProfile?.mode == .offline ? nil : together.user
             DispatchQueue.main.async { [weak self] in self?.startFamily() }
-            if togetherUser != nil { DispatchQueue.main.async { [weak self] in self?.startTogetherSocket() } }
+            // With the picker up, the socket waits for the profile picked.
+            if profiles.launchScreen == .picker && self.preferences.onboarded {
+                DispatchQueue.main.async { [weak self] in self?.openProfilePicker(atLaunch: true) }
+            } else if togetherUser != nil {
+                DispatchQueue.main.async { [weak self] in self?.startTogetherSocket() }
+            }
         }
         apply()
-        if persists { loadEngines(); loadProfilePicture() }
+        changeSink = objectWillChange.sink { [weak self] _ in MainActor.assumeIsolated { self?.changeCount &+= 1 } }
+        startPowerWatch()
+        if persists { loadEngines(); loadProfilePicture(); watchFullScreen() }
         if persists {
             // Online play's packets ride WebRTC data channels; their signals go out on the socket.
             OnlinePlayHost.configure(transport: { OnlinePeerMesh(context: $0) }, signal: { [weak self] to, device, session, kind, data in
                 DispatchQueue.main.async { self?.togetherSocket?.signal(to: to, device: device, gameSession: session, kind: kind, json: data) }
             })
             AppModel.opener = { [weak self] urls in self?.open(urls) }
-            AppModel.beforeQuit = { [weak self] in self?.leaveTogetherOnQuit() }
+            AppModel.beforeQuit = { [weak self] in
+                // A ready update goes in as the launcher quits: the next launch is the new version.
+                self?.placeUpdate(relaunch: false)
+                return self?.leaveTogetherOnQuit()
+            }
             let waiting = AppModel.pending
             AppModel.pending = []
             if !waiting.isEmpty { DispatchQueue.main.async { [weak self] in self?.open(waiting) } }
@@ -340,7 +520,8 @@ final class AppModel: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.active = true
-                if let self, Date().timeIntervalSince(self.lastScan) > 3 { self.rescan() }
+                // Something copied in while the launcher was away shows at once.
+                self?.libraryMonitor?.rescan()
                 // Coming back to the launcher after a while asks again, so a new release shows
                 // without a restart.
                 if let self, self.lastUpdateCheck.map({ Date().timeIntervalSince($0) > 30 * 60 }) ?? false { self.checkForUpdate() }
@@ -354,6 +535,24 @@ final class AppModel: ObservableObject {
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.active = false }
         }
+        // Unlocks going on stop with the launcher; a relinker paused for a game would otherwise
+        // stay stopped.
+        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.preparer?.cancel()
+                self?.installer?.cancel()
+            }
+        }
+        // A games folder on an external drive: watched again and scanned when the drive comes or goes.
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                let volume = (note.userInfo?[NSWorkspace.volumeURLUserInfoKey] as? URL)?.standardizedFileURL.path
+                MainActor.assumeIsolated {
+                    guard let self, let root = self.root?.standardizedFileURL.path else { return }
+                    if volume.map({ root == $0 || root.hasPrefix($0.hasSuffix("/") ? $0 : $0 + "/") }) ?? true { self.libraryMonitor?.refresh() }
+                }
+            }
+        }
         NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             let pid = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.processIdentifier
             if let pid, Self.isAlive(pid) { return }
@@ -364,6 +563,7 @@ final class AppModel: ObservableObject {
             await MainActor.run { self.rosettaMissing = missing }
         }
         if self.preferences.onboarded && persists { rescan() }
+        if persists { startControllers() }
         if persists {
             // The theme song follows whatever the launcher shows.
             musicSink = objectWillChange.debounce(for: .milliseconds(120), scheduler: RunLoop.main).sink { [weak self] _ in
@@ -402,12 +602,33 @@ final class AppModel: ObservableObject {
         starting = game
     }
 
+    /// Shows `game` being prepared in the background (paused for a game, or not), and `waiting`
+    /// in line, without unlocking anything.
+    func previewPreparing(_ game: Game, paused: Bool = false, waiting: [Game] = []) {
+        var queue = PrepareQueue()
+        queue.add([game.id] + waiting.map(\.id))
+        _ = queue.step(.idle) { _ in nil }
+        if paused { _ = queue.step(PrepareConditions(playing: true)) { _ in nil } }
+        prepare = queue
+    }
+
     private func apply() {
         T.language = preferences.language
-        Motion.reduced = preferences.reducedMotion
+        if persists { DispatchQueue.main.async { [weak self] in self?.stepPrepare() } }
+        power.profiles = preferences.powerProfiles ?? PowerProfiles()
+        Motion.reduced = preferences.reducedMotion || power.adjustment.dimEffects
         Sounds.shared.enabled = preferences.sounds
         Sounds.shared.volume = Float(preferences.soundVolume ?? 100) / 100
+        Feel.shared.vibration = preferences.controllerVibration ?? true
         ThemeMusic.shared.volume = Float(musicVolume) / 100
+        Input.shared.circleConfirms = preferences.confirmCircle == true
+        if persists, Input.shared.shortcuts != shortcutMap { Input.shared.apply(shortcutMap) }
+        Input.shared.deadzone = preferences.stickDeadzone ?? 0
+        let controllers = Controllers.shared
+        controllers.light = preferences.controllerLight.flatMap(PadLight.init(rawValue:)) ?? .theme
+        if let rgb = NSColor(accent).usingColorSpace(.sRGB) {
+            controllers.accent = (Double(rgb.redComponent), Double(rgb.greenComponent), Double(rgb.blueComponent))
+        }
     }
 
     static let defaultMusicVolume = 50
@@ -427,6 +648,12 @@ final class AppModel: ObservableObject {
         guard channel != updateChannel else { return }
         preferences.updateChannel = channel == .stable ? nil : channel.rawValue
         availableUpdate = nil
+        // A build of the other channel waiting for a restart is not this channel's.
+        if let ready = readyUpdate {
+            try? FileManager.default.removeItem(at: ready.app.deletingLastPathComponent().deletingLastPathComponent())
+            readyUpdate = nil
+            restartAfterGame = false
+        }
         guard updateProgress == nil else { return }
         // A check on its way asks again for the new channel when it ends.
         guard !checkingUpdates else { return }
@@ -448,6 +675,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastUpdateCheck: Date?
     @Published private(set) var checkingUpdates = false
 
+    /// Update Required: look for the newer launcher at once, quietly, so the screen can offer it.
+    func lookUpUpdateQuietly() {
+        guard updateProgress == nil, !checkingUpdates, readyUpdate == nil else { return }
+        lookUpUpdate(told: false)
+    }
+
     private func lookUpUpdate(told: Bool) {
         let current = AppModel.runningVersion
         let channel = updateChannel
@@ -460,12 +693,20 @@ final class AppModel: ObservableObject {
             switch found {
             case .newer(let release):
                 self.lastUpdateCheck = Date()
+                self.updateCheckFailed = false
                 let first = self.availableUpdate?.tag != release.tag
                 self.availableUpdate = release
-                if first || told { self.show(T.format(.launcherUpdateAvailable, release.version), symbol: "arrow.down.circle.fill") }
+                if self.readyUpdate?.release.tag == release.tag { return }
+                if self.canReplaceItself {
+                    // Downloaded quietly; the notice comes once it is ready.
+                    self.downloadUpdate(told: told)
+                } else if first || told {
+                    self.show(T.format(.launcherUpdateAvailable, release.version), symbol: "arrow.down.circle.fill")
+                }
             case .current:
                 self.lastUpdateCheck = Date()
-                self.availableUpdate = nil
+                self.updateCheckFailed = false
+                if self.readyUpdate == nil { self.availableUpdate = nil }
                 // On Stable after a nightly: this version stays until a newer release.
                 if told, channel == .stable, Updates.Version(current)?.isNightly == true {
                     self.show(T.format(.updateChannelStays, current), symbol: "checkmark.circle.fill")
@@ -473,34 +714,123 @@ final class AppModel: ObservableObject {
                     self.show(T.format(.launcherUpToDate, current), symbol: "checkmark.circle.fill")
                 }
             case .failed:
+                self.updateCheckFailed = true
                 if told { self.show(T.text(.updateCheckFailed), symbol: "exclamationmark.triangle.fill") }
             }
         }
     }
 
-    /// Downloads the update, then quits so that it takes this app's place and opens.
-    func installUpdate() {
-        guard let release = availableUpdate, updateProgress == nil else { return }
-        guard running == nil, starting == nil else { return show(T.text(.updateCloseGame), symbol: "exclamationmark.triangle.fill") }
-        let app = Bundle.main.bundleURL
-        guard !AppLocation.isTranslocated, FileManager.default.isWritableFile(atPath: app.deletingLastPathComponent().path) else {
-            return show(T.text(.updateNotWritable), symbol: "exclamationmark.triangle.fill")
-        }
+    /// Where the launcher's own update stands (About, the home screen's notice).
+    var launcherUpdateState: LauncherUpdateState {
+        .of(checking: checkingUpdates, newer: availableUpdate?.version, progress: updateProgress, ready: readyUpdate?.release.version,
+            lastCheck: lastUpdateCheck, failed: updateCheckFailed)
+    }
+
+    /// The home screen's quiet notice: an update ready, or a restart waiting for the game.
+    var showsUpdateNotice: Bool { restartAfterGame || updateNotice.shows(launcherUpdateState) }
+
+    /// This copy can put a new version in its own place: not run from a translocated or
+    /// read-only folder.
+    var canReplaceItself: Bool {
+        !AppLocation.isTranslocated && FileManager.default.isWritableFile(atPath: Bundle.main.bundleURL.deletingLastPathComponent().path)
+    }
+
+    /// Downloads the newer launcher, checks its signature and sums (Updates.prepare) and keeps it
+    /// ready for a restart. Nothing is replaced yet.
+    func downloadUpdate(told: Bool = true) {
+        guard let release = availableUpdate, updateProgress == nil, readyUpdate?.release.tag != release.tag else { return }
+        guard canReplaceItself else { return show(T.text(.updateNotWritable), symbol: "exclamationmark.triangle.fill") }
         updateProgress = 0
         let identifier = Bundle.main.bundleIdentifier ?? "org.anyps5.launcher"
         let current = AppModel.runningVersion
         Task { @MainActor in
             do {
                 let new = try await Updates.prepare(release, bundleIdentifier: identifier, current: current) { fraction in
-                    Task { @MainActor in self.updateProgress = fraction }
+                    Task { @MainActor in if self.updateProgress != nil { self.updateProgress = fraction } }
                 }
-                try Updates.replace(app, with: new, pid: ProcessInfo.processInfo.processIdentifier)
-                NSApp.terminate(nil)
+                self.updateProgress = nil
+                if let old = self.readyUpdate, old.app != new {
+                    try? FileManager.default.removeItem(at: old.app.deletingLastPathComponent().deletingLastPathComponent())
+                }
+                self.readyUpdate = ReadyUpdate(release: release, app: new)
             } catch {
                 self.updateProgress = nil
-                self.show(T.text(.updateFailed) + ": \(error)", symbol: "exclamationmark.triangle.fill")
+                // The periodic check says nothing over a game or a screen; About shows it.
+                if told { self.show(T.text(.updateFailed) + ": \(error)", symbol: "exclamationmark.triangle.fill") }
             }
         }
+    }
+
+    /// Settings → About → Update: the download, or Restart Now once it is ready.
+    func installUpdate() {
+        if readyUpdate != nil { return restartForUpdate() }
+        downloadUpdate(told: true)
+    }
+
+    /// Restart Now: the new version takes this one's place and opens; with a game running, the
+    /// restart waits for it to close.
+    func restartForUpdate() {
+        guard readyUpdate != nil else { return }
+        switch UpdateRestart.decide(gameRunning: running != nil || starting != nil) {
+        case .afterGame:
+            restartAfterGame = true
+        case .now:
+            restartAfterGame = false
+            guard placeUpdate(relaunch: true) else { return }
+            NSApp.terminate(nil)
+        }
+    }
+
+    func cancelRestartAfterGame() {
+        restartAfterGame = false
+    }
+
+    /// Later: the update goes in when the launcher quits; the notice does not come back for it.
+    func updateLater() {
+        updateNotice.later(launcherUpdateState)
+        restartAfterGame = false
+        Sounds.shared.play(.back)
+    }
+
+    /// Hands the ready update to the replacement script, which waits for this app to end.
+    @discardableResult
+    private func placeUpdate(relaunch: Bool) -> Bool {
+        guard let ready = readyUpdate, !updatePlaced, persists else { return false }
+        do {
+            try Updates.replace(Bundle.main.bundleURL, with: ready.app, pid: ProcessInfo.processInfo.processIdentifier, relaunch: relaunch)
+            updatePlaced = true
+            return true
+        } catch {
+            show(T.text(.updateFailed) + ": \(error)", symbol: "exclamationmark.triangle.fill")
+            return false
+        }
+    }
+
+    /// A game closed while a restart waited for it: a moment for its saves, then the restart.
+    private func restartIfWaiting() {
+        guard restartAfterGame else { return }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(5))
+            guard self.restartAfterGame, self.running == nil, self.starting == nil else { return }
+            self.restartForUpdate()
+        }
+    }
+
+    /// Previews of the notice and of About's update rows.
+    func previewUpdate(_ state: LauncherUpdateState, waitingForGame: Bool = false) {
+        let release = Updates.Release(tag: "v0.2.20-arm", version: "0.2.20", page: URL(string: "https://github.com/utkuhalis/AnyPS5-ARM/releases/tag/v0.2.20-arm")!,
+                                      download: nil, size: nil)
+        lastUpdateCheck = Date(timeIntervalSince1970: 1_793_000_000)
+        switch state {
+        case .checking: checkingUpdates = true
+        case .failed: updateCheckFailed = true
+        case .available: availableUpdate = release
+        case .downloading(_, let fraction): availableUpdate = release; updateProgress = fraction
+        case .ready: availableUpdate = release; readyUpdate = ReadyUpdate(release: release, app: URL(fileURLWithPath: "/tmp/AnyPS5.app"))
+        case .idle: lastUpdateCheck = nil
+        case .upToDate: break
+        }
+        restartAfterGame = waitingForGame
     }
 
     /// The selected game's song while the launcher is in front and idle, silence otherwise.
@@ -514,8 +844,17 @@ final class AppModel: ObservableObject {
 
     // MARK: AnyTogether
 
-    /// The client for the server chosen in Settings → AnyTogether (or ANYTOGETHER_URL).
-    lazy var together = AppModel.makeTogetherClient(base: TogetherServer.base(chosen: preferences.togetherServer))
+    /// The client for the server chosen in Settings → AnyTogether (or ANYTOGETHER_URL), with the
+    /// session of the profile playing.
+    lazy var together = wireTogether(AppModel.makeTogetherClient(base: TogetherServer.base(chosen: preferences.togetherServer), store: sessionStore(for: sessionProfileID)))
+    /// Who plays on this Mac (Profiles.swift), their sessions in the Keychain.
+    let profiles: ProfileStore
+    let vault: SecretVault
+    @Published var profileBook = ProfileBook()
+    @Published var profileFlow = ProfileFlow()
+    /// The friends' private names and pictures as the friends list last said.
+    @Published var identityBook = TogetherIdentityBook()
+    var privateNameDraft: String?
     var serverDraft = ""
     @Published var togetherUser: TogetherUser?
     @Published var togetherStep = TogetherStep.idle
@@ -536,7 +875,9 @@ final class AppModel: ObservableObject {
     @Published var family = FamilyStanding.free
     lazy var familyCache = persists ? FamilyCache() : FamilyCache(folder: FileManager.default.temporaryDirectory.appendingPathComponent("AnyPS5-preview-family"), defaults: UserDefaults(suiteName: "AnyPS5-preview-family") ?? .standard)
     let familyWatch = FamilyWatch()
-    @Published var togetherFriends: [TogetherFriend] = []
+    @Published var togetherFriends: [TogetherFriend] = [] {
+        didSet { if togetherFriends != oldValue { identityBook.learn(friends: togetherFriends) } }
+    }
     @Published var togetherRequests = TogetherRequests(incoming: [], outgoing: [])
     var friendHandle = ""
     /// The profile open: who (known before it loads), what came back, and the focused row.
@@ -569,6 +910,8 @@ final class AppModel: ObservableObject {
     @Published var groupPicked: Set<String> = []
     @Published var groupName = ""
     @Published var groupFocus = 0
+    /// The open thread's actions: the message picked, the menu over it, a reply or an edit on its way.
+    @Published var messageActions = MessageActions()
     /// The party the user is in, the invites waiting, and whether a new party is open to friends.
     @Published var party: TogetherParty? {
         didSet { partyChanged() }
@@ -598,6 +941,20 @@ final class AppModel: ObservableObject {
     @Published var gameSession: TogetherGameSession?
     @Published var gameInvites: [TogetherGameInvite] = []
     var openingSession = false
+    /// Play Together: party members' games to join, how each other player is reached (by user
+    /// ID), a join waiting for its game to unlock, and the poll of the links.
+    @Published var playTogetherOffers: [PlayTogetherOffer] = []
+    @Published var peerLinks: [String: OnlinePeerLinkInfo] = [:]
+    var togetherAfterUnlock: (String, PlayTogetherOffer)?
+    /// Play Together games the user chose to join with a game version that does not fit (Try
+    /// anyway), and games the server refused for the version though the check here let them by.
+    @Published var togetherTryAnyway: Set<String> = []
+    @Published var togetherVersionRefused: Set<String> = []
+    /// The row whose social step is asking first (AskFirst.swift): it shows the question instead.
+    @Published var askingRow: String?
+    /// AnyTogether answered client_too_old: the minimum version and where to update.
+    @Published var updateRequired: TogetherClientTooOld?
+    var togetherLinkPoll: Task<Void, Never>?
     /// Find players, Live now, public parties, discovery and game hubs.
     @Published var discover = DiscoverState()
     /// Share play: what the friends panel shows, and the running share play's pieces.
@@ -651,40 +1008,86 @@ final class AppModel: ObservableObject {
 
     // MARK: Library
 
+    /// Scans the games folder now, and watches it from then on: games copied in later show up by
+    /// themselves, with a "New game" notice.
     func rescan() {
         guard let root else { return }
-        lastScan = Date()
         scanning = true
-        if installer == nil { Installer.removeLeftovers(root: root) }
-        let current = selectedGame?.id
-        Task.detached(priority: .userInitiated) {
-            let found = GameLibrary.scan(root)
-            let records = Dictionary(uniqueKeysWithValues: found.compactMap { game in Installer.record(of: Installer.bundle(for: game, root: root)).map { (game.id, $0) } })
-            await MainActor.run {
-                self.games = found
-                self.installedRecords = records
-                self.scanning = false
-                if let current, let index = found.firstIndex(where: { $0.id == current }) { self.selected = index } else { self.selected = min(self.selected, max(0, found.count - 1)) }
-                self.measureSelected()
-            }
+        if installer == nil && preparer == nil { Installer.removeLeftovers(root: root) }
+        if let monitor = libraryMonitor, monitor.root == root {
+            monitor.rescan()
+            return
         }
-        watch(root)
+        libraryMonitor?.stop()
+        let stamp = recordsStamp
+        let monitor = LibraryMonitor(root: root) { [weak self] update in
+            // The records are read off the main thread too; each game's is one small file.
+            let generation = stamp.withLock { $0 }
+            let records = AppModel.records(of: update.games, root: root)
+            Task { @MainActor in self?.libraryScanned(update, records: records, generation: generation, root: root) }
+        }
+        libraryMonitor = monitor
+        monitor.start()
     }
 
-    private func watch(_ root: URL) {
-        watcher?.cancel()
-        let descriptor = Darwin.open(root.path, O_EVTONLY)
-        guard descriptor >= 0 else { return }
-        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
-        source.setEventHandler { [weak self] in
-            MainActor.assumeIsolated {
-                guard let self, Date().timeIntervalSince(self.lastScan) > 2, self.progress.isEmpty else { return }
-                self.rescan()
+    nonisolated private static func records(of games: [Game], root: URL) -> [String: InstallRecord] {
+        Dictionary(uniqueKeysWithValues: games.compactMap { game in Installer.record(of: Installer.bundle(for: game, root: root)).map { (game.id, $0) } })
+    }
+
+    /// A scan's result: the library follows without moving the selection off the game it is on,
+    /// and games that were not there before are announced.
+    private func libraryScanned(_ update: LibraryMonitor.Update, records scanned: [String: InstallRecord], generation: Int, root: URL) {
+        guard libraryMonitor?.root == root, self.root == root else { return }
+        scanning = false
+        let records = generation == recordsGeneration ? scanned : AppModel.records(of: update.games, root: root)
+        let listingChanged = !GameLibrary.sameListing(games, update.games)
+        if records.mapValues(\.toolkit) != installedRecords.mapValues(\.toolkit) || records.mapValues(\.date) != installedRecords.mapValues(\.date) {
+            installedRecords = records
+        }
+        if listingChanged {
+            let current = selectedGame?.id
+            let focusedInLibrary = games.indices.contains(libraryIndex) ? games[libraryIndex].id : nil
+            games = update.games
+            if let current, let index = games.firstIndex(where: { $0.id == current }) { selected = index } else { selected = min(selected, max(0, games.count - 1)) }
+            if let focusedInLibrary, let index = games.firstIndex(where: { $0.id == focusedInLibrary }) { libraryIndex = index } else { libraryIndex = min(libraryIndex, max(0, games.count - 1)) }
+        }
+        if !update.added.isEmpty { announceNewGames(update.added) }
+        measureSelected()
+    }
+
+    /// "New game: <name>" (or "3 new games"): a toast while the launcher is in front, the banner
+    /// over everything otherwise, and the game selected when the home screen shows.
+    private func announceNewGames(_ added: [Game]) {
+        guard preferences.onboarded else { return }
+        let prepared = prepareNewGames(added)
+        let text = AppModel.newGameText(added.map(\.name), preparing: prepared.preparing, waiting: prepared.waiting, skipped: prepared.skipped)
+        let icon = added.count == 1 ? added[0].icon : nil
+        if overlay == nil, running == nil, starting == nil, let index = games.firstIndex(of: added[0]) {
+            withAnimation(Motion.focus) {
+                selected = index
+                focus = .tiles
             }
         }
-        source.setCancelHandler { Darwin.close(descriptor) }
-        source.resume()
-        watcher = source
+        if NSApp.isActive {
+            show(text, symbol: "gamecontroller.fill", icon: icon)
+            if preferences.sounds { Sounds.shared.play(.select) }
+        } else {
+            let detail = added.count == 1 ? T.text(.newGameDetail) : ListFormatter.localizedString(byJoining: added.prefix(3).map(\.name)) + (added.count > 3 ? "…" : "")
+            TrophyBanner.shared.notice(text, detail: detail, symbol: "gamecontroller.fill", icon: icon, cue: .select, sounds: preferences.sounds)
+        }
+    }
+
+    /// "New game: <name>", with what happens to it when it is prepared in the background.
+    static func newGameText(_ names: [String], preparing: Bool, waiting: Bool, skipped: PrepareSkip?) -> String {
+        let one = names.count == 1
+        switch skipped {
+        case .battery: return TPrep.format(.newGameNotPreparedBattery, names[0])
+        case .space: return TPrep.format(.newGameNotPreparedSpace, names[0])
+        case nil: break
+        }
+        if preparing { return one ? TPrep.format(.newGamePreparing, names[0]) : TPrep.format(.newGamesPreparing, names.count) }
+        if waiting { return one ? TPrep.format(.newGameWaiting, names[0]) : TPrep.format(.newGamesWaiting, names.count) }
+        return one ? T.format(.newGame, names[0]) : T.format(.newGames, names.count)
     }
 
     func chooseFolder(_ url: URL) {
@@ -718,6 +1121,12 @@ final class AppModel: ObservableObject {
     // MARK: Trophies
 
     /// Reads the game's trophies once, or `again` after it may have unlocked some.
+    /// Another profile plays: its trophies are read again.
+    func forgetTrophies() {
+        trophies = [:]
+        trophiesRead = []
+    }
+
     func loadTrophies(_ game: Game, again: Bool = false) {
         guard let root, again || !trophiesRead.contains(game.id) else { return }
         trophiesRead.insert(game.id)
@@ -808,20 +1217,70 @@ final class AppModel: ObservableObject {
 
     func unlock(_ game: Game) {
         guard let root else { return }
-        guard toolkit(for: game) != nil else { show(T.text(.noToolkit), symbol: "exclamationmark.triangle"); return }
+        guard let toolkit = toolkit(for: game) else { show(T.text(.noToolkit), symbol: "exclamationmark.triangle"); return }
+        // Asked for while it is being prepared: it becomes the user's own and goes on at full speed.
+        if prepare.active == game.id { return promotePreparation(game) }
+        prepare.cancel(game.id)
         failures[game.id] = nil
         guard !queue.contains(game.id), progress[game.id] == nil else { return }
+        // The room first: a drive that is short says so before anything is written.
+        if let shortage = Installer.plan(game: game, toolkit: toolkit, root: root).shortage(free: FreeSpace.available(at: root), volume: FreeSpace.volumeName(at: root)) {
+            return tellShortage(shortage, for: game)
+        }
         queue.append(game.id)
         Sounds.shared.play(.select)
         startNext(root: root)
+        stepPrepare()
+    }
+
+    /// The unlock of `game` did not start for want of room: the panel says how much is needed and
+    /// free, and what to do.
+    private func tellShortage(_ shortage: SpaceShortage, for game: Game) {
+        if playAfterUnlock == game.id { playAfterUnlock = nil }
+        spaceShortage = (game, shortage)
+        Sounds.shared.play(.back)
+        Feel.shared.vibrate(.error)
+        if let index = games.firstIndex(of: game) { selected = index }
+        open(.noSpace)
     }
 
     private func startNext(root: URL) {
         guard installer == nil, !queue.isEmpty else { return }
         let id = queue.removeFirst()
         guard let game = games.first(where: { $0.id == id }), let toolkit = toolkit(for: game) else { startNext(root: root); return }
-        // A downloaded engine is checked against its manifest again before anything of it runs;
-        // a custom folder must still hold a whole toolkit.
+        installer = runUnlock(game, toolkit: toolkit, root: root, background: false) { [weak self] result in
+            guard let self else { return }
+            self.installer = nil
+            switch result {
+            case .success:
+                Sounds.shared.play(.unlocked)
+                self.show(game.name + " · " + T.text(.ready), symbol: "lock.open.fill")
+                if self.playAfterUnlock == id {
+                    self.playAfterUnlock = nil
+                    self.play(game)
+                }
+                self.togetherUnlockDone(id, succeeded: true)
+            case .failure(let error) where error is CancellationError:
+                self.togetherUnlockDone(id, succeeded: false)
+            case .failure(let shortage as SpaceShortage):
+                self.tellShortage(shortage, for: game)
+            case .failure(let error):
+                self.failures[id] = error.localizedDescription
+                self.togetherUnlockDone(id, succeeded: false)
+                self.show(T.text(.unlockFailed) + ": " + game.name, symbol: "exclamationmark.triangle.fill")
+            }
+            self.startNext(root: root)
+            self.stepPrepare()
+        }
+    }
+
+    /// Starts unlocking `game`: its progress, its log, the toolkit checked again where it was
+    /// downloaded or put together by the user. `done` runs on the main actor after the log and
+    /// the record are written.
+    private func runUnlock(_ game: Game, toolkit: Toolkit, root: URL, background: Bool, done: @escaping (Result<URL, Error>) -> Void) -> Installer {
+        let id = game.id
+        // A downloaded engine is checked against its manifest again before anything of it runs
+        // (once per change of its files); a custom folder must still hold a whole toolkit.
         let downloaded = installedToolkits.first { $0.folder == toolkit.root }?.version
         let custom = customToolkit?.root == toolkit.root
         let store = toolkitStore
@@ -839,36 +1298,29 @@ final class AppModel: ObservableObject {
                 if self.installLog[id]!.count > 600 { self.installLog[id]!.removeFirst(100) }
             }
         })
-        self.installer = installer
-        Task.detached(priority: .userInitiated) {
+        installer.background = background
+        Task.detached(priority: background ? .utility : .userInitiated) {
             let result: Result<URL, Error> = Result {
                 if let downloaded { _ = try store.verifiedToolkit(version: downloaded) }
                 if custom, let problem = Toolkit.layoutProblem(at: toolkit.root) { throw InstallError("the engine folder is incomplete: \(problem)") }
                 return try installer.run(root: root)
             }
             await MainActor.run {
-                self.installer = nil
                 self.progress[id] = nil
                 switch result {
                 case .success(let bundle):
                     try? GameLog.writeUnlockLog(self.installLog[id] ?? [], failure: nil, titleID: game.titleID)
                     if let record = Installer.record(of: bundle) { self.installedRecords[id] = record }
-                    Sounds.shared.play(.unlocked)
-                    self.show(game.name + " · " + T.text(.ready), symbol: "lock.open.fill")
-                    if self.playAfterUnlock == id {
-                        self.playAfterUnlock = nil
-                        self.play(game)
-                    }
-                case .failure(let error) where error is CancellationError:
+                    self.recordsGeneration += 1
+                case .failure(let error) where error is CancellationError || error is SpaceShortage:
                     break
                 case .failure(let error):
                     try? GameLog.writeUnlockLog(self.installLog[id] ?? [], failure: error.localizedDescription, titleID: game.titleID)
-                    self.failures[id] = error.localizedDescription
-                    self.show(T.text(.unlockFailed) + ": " + game.name, symbol: "exclamationmark.triangle.fill")
                 }
-                self.startNext(root: root)
+                done(result)
             }
         }
+        return installer
     }
 
     /// The update the Play prompt offers: unlock the game again, then start it.
@@ -879,16 +1331,145 @@ final class AppModel: ObservableObject {
 
     func cancelUnlock(_ game: Game) {
         if playAfterUnlock == game.id { playAfterUnlock = nil }
-        if let index = queue.firstIndex(of: game.id) { queue.remove(at: index); return }
+        if prepare.contains(game.id) {
+            if prepare.cancel(game.id) { preparer?.cancel() }
+            Sounds.shared.play(.back)
+            return
+        }
+        if let index = queue.firstIndex(of: game.id) { queue.remove(at: index); stepPrepare(); return }
         if progress[game.id] != nil { installer?.cancel() }
         Sounds.shared.play(.back)
+    }
+
+    // MARK: Preparing new games
+
+    /// Settings → Game Library → Prepare New Games Automatically; on unless turned off.
+    var preparesNewGames: Bool { preferences.prepareNewGames ?? true }
+
+    /// The game being prepared in the background.
+    func isPreparing(_ game: Game) -> Bool { prepare.active == game.id && !prepare.promoted }
+
+    /// What the background preparation looks at now.
+    private var prepareConditions: PrepareConditions {
+        PrepareConditions(enabled: preparesNewGames && preferences.onboarded && persists, playing: running != nil || starting != nil,
+                          unlocking: installer != nil || !queue.isEmpty, power: PowerState.current())
+    }
+
+    /// Takes the queue's steps until it has nothing more to do now; the skips it makes are told
+    /// (unless `quiet`, when the caller tells them) and returned.
+    @discardableResult
+    func stepPrepare(quiet: Bool = false) -> [(String, PrepareSkip)] {
+        guard let root else { return [] }
+        let conditions = prepareConditions
+        var skipped: [(String, PrepareSkip)] = []
+        while true {
+            let action = prepare.step(conditions) { [weak self] id in
+                guard let self, let game = self.games.first(where: { $0.id == id }), let toolkit = self.toolkit(for: game) else { return nil }
+                return Installer.plan(game: game, toolkit: toolkit, root: root).shortage(free: FreeSpace.available(at: root), volume: FreeSpace.volumeName(at: root))
+            }
+            switch action {
+            case .none:
+                schedulePrepareCheck()
+                if !quiet { for (id, reason) in skipped { tellSkipped(id, reason) } }
+                return skipped
+            case .start(let id): startPreparing(id, root: root)
+            case .pause: preparer?.pause()
+            case .resume: preparer?.resume()
+            case .skip(let id, let reason): skipped.append((id, reason))
+            }
+        }
+    }
+
+    /// While games wait or one is being prepared, the power is looked at again now and then
+    /// (plugged in, or the battery charged past the line).
+    private func schedulePrepareCheck() {
+        let waiting = !prepare.pending.isEmpty || prepare.active != nil
+        if !waiting { prepareTimer?.invalidate(); prepareTimer = nil; return }
+        guard prepareTimer == nil else { return }
+        prepareTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.stepPrepare() }
+        }
+    }
+
+    private func startPreparing(_ id: String, root: URL) {
+        guard let game = games.first(where: { $0.id == id }), state(of: game) == .locked, let toolkit = toolkit(for: game) else {
+            prepare.finished(id)
+            return
+        }
+        preparer = runUnlock(game, toolkit: toolkit, root: root, background: true) { [weak self] result in
+            guard let self else { return }
+            let promoted = self.prepare.promoted
+            self.preparer = nil
+            self.prepare.finished(id)
+            switch result {
+            case .success:
+                Sounds.shared.play(.unlocked)
+                let text = TPrep.format(.readyToPlay, game.name)
+                if NSApp.isActive || !self.persists {
+                    self.show(text, symbol: "checkmark.circle.fill", icon: game.icon)
+                } else if self.running == nil && self.starting == nil {
+                    TrophyBanner.shared.notice(text, detail: TPrep.text(.readyToPlayDetail), symbol: "checkmark.circle.fill", icon: game.icon, cue: .unlocked, sounds: self.preferences.sounds)
+                }
+                if promoted, self.playAfterUnlock == id {
+                    self.playAfterUnlock = nil
+                    self.play(game)
+                }
+            case .failure(let error) where error is CancellationError:
+                if self.playAfterUnlock == id { self.playAfterUnlock = nil }
+            case .failure(let shortage as SpaceShortage):
+                // The room went while it waited: told like a skip.
+                if promoted { self.tellShortage(shortage, for: game) } else { self.tellSkipped(id, .space(shortage)) }
+            case .failure(let error):
+                if self.playAfterUnlock == id { self.playAfterUnlock = nil }
+                self.failures[id] = error.localizedDescription
+                self.show(T.text(.unlockFailed) + ": " + game.name, symbol: "exclamationmark.triangle.fill")
+            }
+            self.startNext(root: root)
+            self.stepPrepare()
+        }
+    }
+
+    /// Play on a game being prepared: it no longer waits for anything but a game playing, runs at
+    /// full speed and starts when it is ready.
+    private func promotePreparation(_ game: Game) {
+        prepare.promote(game.id)
+        preparer?.background = false
+        playAfterUnlock = game.id
+        Sounds.shared.play(.select)
+        show(TPrep.format(.startsWhenReady, game.name), symbol: "play.circle.fill", icon: game.icon)
+        stepPrepare()
+    }
+
+    private func tellSkipped(_ id: String, _ reason: PrepareSkip) {
+        guard let game = games.first(where: { $0.id == id }) else { return }
+        switch reason {
+        case .battery:
+            show(TPrep.format(.notPreparedBattery, game.name), symbol: "battery.25percent", icon: game.icon)
+        case .space(let shortage):
+            show(TPrep.format(.notPreparedSpace, game.name, shortage.needed.byteText, shortage.free.byteText), symbol: "externaldrive.badge.exclamationmark", icon: game.icon)
+        }
+    }
+
+    /// New games from a scan: the locked ones go to the background queue, and the "New game"
+    /// notice says what happens to them.
+    private func prepareNewGames(_ added: [Game]) -> (preparing: Bool, waiting: Bool, skipped: PrepareSkip?) {
+        guard preparesNewGames, persists else { return (false, false, nil) }
+        let locked = added.filter { state(of: $0) == .locked }
+        guard !locked.isEmpty else { return (false, false, nil) }
+        prepare.add(locked.map(\.id))
+        let skips = stepPrepare(quiet: true)
+        let first = locked[0].id
+        if let skip = skips.first(where: { $0.0 == first }) { return (false, false, skip.1) }
+        return (prepare.active == first, prepare.pending.contains(first), nil)
     }
 
     func uninstall(_ game: Game) {
         guard let root else { return }
         try? FileManager.default.removeItem(at: Installer.bundle(for: game, root: root))
         try? FileManager.default.removeItem(at: Installer.dataFolder(for: game, root: root))
+        try? FileManager.default.removeItem(at: Installer.keptRelink(for: game, root: root))
         installedRecords[game.id] = nil
+        recordsGeneration += 1
         show(T.text(.uninstallDone), symbol: "trash")
     }
 
@@ -905,6 +1486,7 @@ final class AppModel: ObservableObject {
         switch state(of: game) {
         case .installed(let outdated): outdated ? open(.updateChoice) : play(game)
         case .locked, .failed: unlock(game)
+        case .installing where isPreparing(game): promotePreparation(game)
         case .installing, .queued: cancelUnlock(game)
         case .running: running?.app.activate()
         case .starting: break
@@ -916,6 +1498,8 @@ final class AppModel: ObservableObject {
     /// detailed logging on for this start only.
     func play(_ game: Game, trace: Bool = false) {
         guard root != nil, starting == nil, running == nil, syncing == nil, fontWait == nil else { return }
+        // The profile's own saves and trophies in the game folder before anything reads them.
+        activateProfileSaves(game)
         familyGate(game) { self.syncSaves(game) { self.ensureFonts(game) { self.start(game, trace: trace) } } }
     }
 
@@ -925,7 +1509,11 @@ final class AppModel: ObservableObject {
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
         configuration.createsNewApplicationInstance = false
-        let settings = settings(for: game)
+        var settings = settings(for: game)
+        // Settings → Controllers → Stick Dead Zone, for a game that set none of its own.
+        if let deadzone = preferences.stickDeadzone, deadzone > 0 { settings.tuning = StickDeadzone.tuning(settings.tuning, percent: deadzone) }
+        // Settings → Battery & Heat: one resolution step down while a profile asks for it.
+        if let lower = powerResolution(for: game, current: settings.resolution) { settings.resolution = lower }
         let inputFile = AppModel.inputFile(for: game)
         // Without the file the game keeps the engine's built-in keys.
         let written = (try? settings.writeInputFile(to: inputFile)) != nil
@@ -936,6 +1524,8 @@ final class AppModel: ObservableObject {
             .merging(OnlinePlayHost.environment(for: game, client: together, engineBuild: engineBuild(for: game))) { _, online in online }
             // Where the engine's online bridge finds the AnyTogether game session, once there is one.
             .merging(togetherUser == nil ? [:] : ["ANYPS5_TOGETHER_SESSION": TogetherGameSession.bridgeFile.path]) { own, _ in own }
+            // The battery and heat profiles' frame cap, and the file they change it through live.
+            .merging(powerEnvironment()) { _, power in power }
         markStart(of: game, traced: trace || settings.trace == true)
         Sounds.shared.play(.select)
         preferences.lastPlayed[game.id] = Date()
@@ -1002,7 +1592,11 @@ final class AppModel: ObservableObject {
             }
             if overlay != nil { closeOverlay() }
             withAnimation(Motion.focus) { selected = index }
-            if case .play = link { primaryAction(games[index]) }
+            if case .play = link {
+                // A game's Steam shortcut: the launcher goes with the game.
+                if steamLaunch.fromSteam, steamLaunch.play == id, steamQuitAfter == nil { steamQuitAfter = games[index].id }
+                primaryAction(games[index])
+            }
         }
     }
 
@@ -1044,7 +1638,9 @@ final class AppModel: ObservableObject {
 
     private func saveSync(for game: Game) -> SaveSync? {
         guard preferences.saveSync == true, let root = syncRoot, let folder = gameFolder(game) else { return nil }
-        return SaveSync(game: folder, cloud: SaveSync.folder(in: root, titleID: game.titleID), backups: SaveBackup.folder(for: game), mac: Host.current().localizedName ?? "Mac")
+        let profile = saveSyncProfile
+        return SaveSync(game: folder, cloud: SaveSync.folder(in: root, titleID: game.titleID, profile: profile), backups: SaveBackup.folder(for: game),
+                        mac: Host.current().localizedName ?? "Mac", profile: profile)
     }
 
     /// Syncs the game's saves off the main thread, says what came from another Mac, then goes on.
@@ -1123,7 +1719,25 @@ final class AppModel: ObservableObject {
     // MARK: Clips
 
     let clipRecorder = ClipRecorder()
-    var clipSeconds: Int { preferences.clipLength ?? 30 }
+    var clipSeconds: Int { ReplayBudget.length(preferences.clipLength) }
+
+    // MARK: PS, the quick menu and Settings → Shortcuts (HomeMenus.swift)
+
+    /// The last PS that switched between the game and the launcher.
+    var lastHome: Date? {
+        get { lastToggle }
+        set { lastToggle = newValue }
+    }
+    /// The remote pad channel the quick menu's Options press goes through on an engine without
+    /// presses, held a few seconds.
+    var pauseBridge: Int?
+    var pauseSequence: UInt32 = 0
+    let pauseSession = UInt64.random(in: 1 ... UInt64.max)
+    var pauseRelease: Task<Void, Never>?
+    /// The id of the last press (GamePause.pressPackets); the engine counts copies of one once.
+    var pausePress = UInt32.random(in: 1 ... UInt32.max)
+    /// The chord being recorded for a shortcut.
+    var chordRecorder: ChordRecorder?
 
     /// With clips on, the game that just showed its window is kept from now on.
     private func startClips(for app: NSRunningApplication) {
@@ -1141,6 +1755,20 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Settings → Behaviour → Clip Length: a game being recorded starts again at the new length.
+    func setClipLength(_ seconds: Int) {
+        guard seconds != clipSeconds else { return }
+        preferences.clipLength = seconds
+        if let app = running?.app, clipRecorder.recordingPid != nil { startClips(for: app) }
+    }
+
+    /// The buffer's memory once full at the main display's size, for the setting's line.
+    var clipMegabytes: Int {
+        let frame = NSScreen.main?.frame.size ?? CGSize(width: 1512, height: 982)
+        let scale = NSScreen.main?.backingScaleFactor ?? 2
+        return ReplayBudget.megabytes(width: Int(frame.width * scale), height: Int(frame.height * scale), seconds: clipSeconds)
+    }
+
     /// Clips turned on: macOS asks for the screen recording permission now rather than at a game.
     func clipsChanged(_ on: Bool) {
         preferences.clips = on
@@ -1155,15 +1783,11 @@ final class AppModel: ObservableObject {
     func saveClip() {
         guard let game = running?.game else { return }
         guard familyAllows(.mediaSharing) else { return TrophyBanner.shared.notice(FS.refusal(.mediaSharing), detail: "", symbol: "hand.raised.fill", sounds: preferences.sounds) }
-        guard preferences.clips == true else {
-            return TrophyBanner.shared.notice(T.text(.clipsOff), detail: T.text(.clipsOffDetail), symbol: "record.circle", sounds: preferences.sounds)
-        }
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        // With the replay buffer off there is nothing kept: Create takes a screenshot instead.
+        guard preferences.clips == true else { return takeScreenshot() }
         let folder = screenshotsFolder
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let file = folder.appendingPathComponent("\(game.titleID)-\(formatter.string(from: Date())).mp4")
+        let file = folder.appendingPathComponent("\(game.titleID)-\(Self.captureStamp()).mp4")
         Task { @MainActor in
             do {
                 try await self.clipRecorder.save(to: file)
@@ -1258,6 +1882,10 @@ final class AppModel: ObservableObject {
     private func applicationEnded(_ pid: pid_t?) {
         guard let running, running.app.processIdentifier == pid else { return }
         self.running = nil
+        defer { restartIfWaiting() }
+        // The game's own menus go with it.
+        pausedGame = false
+        if overlay == .quickMenu || overlay == .closeGame { overlay = nil }
         OnlinePlayHost.stop()
         if let start = sessionStart { recordPlay(running.game, from: start) }
         sessionStart = nil
@@ -1349,6 +1977,7 @@ final class AppModel: ObservableObject {
             server.togetherServer = together.base.absoluteString
             if (try? server.start()) != nil {
                 remote = server
+                updateBrowserPlay()
                 if let port = server.controlPort {
                     cable = UsbTunnel(targetPort: port)
                     cable?.start()
@@ -1608,6 +2237,8 @@ final class AppModel: ObservableObject {
             // Go live and Stop broadcast in the phone's PS menu.
             phoneBroadcast(message == .command(name: "broadcastStart"))
         case .command(let name):
+            // The phone's pad is a pad: the screens show its glyphs.
+            InputModeState.shared.usedPad()
             let commands: [String: Command] = ["left": .left, "right": .right, "up": .up, "down": .down, "select": .select, "back": .back, "options": .options,
                                                "l1": .previousGame, "r1": .nextGame]
             guard let command = commands[name] else { return }
@@ -1635,7 +2266,9 @@ final class AppModel: ObservableObject {
         case .close:
             if starting != nil { cancelStart() } else { running?.app.forceTerminate() }
         case .home:
-            bringLauncherFront()
+            // The phone's PS: the quick menu over a game in front, as a controller's does.
+            InputModeState.shared.usedPad()
+            if running != nil, !NSApp.isActive { shortcut(.home, hold: false) } else { bringLauncherFront() }
         case .saveLayout(let id, let layout):
             guard let game = games.first(where: { $0.id == id }) else { return }
             update(game) { $0.phoneLayout = layout }
@@ -1647,9 +2280,14 @@ final class AppModel: ObservableObject {
     }
 
     /// PS on a controller: from the game to the launcher, and from the launcher back to the game
-    /// playing.
+    /// playing. One press is one switch: a press within `toggleDebounce` of the last switch does
+    /// nothing (macOS tells the launcher it is active a moment after the switch, and the same press
+    /// seen again then would switch straight back).
     func togglePlaying() {
         guard let running, starting == nil else { return bringLauncherFront() }
+        let now = Date()
+        if let last = lastToggle, now.timeIntervalSince(last) < Self.toggleDebounce, now >= last { return }
+        lastToggle = now
         if NSApp.isActive {
             Sounds.shared.play(.select)
             NSApp.yieldActivation(to: running.app)
@@ -1660,7 +2298,10 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func bringLauncherFront() {
+    static let toggleDebounce: TimeInterval = 0.45
+    private var lastToggle: Date?
+
+    func bringLauncherFront() {
         guard !NSApp.isActive else { return }
         showWindows()
         NSApp.activate(ignoringOtherApps: true)
@@ -1692,6 +2333,7 @@ final class AppModel: ObservableObject {
                     self.recordTrophies(game, set)
                     for trophy in earned {
                         TrophyBanner.shared.show(trophy, sounds: self.preferences.sounds)
+                        Feel.shared.vibrate(.trophy)
                         self.tellPhone(trophy)
                     }
                 }
@@ -1737,7 +2379,9 @@ final class AppModel: ObservableObject {
             }
             TrophyBanner.shared.notice(TC.text(.traceOnNotice), detail: TC.text(.traceOnNoticeDetail), symbol: "text.magnifyingglass", sounds: false)
         }
-        let line = "\n\(Diagnosis.startMarker) \(ISO8601DateFormatter().string(from: Date())) \(game.titleID)\(traced ? " trace" : "")\n"
+        // The controllers connected at the start, in the log a crash report reads.
+        let pads = Controllers.shared.reportLines.map { "[anyps5-launcher] controllers: \($0)\n" }.joined()
+        let line = "\n\(Diagnosis.startMarker) \(ISO8601DateFormatter().string(from: Date())) \(game.titleID)\(traced ? " trace" : "")\n" + pads
         if let handle = try? FileHandle(forWritingTo: file) {
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: Data(line.utf8))
@@ -1776,6 +2420,12 @@ final class AppModel: ObservableObject {
             await MainActor.run {
                 self.diagnoses[game.id] = found
                 if found != nil || withoutWindow { self.offerReport(game) }
+                // Started from the game's Steam shortcut: the launcher goes when it ended well, so
+                // Steam sees the game end; a crash keeps it open on the report.
+                if self.steamQuitAfter == game.id {
+                    self.steamQuitAfter = nil
+                    if found == nil && !withoutWindow { NSApp.terminate(nil) }
+                }
             }
         }
     }
@@ -1942,7 +2592,8 @@ final class AppModel: ObservableObject {
     func open(_ next: Overlay) {
         panelCategory = 0
         panelRow = 0
-        panelInRows = next == .gameSettings || next == .confirmUninstall || next == .controls || next == .updateChoice || next == .crashReport
+        panelInRows = next == .gameSettings || next == .confirmUninstall || next == .controls || next == .updateChoice || next == .crashReport || next == .noSpace
+            || next == .updateRequired
         // The controls panel opens on its first key, below the hint.
         if next == .controls {
             panelRow = 1
@@ -1953,7 +2604,7 @@ final class AppModel: ObservableObject {
             revealedTrophies = []
         }
         if next == .gallery { loadGallery() }
-        if next == .advanced { panelRow = 1 }
+        if next == .advanced || next == .updateRequired { panelRow = 1 }
         panelInRows = panelInRows || next == .advanced || next == .themes || next == .studio || next == .friends || next == .party
         if next == .friends { refreshFriends() }
         if next == .party {
@@ -1975,9 +2626,11 @@ final class AppModel: ObservableObject {
         Sounds.shared.play(.back)
     }
 
-    func show(_ text: String, symbol: String) {
+    func show(_ text: String, symbol: String, icon: URL? = nil) {
+        // Something went wrong: two short taps in the controller.
+        if symbol.hasPrefix("exclamationmark") { Feel.shared.vibrate(.error) }
         toastTask?.cancel()
-        withAnimation(Motion.overlay) { toast = Toast(text: text, symbol: symbol) }
+        withAnimation(Motion.overlay) { toast = Toast(text: text, symbol: symbol, icon: icon) }
         toastTask = Task {
             try? await Task.sleep(nanoseconds: 3_200_000_000)
             guard !Task.isCancelled else { return }

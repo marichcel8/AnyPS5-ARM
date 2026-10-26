@@ -33,6 +33,7 @@
 #include <map>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <random>
 #include <vector>
 #include <set>
@@ -46,6 +47,7 @@
 #include "prx/libkernel/Socket/include/SocketError.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 #include "prx/libSceNet/include/VirtualNet.hpp"
+#include "prx/libSceNet/include/VirtualStream.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libkernel/Pthread/include/ThreadLifecycle.hpp"
@@ -134,6 +136,7 @@ constexpr int NET_AF_INET6 = 28;
 constexpr int NET_SOCK_STREAM = 1;
 constexpr int NET_SOCK_DGRAM = 2;
 constexpr int NET_SOCK_DGRAM_P2P = 6;
+constexpr int NET_SOCK_STREAM_P2P = 10;
 constexpr int NET_SOCK_RAW = 3;
 constexpr int NET_EPOLL_CTL_ADD = 1;
 constexpr int NET_EPOLL_CTL_MOD = 2;
@@ -281,7 +284,27 @@ struct Sock {
     std::uint32_t virtualPeer = 0;
     std::uint16_t virtualPeerPort = 0;
     std::uint16_t virtualPeerVport = 0;
+    // A stream P2P socket (p2p with type NET_SOCK_STREAM) once connected or accepted: the player
+    // at the other end, as getpeername reports it.
+    std::uint32_t streamPeer = 0;
+    std::uint16_t streamPeerPort = 0;
+    std::uint16_t streamPeerVport = 0;
 };
+
+bool stream_p2p(const Sock& socket) {
+    return socket.p2p && socket.type == NET_SOCK_STREAM;
+}
+
+// Binds a stream P2P socket's host socket to 127.0.0.1 at a port the system picks, unless it has one.
+bool bind_stream_loopback(NativeSocket native) {
+    sockaddr_in local{};
+    NativeLength length = sizeof(local);
+    if (::getsockname(native, reinterpret_cast<sockaddr*>(&local), &length) == 0 && local.sin_family == AF_INET && local.sin_port != 0) return true;
+    sockaddr_in loopback{};
+    loopback.sin_family = AF_INET;
+    loopback.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    return ::bind(native, reinterpret_cast<const sockaddr*>(&loopback), sizeof(loopback)) == 0;
+}
 
 #ifdef _WIN32
 struct HostMutex {
@@ -339,6 +362,13 @@ std::map<int, Sock> g_socks;
 std::set<int> g_epolls;
 using EpollRegistrations = std::map<int, std::shared_ptr<const NetEpollEvent>>;
 std::map<int, EpollRegistrations> g_epoll_socks;
+// Registrations of descriptors made by libkernel's socket(), which have no Sock here. The weak owner tells a
+// registration of a closed socket from one of a new socket that reuses its number.
+struct KernelEpollWatch {
+    std::weak_ptr<void> owner;
+    NativeSocket native;
+};
+std::map<int, std::map<int, KernelEpollWatch>> g_epoll_kernel_watches;
 std::set<int> g_epoll_aborted;
 std::map<int, std::size_t> g_pools;
 
@@ -372,6 +402,22 @@ void set_errno(int err) {
 int fail(int err) {
     set_errno(err);
     return NET_ERROR_BASE | err;
+}
+
+// On the console socket() and sceNetSocket make descriptors in one kernel namespace, so libSceNet calls take
+// either. IL2CPP (PPSA02429) makes its sockets with socket() and polls them with sceNetEpoll*. A socket() descriptor
+// lives in libkernel; this finds its host socket. Call it without g_mutex: libkernel may ask libSceNet back.
+struct KernelSocket {
+    std::shared_ptr<void> owner;
+    NativeSocket native = INVALID_NATIVE_SOCKET;
+};
+
+bool find_kernel_socket(int descriptor, KernelSocket& found) {
+    if (!GuestSocketIsOpen_nid_no_patch(descriptor)) return false;
+    std::uintptr_t native = 0;
+    if (!KernelLookupSocketNative_nid_no_patch(descriptor, &found.owner, &native) || !found.owner) return false;
+    found.native = static_cast<NativeSocket>(native);
+    return true;
 }
 
 void* APS5_VABI RunNetThread(void* param) {
@@ -715,7 +761,7 @@ bool route_virtual(int s, Sock& socket) {
 }
 
 std::int64_t send_virtual(int s, Sock& socket, const void* buf, std::size_t len, std::uint32_t peer, std::uint16_t peerPort, std::uint16_t peerVport) {
-    if (len > Online::Wire::MaxDatagram) return fail(NET_EMSGSIZE);
+    if (len > Online::Wire::MaxGameDatagram) return fail(NET_EMSGSIZE);
     if (!socket.p2p && !route_virtual(s, socket)) return fail(NET_EADDRINUSE);
     Online::Wire::Datagram datagram;
     datagram.peer = peer;
@@ -958,15 +1004,18 @@ int APS5_VABI sceNetSocket(const char* name, int family, int type, int protocol)
     if (family != NET_AF_INET && family != NET_AF_INET6) {
         return fail(NET_EAFNOSUPPORT);
     }
-    const bool p2p = type == NET_SOCK_DGRAM_P2P && VirtualNet::Enabled();
+    // With online play on, the P2P types run on host sockets on 127.0.0.1: datagrams on UDP, streams
+    // on TCP (VirtualStream carries them to the launcher).
+    const bool p2p = (type == NET_SOCK_DGRAM_P2P || type == NET_SOCK_STREAM_P2P) && VirtualNet::Enabled();
     if (p2p && family != NET_AF_INET) return fail(NET_EAFNOSUPPORT);
     if (type != NET_SOCK_STREAM && type != NET_SOCK_DGRAM && type != NET_SOCK_RAW && !p2p) {
         return fail(NET_EPROTONOSUPPORT);
     }
+    const int hostType = type == NET_SOCK_STREAM_P2P ? NET_SOCK_STREAM : type == NET_SOCK_DGRAM_P2P ? NET_SOCK_DGRAM : type;
     if (!initialize_sockets()) return fail(5);
-    const NativeSocket native = ::socket(family == NET_AF_INET ? AF_INET : AF_INET6, p2p ? NET_SOCK_DGRAM : type, p2p ? 0 : protocol);
+    const NativeSocket native = ::socket(family == NET_AF_INET ? AF_INET : AF_INET6, hostType, p2p ? 0 : protocol);
     if (native == INVALID_NATIVE_SOCKET) return fail(native_error());
-    if (p2p) {
+    if (p2p && hostType == NET_SOCK_DGRAM) {
         sockaddr_in loopback{};
         loopback.sin_family = AF_INET;
         loopback.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
@@ -993,7 +1042,7 @@ int APS5_VABI sceNetSocket(const char* name, int family, int type, int protocol)
     }
     std::shared_ptr<NativeSocketHandle> handle;
     try {
-        handle = std::make_shared<NativeSocketHandle>(native, type == NET_SOCK_STREAM);
+        handle = std::make_shared<NativeSocketHandle>(native, hostType == NET_SOCK_STREAM);
     } catch (const std::bad_alloc&) {
         close_socket(native);
         return fail(12);
@@ -1003,7 +1052,7 @@ int APS5_VABI sceNetSocket(const char* name, int family, int type, int protocol)
     std::lock_guard lk(g_mutex);
     Sock s;
     s.family = family;
-    s.type = p2p ? NET_SOCK_DGRAM : type;
+    s.type = hostType;
     s.p2p = p2p;
     s.protocol = protocol;
     if (protocol == 0 && s.type == NET_SOCK_STREAM) s.protocol = IPPROTO_TCP;
@@ -1032,6 +1081,7 @@ int APS5_VABI sceNetSocketClose(int s) {
     }
     KernelReleaseSocketNumber_nid_no_patch(s);
     VirtualNet::Forget(s);
+    VirtualStream::Forget(s);
     if (native) {
 #ifdef _WIN32
         ::shutdown(native->value, SD_BOTH);
@@ -1075,6 +1125,21 @@ int APS5_VABI sceNetBind_nid_postfix(int s, const void* addr, uint32_t addrlen) 
     NativeLength native_length = 0;
     if (!guest_to_native_address(addr, addrlen, native, native_length)) return fail(NET_EINVAL);
     if (native.ss_family != (socket.family == NET_AF_INET ? AF_INET : AF_INET6)) return fail(NET_EAFNOSUPPORT);
+    if (stream_p2p(socket)) {
+        // The port and virtual port are the game's names for the socket; the host socket gets a
+        // loopback port of its own when it listens or connects.
+        const auto port = ntohs(reinterpret_cast<const sockaddr_in&>(native).sin_port);
+        const auto vport = VirtualNet::GuestVport(addr, addrlen);
+        std::lock_guard lk(g_mutex);
+        auto it = g_socks.find(s);
+        if (it != g_socks.end()) {
+            it->second.bound = true;
+            it->second.gamePort = port;
+            it->second.gameVport = vport;
+        }
+        g_cv.NotifyAll();
+        return 0;
+    }
     if (socket.p2p) {
         const auto port = ntohs(reinterpret_cast<const sockaddr_in&>(native).sin_port);
         const auto vport = VirtualNet::GuestVport(addr, addrlen);
@@ -1113,7 +1178,12 @@ int APS5_VABI sceNetListen(int s, int backlog) {
         socket = it->second;
     }
     if (socket.type != NET_SOCK_STREAM) return fail(NET_EOPNOTSUPP);
-    if (::listen(socket.native->value, backlog) != 0) return fail(native_error());
+    if (stream_p2p(socket)) {
+        if (socket.streamPeer != 0) return fail(NET_EINVAL);
+        if (!bind_stream_loopback(socket.native->value)) return fail(native_error());
+        if (::listen(socket.native->value, backlog) != 0) return fail(native_error());
+        if (!VirtualStream::Listen(socket.gamePort, socket.gameVport, native_port(*socket.native), s)) return fail(NET_EADDRINUSE);
+    } else if (::listen(socket.native->value, backlog) != 0) return fail(native_error());
     std::lock_guard lk(g_mutex);
     auto it = g_socks.find(s);
     if (it != g_socks.end()) {
@@ -1135,12 +1205,23 @@ int APS5_VABI sceNetAccept(int s, void* addr, uint32_t* addrlen) {
     if (addr && !addrlen) return fail(NET_EINVAL);
     sockaddr_storage peer{};
     NativeLength peer_length = sizeof(peer);
-    const NativeSocket accepted = native_transfer(*listener.native, 0, false, [&](int) {
-        peer_length = sizeof(peer);
-        return ::accept(listener.native->value,
-            addr ? reinterpret_cast<sockaddr*>(&peer) : nullptr, addr ? &peer_length : nullptr);
-    }, false);
-    if (accepted == INVALID_NATIVE_SOCKET) return fail(native_error());
+    const bool streamP2p = stream_p2p(listener);
+    std::optional<VirtualNet::Source> player;
+    NativeSocket accepted = INVALID_NATIVE_SOCKET;
+    for (;;) {
+        accepted = native_transfer(*listener.native, 0, false, [&](int) {
+            peer_length = sizeof(peer);
+            return ::accept(listener.native->value,
+                addr || streamP2p ? reinterpret_cast<sockaddr*>(&peer) : nullptr, addr || streamP2p ? &peer_length : nullptr);
+        }, false);
+        if (accepted == INVALID_NATIVE_SOCKET) return fail(native_error());
+        if (!streamP2p) break;
+        // Only the engine's own connections into a stream P2P listener are players; anything else
+        // on the machine that found the loopback port is turned away.
+        if (peer.ss_family == AF_INET) player = VirtualStream::Accepted(ntohs(reinterpret_cast<const sockaddr_in&>(peer).sin_port));
+        if (player) break;
+        close_socket(accepted);
+    }
     std::shared_ptr<NativeSocketHandle> handle;
     try {
         handle = std::make_shared<NativeSocketHandle>(accepted, true);
@@ -1154,6 +1235,15 @@ int APS5_VABI sceNetAccept(int s, void* addr, uint32_t* addrlen) {
     connection.protocol = listener.protocol;
     connection.connectAttempted = true;
     connection.native = std::move(handle);
+    if (player) {
+        connection.p2p = true;
+        connection.bound = true;
+        connection.gamePort = listener.gamePort;
+        connection.gameVport = listener.gameVport;
+        connection.streamPeer = player->address;
+        connection.streamPeerPort = player->port;
+        connection.streamPeerVport = player->vport;
+    }
 #ifdef _WIN32
     connection.native->receiveTimeout = listener.native->receiveTimeout.load();
     connection.native->sendTimeout = listener.native->sendTimeout.load();
@@ -1172,7 +1262,9 @@ int APS5_VABI sceNetAccept(int s, void* addr, uint32_t* addrlen) {
             return fail(error);
         }
     }
-    if (addr && !native_to_guest_address(peer, addr, addrlen)) {
+    if (addr && player) {
+        VirtualNet::WriteGuestAddress(*player, addr, addrlen);
+    } else if (addr && !native_to_guest_address(peer, addr, addrlen)) {
         sceNetSocketClose(descriptor);
         return fail(NET_EAFNOSUPPORT);
     }
@@ -1215,6 +1307,90 @@ static int disconnect_datagram(const Sock& socket) {
 extern "C" void RefuseClosedLoopbackAtOnce_nid_no_patch(SOCKET socket, const sockaddr* address);
 #endif
 
+// A stream P2P connect opens a stream to the player through the launcher (a blocking one waits for
+// the player to accept or refuse it, ending early when the socket is closed or aborted), then
+// connects the host socket to the engine's relay listener, which pairs it with the stream.
+static int connect_stream_p2p(int s, const Sock& socket, const void* addr, std::uint32_t addrlen) {
+    const auto peer = VirtualNet::VirtualDestination(addr, addrlen);
+    if (!peer || Online::Wire::IsGroup(*peer)) return fail(NET_EHOSTUNREACH);
+    if (socket.streamPeer != 0) return fail(NET_EISCONN);
+    if (socket.listening) return fail(NET_EINVAL);
+    if (!bind_stream_loopback(socket.native->value)) return fail(native_error());
+    std::uint16_t port = 0;
+    std::memcpy(&port, static_cast<const std::uint8_t*>(addr) + 2, 2);
+    const auto vport = VirtualNet::GuestVport(addr, addrlen);
+    const auto opening = VirtualStream::Open(*peer, ntohs(port), vport, socket.gamePort, socket.gameVport, native_port(*socket.native));
+    if (!opening) return fail(NET_ENETUNREACH);
+    // Still the socket that asked (not closed, nor its number reused meanwhile)?
+    const auto same = [&](bool& wasAborted) {
+        std::lock_guard lk(g_mutex);
+        const auto it = g_socks.find(s);
+        if (it == g_socks.end() || it->second.native != socket.native) return false;
+        wasAborted = it->second.aborted;
+        return !wasAborted;
+    };
+    const auto giveUp = [&](int error) {
+        VirtualStream::Abandon(opening->id);
+        std::lock_guard lk(g_mutex);
+        const auto it = g_socks.find(s);
+        if (it != g_socks.end() && it->second.native == socket.native) {
+            it->second.streamPeer = 0;
+            it->second.streamPeerPort = 0;
+            it->second.streamPeerVport = 0;
+        }
+        return fail(error);
+    };
+    bool aborted = false;
+    if (!socket.native->nonblock) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+        auto answer = VirtualStream::Answer::TimedOut;
+        while (std::chrono::steady_clock::now() < deadline) {
+            answer = VirtualStream::Wait(opening->id, std::chrono::milliseconds(100));
+            if (answer != VirtualStream::Answer::TimedOut) break;
+            if (!same(aborted)) return giveUp(aborted ? NET_ECONNABORTED : NET_EBADF);
+        }
+        if (answer != VirtualStream::Answer::Accepted) {
+            return giveUp(answer == VirtualStream::Answer::Refused ? NET_ECONNREFUSED : answer == VirtualStream::Answer::TimedOut ? NET_ETIMEDOUT : NET_EHOSTUNREACH);
+        }
+    }
+    {
+        std::lock_guard lk(g_mutex);
+        auto it = g_socks.find(s);
+        if (it == g_socks.end() || it->second.native != socket.native) {
+            VirtualStream::Abandon(opening->id);
+            return fail(NET_EBADF);
+        }
+        it->second.bound = true;
+        it->second.streamPeer = *peer;
+        it->second.streamPeerPort = ntohs(port);
+        it->second.streamPeerVport = vport;
+    }
+    sockaddr_in relay{};
+    relay.sin_family = AF_INET;
+    relay.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    relay.sin_port = htons(opening->relayPort);
+    if (::connect(socket.native->value, reinterpret_cast<const sockaddr*>(&relay), sizeof(relay)) == 0) return 0;
+#ifdef _WIN32
+    if (WSAGetLastError() == WSAEWOULDBLOCK) {
+        if (socket.native->nonblock) return fail(NET_EINPROGRESS);
+        fd_set writable;
+        fd_set failed;
+        FD_ZERO(&writable);
+        FD_ZERO(&failed);
+        FD_SET(socket.native->value, &writable);
+        FD_SET(socket.native->value, &failed);
+        if (::select(0, nullptr, &writable, &failed, nullptr) < 0) return giveUp(native_error());
+        int error = 0;
+        int size = sizeof(error);
+        if (::getsockopt(socket.native->value, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size) != 0) return giveUp(native_error());
+        return error == 0 ? 0 : giveUp(net_error(error));
+    }
+#else
+    if (errno == EINPROGRESS) return fail(NET_EINPROGRESS);
+#endif
+    return giveUp(native_error());
+}
+
 int APS5_VABI sceNetConnect(int s, const void* addr, uint32_t addrlen) {
     Sock socket;
     {
@@ -1250,6 +1426,7 @@ int APS5_VABI sceNetConnect(int s, const void* addr, uint32_t addrlen) {
     }
     sockaddr_storage native{};
     NativeLength native_length = 0;
+    if (stream_p2p(socket)) return connect_stream_p2p(s, socket, addr, addrlen);
     if (!guest_to_native_address(addr, addrlen, native, native_length)) return fail(NET_EINVAL);
 #ifdef _WIN32
     if (socket.type == NET_SOCK_STREAM) RefuseClosedLoopbackAtOnce_nid_no_patch(socket.native->value, reinterpret_cast<const sockaddr*>(&native));
@@ -1406,6 +1583,11 @@ int64_t APS5_VABI sceNetSendto(int s, const void* buf, size_t len, int flags, co
         if (it == g_socks.end()) return fail(NET_EBADF);
         socket = it->second;
     }
+    if (stream_p2p(socket)) {
+        // A connected stream ignores the address, as TCP's does.
+        to = nullptr;
+        tolen = 0;
+    }
     if (!to && socket.virtualPeer != 0 && tolen == 0) return send_virtual(s, socket, buf, len, socket.virtualPeer, socket.virtualPeerPort, socket.virtualPeerVport);
     if (to && socket.type == NET_SOCK_DGRAM && VirtualNet::Enabled()) {
         if (const auto peer = VirtualNet::VirtualDestination(to, tolen)) {
@@ -1414,7 +1596,7 @@ int64_t APS5_VABI sceNetSendto(int s, const void* buf, size_t len, int flags, co
             return send_virtual(s, socket, buf, len, *peer, ntohs(port), VirtualNet::GuestVport(to, tolen));
         }
     }
-    if (socket.p2p) return fail(NET_EHOSTUNREACH);
+    if (socket.p2p && !stream_p2p(socket)) return fail(NET_EHOSTUNREACH);
     int result;
     if (!to) {
         if (tolen != 0) return fail(NET_EINVAL);
@@ -1630,11 +1812,18 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
 
 int APS5_VABI sceNetGetsockopt(int s, int level, int optname, void* optval, uint32_t* optlen) {
     Sock socket;
+    bool found = false;
     {
         std::lock_guard lk(g_mutex);
         auto it = g_socks.find(s);
-        if (it == g_socks.end()) return fail(NET_EBADF);
-        socket = it->second;
+        if (it != g_socks.end()) {
+            socket = it->second;
+            found = true;
+        }
+    }
+    if (!found) {
+        if (!GuestSocketIsOpen_nid_no_patch(s)) return fail(NET_EBADF);
+        return getsockopt_nid_postfix(s, level, optname, optval, optlen) == 0 ? 0 : fail(*__error_nid_postfix());
     }
     if (optval == nullptr || optlen == nullptr) return fail(NET_EINVAL);
     if (level == NET_SOL_SOCKET && optname == NET_SO_PROTOCOL) {
@@ -1738,6 +1927,11 @@ int APS5_VABI sceNetGetpeername(int s, void* addr, uint32_t* addrlen) {
         socket = it->second;
     }
     if (!addr || !addrlen) return fail(NET_EINVAL);
+    if (stream_p2p(socket)) {
+        if (socket.streamPeer == 0) return fail(NET_ENOTCONN);
+        VirtualNet::WriteGuestAddress({socket.streamPeer, socket.streamPeerPort, socket.streamPeerVport}, addr, addrlen);
+        return 0;
+    }
     sockaddr_storage native{};
     NativeLength native_length = sizeof(native);
     if (::getpeername(socket.native->value, reinterpret_cast<sockaddr*>(&native), &native_length) != 0)
@@ -1800,38 +1994,62 @@ static int sock_buffer_size(const Sock& socket, bool send, std::int32_t& value) 
 
 static int fill_sock_info(int s, NetSockInfo& record) {
     Sock socket;
+    bool found = false;
     {
         std::lock_guard lk(g_mutex);
         const auto it = g_socks.find(s);
-        if (it == g_socks.end()) return NET_EBADF;
-        socket = it->second;
+        if (it != g_socks.end()) {
+            socket = it->second;
+            found = true;
+        }
     }
-    if (socket.family != NET_AF_INET) return NET_EAFNOSUPPORT;
+    KernelSocket kernel;
+    if (!found && !find_kernel_socket(s, kernel)) return NET_EBADF;
+    if (found && socket.family != NET_AF_INET) return NET_EAFNOSUPPORT;
+    const NativeSocket native = found ? socket.native->value : kernel.native;
     sockaddr_in local{};
     NativeLength length = sizeof(local);
-    if (::getsockname(socket.native->value, reinterpret_cast<sockaddr*>(&local), &length) != 0) {
+    if (::getsockname(native, reinterpret_cast<sockaddr*>(&local), &length) != 0) {
 #ifdef _WIN32
         if (WSAGetLastError() != WSAEINVAL) return native_error();
 #else
         return native_error();
 #endif
     }
+    if (!found && local.sin_family != AF_INET) return NET_EAFNOSUPPORT;
     sockaddr_in remote{};
     length = sizeof(remote);
-    if (::getpeername(socket.native->value, reinterpret_cast<sockaddr*>(&remote), &length) != 0) {
+    if (::getpeername(native, reinterpret_cast<sockaddr*>(&remote), &length) != 0) {
         const int error = native_error();
         if (error != NET_ENOTCONN) return error;
     }
     record = {};
-    if (const int error = sock_buffer_size(socket, false, record.recv_buffer_size)) return error;
-    if (const int error = sock_buffer_size(socket, true, record.send_buffer_size)) return error;
+    int type = socket.type;
+    bool nonblock = false;
+    if (found) {
+        if (const int error = sock_buffer_size(socket, false, record.recv_buffer_size)) return error;
+        if (const int error = sock_buffer_size(socket, true, record.send_buffer_size)) return error;
+        nonblock = socket.native->nonblock;
+    } else {
+        int nativeType = 0;
+        NativeLength size = sizeof(nativeType);
+        if (::getsockopt(native, SOL_SOCKET, SO_TYPE, reinterpret_cast<char*>(&nativeType), &size) != 0) return native_error();
+        type = nativeType == SOCK_STREAM ? NET_SOCK_STREAM : NET_SOCK_DGRAM;
+        size = sizeof(record.recv_buffer_size);
+        if (::getsockopt(native, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<char*>(&record.recv_buffer_size), &size) != 0) return native_error();
+        size = sizeof(record.send_buffer_size);
+        if (::getsockopt(native, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<char*>(&record.send_buffer_size), &size) != 0) return native_error();
+        int state = 0;
+        std::uint32_t stateSize = sizeof(state);
+        nonblock = getsockopt_nid_postfix(s, NET_SOL_SOCKET, NET_SO_NBIO, &state, &stateSize) == 0 && state != 0;
+    }
     record.s = s;
-    record.socket_type = static_cast<std::int8_t>(socket.type);
+    record.socket_type = static_cast<std::int8_t>(type);
     record.local_adr = local.sin_addr.s_addr;
     record.remote_adr = remote.sin_addr.s_addr;
     record.local_port = local.sin_port;
     record.remote_port = remote.sin_port;
-    record.flags = NET_SOCKINFO_F_SELF | (socket.native->nonblock ? NET_SOCKINFO_F_NONBLOCK : 0);
+    record.flags = NET_SOCKINFO_F_SELF | (nonblock ? NET_SOCKINFO_F_NONBLOCK : 0);
     return 0;
 }
 
@@ -1992,6 +2210,7 @@ int APS5_VABI sceNetEpollDestroy(int eid) {
         return fail(NET_EBADF);
     }
     g_epoll_socks.erase(eid);
+    g_epoll_kernel_watches.erase(eid);
     g_epoll_aborted.erase(eid);
     g_cv.NotifyAll();
     return 0;
@@ -2009,18 +2228,30 @@ int APS5_VABI sceNetEpollAbort(int eid, int flags) {
 }
 
 int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* event) {
+    KernelSocket kernel;
+    const bool kernelSocket = find_kernel_socket(id, kernel);
     std::lock_guard lk(g_mutex);
     if (g_epolls.count(eid) == 0) {
         return fail(NET_EBADF);
     }
     if (op != NET_EPOLL_CTL_ADD && op != NET_EPOLL_CTL_MOD && op != NET_EPOLL_CTL_DEL) return fail(NET_EINVAL);
     if (op != NET_EPOLL_CTL_DEL && !event) return fail(NET_EINVAL);
-    if (g_socks.count(id) == 0) return fail(NET_EBADF);
+    const bool netSocket = g_socks.count(id) != 0;
+    if (!netSocket && !kernelSocket) return fail(NET_EBADF);
     auto& registrations = g_epoll_socks[eid];
+    auto& kernelWatches = g_epoll_kernel_watches[eid];
+    const auto previous = kernelWatches.find(id);
+    if (previous != kernelWatches.end() && (netSocket || previous->second.owner.lock() != kernel.owner)) {
+        // The registered socket() descriptor was closed and its number now names another socket.
+        kernelWatches.erase(previous);
+        registrations.erase(id);
+    }
     if (op == NET_EPOLL_CTL_ADD) {
         if (registrations.count(id) != 0) return fail(NET_EADDRINUSE);
         registrations.emplace(id, std::make_shared<const NetEpollEvent>(*event));
+        if (!netSocket) kernelWatches.insert_or_assign(id, KernelEpollWatch{kernel.owner, kernel.native});
     } else if (op == NET_EPOLL_CTL_DEL) {
+        kernelWatches.erase(id);
         if (registrations.erase(id) == 0) return fail(NET_ENOENT);
     } else {
         auto registration = registrations.find(id);
@@ -2036,7 +2267,8 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
     struct Watch {
         int descriptor;
         std::shared_ptr<const NetEpollEvent> registration;
-        std::shared_ptr<NativeSocketHandle> native;
+        std::shared_ptr<void> owner;
+        NativeSocket native;
     };
     const auto deadline = timeout > 0
         ? std::chrono::steady_clock::now() + std::chrono::microseconds(timeout)
@@ -2049,10 +2281,23 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
             if (g_epoll_aborted.erase(eid) != 0) return fail(NET_ECONNABORTED);
             const auto registration = g_epoll_socks.find(eid);
             if (registration != g_epoll_socks.end()) {
+                auto& kernelWatches = g_epoll_kernel_watches[eid];
+                std::vector<int> closed;
                 for (const auto& entry : registration->second) {
                     const auto socket = g_socks.find(entry.first);
-                    if (socket == g_socks.end()) continue;
-                    watches.push_back({entry.first, entry.second, socket->second.native});
+                    if (socket != g_socks.end()) {
+                        watches.push_back({entry.first, entry.second, socket->second.native, socket->second.native->value});
+                        continue;
+                    }
+                    const auto kernel = kernelWatches.find(entry.first);
+                    if (kernel == kernelWatches.end()) continue;
+                    if (auto owner = kernel->second.owner.lock()) watches.push_back({entry.first, entry.second, std::move(owner), kernel->second.native});
+                    else closed.push_back(entry.first);
+                }
+                // A socket() descriptor closed while registered leaves its epoll, as a kernel descriptor does.
+                for (const int descriptor : closed) {
+                    registration->second.erase(descriptor);
+                    kernelWatches.erase(descriptor);
                 }
             }
         }
@@ -2070,14 +2315,14 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
 #ifdef _WIN32
         std::vector<WSAPOLLFD> descriptors(watches.size());
         for (std::size_t index = 0; index < descriptors.size(); ++index) {
-            descriptors[index].fd = watches[index].native->value;
+            descriptors[index].fd = watches[index].native;
             if (watches[index].registration->events & 1) descriptors[index].events |= POLLRDNORM;
             if (watches[index].registration->events & 2) descriptors[index].events |= POLLWRNORM;
         }
 #else
         std::vector<pollfd> descriptors(watches.size());
         for (std::size_t index = 0; index < descriptors.size(); ++index) {
-            descriptors[index].fd = watches[index].native->value;
+            descriptors[index].fd = watches[index].native;
             if (watches[index].registration->events & 1) descriptors[index].events |= POLLIN;
             if (watches[index].registration->events & 2) descriptors[index].events |= POLLOUT;
         }

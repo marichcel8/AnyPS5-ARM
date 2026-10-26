@@ -40,7 +40,48 @@ public struct TogetherProblem: Error, Decodable, CustomStringConvertible, Sendab
     public var latest: TogetherSaveVersion? = nil
     /// With "conflict" on completing an upload: the parts that have not arrived.
     public var missing: [Int]? = nil
+    /// With "version_mismatch" on joining a game: game_version or engine, the host's and this
+    /// copy's, and who is behind ("you" or "host").
+    public var reason: String? = nil
+    public var expected: String? = nil
+    public var actual: String? = nil
+    public var update: String? = nil
+    /// With "version_mismatch": whether the joiner may try anyway (join again with the override).
+    public var overridable: Bool? = nil
+    /// With "client_too_old": the oldest version AnyTogether still answers, this one's, and where
+    /// to update.
+    public var minimum: String? = nil
+    public var current: String? = nil
+    public var downloadUrl: String? = nil
+    /// With "conflict" on starting Play Together: the party's game already running.
+    public var sessionId: String? = nil
     public var description: String { title }
+
+    /// Why a join was refused, when it was for the versions.
+    public var joinRefusal: TogetherJoinRefusal? {
+        guard code == "version_mismatch", let reason = reason.flatMap(TogetherJoinRefusal.Reason.init(rawValue:)), let expected, let actual else { return nil }
+        return TogetherJoinRefusal(reason: reason, expected: expected, actual: actual, youUpdate: update != "host", overridable: overridable)
+    }
+
+    /// AnyTogether no longer answers this launcher's version.
+    public var clientTooOld: TogetherClientTooOld? {
+        guard code == "client_too_old", let minimum else { return nil }
+        return TogetherClientTooOld(minimum: minimum, current: current, downloadUrl: downloadUrl.flatMap(URL.init(string:)))
+    }
+}
+
+/// "Update required": AnyTogether answers 426 client_too_old to launchers older than `minimum`
+/// (MIN_LAUNCHER_VERSION on the server), with where to get a newer one.
+public struct TogetherClientTooOld: Equatable, Sendable {
+    public let minimum: String
+    public let current: String?
+    public let downloadUrl: URL?
+
+    public init(minimum: String, current: String?, downloadUrl: URL?) {
+        self.minimum = minimum
+        self.current = current
+        self.downloadUrl = downloadUrl
+    }
 }
 
 /// A sign-in that waits for someone to approve it: a hand-off to the phone or a device code.
@@ -68,8 +109,9 @@ public struct TogetherMe: Decodable, Sendable {
     public let profile: Profile
 }
 
-/// The session kept between launches: in a file only this user can read until the launcher has a
-/// stable signature (a Keychain item would ask again after every ad hoc signed update).
+/// The session kept between launches: each launcher profile's in its own Keychain item
+/// (ProfileSessions), or in a file only this user can read (tests, and the launcher before
+/// profiles, whose file moves into the first profile's item once).
 public final class TokenStore: @unchecked Sendable {
     struct Saved: Codable {
         var accessToken: String
@@ -78,16 +120,39 @@ public final class TokenStore: @unchecked Sendable {
         var user: TogetherUser
     }
 
-    let file: URL
+    enum Backing {
+        case file(URL)
+        case vault(SecretVault, String)
+    }
+
+    let backing: Backing
     private let lock = NSLock()
 
-    public init(file: URL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("AnyPS5/Together/session.json")) {
-        self.file = file
+    public static let legacyFile = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("AnyPS5/Together/session.json")
+
+    public init(file: URL = TokenStore.legacyFile) {
+        backing = .file(file)
+    }
+
+    public init(vault: SecretVault, account: String) {
+        backing = .vault(vault, account)
     }
 
     func load() -> Saved? {
-        lock.withLock { (try? Data(contentsOf: file)).flatMap { try? JSONDecoder.together.decode(Saved.self, from: $0) } }
+        lock.withLock { read() }
     }
+
+    private func read() -> Saved? {
+        let data: Data?
+        switch backing {
+        case .file(let file): data = try? Data(contentsOf: file)
+        case .vault(let vault, let account): data = vault.read(account)
+        }
+        return data.flatMap { try? JSONDecoder.together.decode(Saved.self, from: $0) }
+    }
+
+    /// Whom the kept session is for.
+    public var user: TogetherUser? { load()?.user }
 
     /// The tokens kept now, for a crash report to take out wherever they appear.
     public var secrets: [String] {
@@ -101,17 +166,37 @@ public final class TokenStore: @unchecked Sendable {
         save(saved)
     }
 
-    func save(_ saved: Saved?) {
+    @discardableResult
+    func save(_ saved: Saved?) -> Bool {
         lock.withLock {
-            guard let saved else {
-                try? FileManager.default.removeItem(at: file)
-                return
+            switch backing {
+            case .vault(let vault, let account):
+                guard let saved else { return vault.write(nil, for: account) }
+                guard let data = try? JSONEncoder.together.encode(saved) else { return false }
+                return vault.write(data, for: account)
+            case .file(let file):
+                guard let saved else {
+                    try? FileManager.default.removeItem(at: file)
+                    return true
+                }
+                try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                guard let data = try? JSONEncoder.together.encode(saved) else { return false }
+                FileManager.default.createFile(atPath: file.path, contents: data, attributes: [.posixPermissions: 0o600])
+                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                return true
             }
-            try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            guard let data = try? JSONEncoder.together.encode(saved) else { return }
-            FileManager.default.createFile(atPath: file.path, contents: data, attributes: [.posixPermissions: 0o600])
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
         }
+    }
+
+    /// The session kept in `file` (before profiles) moves into the vault: read back from it
+    /// before the file goes, and the file stays where the vault said no. True when one moved.
+    public static func migrate(file: URL, into vault: SecretVault, account: String) -> Bool {
+        let old = TokenStore(file: file)
+        guard let saved = old.load() else { return false }
+        let new = TokenStore(vault: vault, account: account)
+        guard new.save(saved), new.load()?.refreshToken == saved.refreshToken else { return false }
+        old.save(nil)
+        return true
     }
 }
 
@@ -123,6 +208,8 @@ public final class TogetherClient: @unchecked Sendable {
     let session: URLSession
     public let clientName: String
     private let refresher = Refresher()
+    /// Called with every client_too_old answer, from whichever call got it (set once at start).
+    public var onClientTooOld: (@Sendable (TogetherClientTooOld) -> Void)?
 
     public init(base: URL, store: TokenStore = TokenStore(), session: URLSession = .shared, clientName: String) {
         self.base = base
@@ -132,6 +219,9 @@ public final class TogetherClient: @unchecked Sendable {
     }
 
     public var user: TogetherUser? { store.load()?.user }
+
+    /// The tokens of this client's session, for a crash report to take out.
+    public var secrets: [String] { store.secrets }
 
     // MARK: Signing in
 
@@ -284,7 +374,9 @@ public final class TogetherClient: @unchecked Sendable {
         let (data, response) = try await session.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
         guard (200 ..< 300).contains(status) else {
-            throw (try? JSONDecoder.together.decode(TogetherProblem.self, from: data)) ?? TogetherProblem(status: status, code: "internal", title: "AnyTogether answered \(status)")
+            let problem = (try? JSONDecoder.together.decode(TogetherProblem.self, from: data)) ?? TogetherProblem(status: status, code: "internal", title: "AnyTogether answered \(status)")
+            if let old = problem.clientTooOld { onClientTooOld?(old) }
+            throw problem
         }
         return (data, status)
     }

@@ -23,10 +23,21 @@ struct PanelRow: Identifiable {
     let kind: Kind
     /// Someone on AnyTogether: their avatar stands in for the symbol.
     var person: PanelPerson?
+    /// The detail is advice to read whole (the controller troubleshooter): no line limit.
+    var wraps = false
 
     var focusable: Bool {
         if case .info = kind { return false }
         return true
+    }
+
+    /// How left and right treat the row (RowEditor): a choice or a stepper steps its value.
+    var valueKind: RowValueKind {
+        switch kind {
+        case .choice, .stepper: return .choice
+        case .toggle: return .toggle
+        default: return .other
+        }
     }
 }
 
@@ -41,6 +52,10 @@ struct PanelPerson {
     var status: Status?
     /// Speaking in the party's voice: a ring in the accent.
     var speaking = false
+    /// Their trophy level, beside the row's words.
+    var level: TogetherLevelBadge?
+    /// The user's own row while they appear offline: a moon on the avatar.
+    var appearingOffline = false
 }
 
 struct PanelCategory: Identifiable {
@@ -80,6 +95,8 @@ extension AppModel {
                 }),
                 PanelRow(id: "cancel", title: T.text(.cancel), kind: .action(destructive: false) { [weak self] in self?.closeOverlay() }),
             ])]
+        case .updateRequired:
+            return [PanelCategory(id: "updateRequired", title: TK.text(.updateRequiredTitle), symbol: "arrow.down.circle", rows: updateRequiredRows())]
         case .updateChoice:
             guard let game = selectedGame else { return [] }
             // Which engine unlocked it and which one is chosen now.
@@ -96,8 +113,31 @@ extension AppModel {
                     self?.play(game)
                 }),
             ])]
+        case .noSpace:
+            guard let (game, shortage) = spaceShortage else { return [] }
+            return [PanelCategory(id: "noSpace", title: TPrep.text(.noSpaceTitle), symbol: "externaldrive.badge.exclamationmark", rows: noSpaceRows(game, shortage))]
+        case .signIn: return [PanelCategory(id: "signin", title: "AnyTogether", symbol: "person.2.circle", rows: signInRows())]
         default: return []
         }
+    }
+
+    /// The no-space panel: how much the unlock needs and what is free, and the ways out.
+    func noSpaceRows(_ game: Game, _ shortage: SpaceShortage) -> [PanelRow] {
+        [
+            PanelRow(id: "amount", title: TPrep.format(.noSpaceAmount, shortage.needed.byteText, shortage.free.byteText, shortage.volume),
+                     detail: TPrep.text(.noSpaceNothingWritten) + "\n" + TPrep.text(.noSpaceWhy), symbol: "externaldrive.badge.exclamationmark", kind: .info(""), wraps: true),
+            PanelRow(id: "folder", title: TPrep.text(.noSpaceFolder), detail: TPrep.text(.noSpaceFolderDetail), symbol: "folder", kind: .action(destructive: false) { [weak self] in
+                self?.closeOverlay()
+                self?.pickGamesFolder()
+            }),
+            PanelRow(id: "storage", title: TPrep.text(.noSpaceStorage), detail: TPrep.text(.noSpaceStorageDetail), symbol: "internaldrive", kind: .action(destructive: false) {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.settings.Storage") { NSWorkspace.shared.open(url) }
+            }),
+            PanelRow(id: "retry", title: TPrep.text(.noSpaceRetry), detail: TPrep.text(.noSpaceRetryDetail), symbol: "arrow.clockwise", kind: .action(destructive: false) { [weak self] in
+                self?.closeOverlay()
+                self?.unlock(game)
+            }),
+        ]
     }
 
     private func settingsCategories() -> [PanelCategory] {
@@ -123,7 +163,7 @@ extension AppModel {
         appearance += [
             PanelRow(id: "themes", title: T.text(.themes), detail: T.text(.themesDetail), symbol: "square.grid.2x2", kind: .action(destructive: false) { [weak self] in self?.open(.themes) }),
             PanelRow(id: "studio", title: T.text(.themeStudio), detail: T.text(.themeStudioDetail), symbol: "wand.and.stars", kind: .action(destructive: false) { [weak self] in self?.openStudio() }),
-            PanelRow(id: "backdrop", title: T.text(.background), symbol: "photo.on.rectangle", kind: .choice(options: [T.text(.backgroundTheme), T.text(.backgroundImage), T.text(.backgroundVideo)], selected: [Preferences.Backdrop.theme, .image, .video].firstIndex(of: preferences.backdrop) ?? 0) { [weak self] index in
+            PanelRow(id: "backdrop", title: T.text(.background), symbol: "photo.on.rectangle", kind: .choice(options: [lookStyle.isGlass && !NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency && (preferences.glassTransparency ?? 1) > 0 ? TG.text(.desktop) : T.text(.backgroundTheme), T.text(.backgroundImage), T.text(.backgroundVideo)], selected: [Preferences.Backdrop.theme, .image, .video].firstIndex(of: preferences.backdrop) ?? 0) { [weak self] index in
                 let backdrop = [Preferences.Backdrop.theme, .image, .video][index]
                 if backdrop != .theme && (self?.preferences.backdropFile == nil || self?.preferences.backdrop != backdrop) {
                     self?.chooseBackdrop(backdrop)
@@ -137,11 +177,29 @@ extension AppModel {
                 self?.chooseBackdrop(preferences.backdrop)
             }))
         }
+        if lookStyle.isGlass {
+            // The see-through window: how much of the desktop shows, and the key art over it.
+            let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+            appearance += [
+                PanelRow(id: "glassTransparency", title: TG.text(.transparency), detail: TG.text(reduced ? .transparencyReduced : .transparencyDetail), symbol: "square.on.square.dashed",
+                         kind: .stepper(value: preferences.glassTransparency ?? GlassWindowRecipe.defaultTransparency, range: 0...100, step: 10, format: Self.percent) { [weak self] value in
+                             self?.preferences.glassTransparency = value == GlassWindowRecipe.defaultTransparency ? nil : value
+                         }),
+                PanelRow(id: "glassArtwork", title: TG.text(.artworkBehind), detail: TG.text(.artworkBehindDetail), symbol: "photo",
+                         kind: .toggle(preferences.glassArtwork == true) { [weak self] value in self?.preferences.glassArtwork = value ? true : nil }),
+            ]
+        } else {
+            appearance.append(PanelRow(id: "artwork", title: T.text(.gameArtwork), symbol: "photo", kind: .toggle(preferences.gameArtwork) { [weak self] value in self?.preferences.gameArtwork = value }))
+        }
         appearance += [
-            PanelRow(id: "artwork", title: T.text(.gameArtwork), symbol: "photo", kind: .toggle(preferences.gameArtwork) { [weak self] value in self?.preferences.gameArtwork = value }),
             PanelRow(id: "motion", title: T.text(.motion), symbol: "wind", kind: .choice(options: [T.text(.motionFull), T.text(.motionReduced)], selected: preferences.reducedMotion ? 1 : 0) { [weak self] index in
                 self?.preferences.reducedMotion = index == 1
             }),
+            PanelRow(id: "fullScreen", title: TH.text(.fullScreen), detail: TH.text(.fullScreenDetail), symbol: "arrow.up.left.and.arrow.down.right",
+                     kind: .toggle(isFullScreen) { [weak self] value in
+                         guard let self, value != self.isFullScreen else { return }
+                         self.toggleFullScreen()
+                     }),
         ]
 
         let library: [PanelRow] = [
@@ -150,6 +208,8 @@ extension AppModel {
                 self?.rescan()
                 Sounds.shared.play(.select)
             }),
+            PanelRow(id: "prepare", title: TPrep.text(.prepareNewGames), detail: TPrep.text(.prepareNewGamesDetail), symbol: "arrow.down.circle",
+                     kind: .toggle(preparesNewGames) { [weak self] value in self?.preferences.prepareNewGames = value ? nil : false }),
             PanelRow(id: "clones", title: T.text(.installedSize), kind: .info("")),
         ]
 
@@ -157,9 +217,8 @@ extension AppModel {
             self?.preferences.language = Language.allCases[index]
         })
 
+        // The name and picture are the profile's: Settings → Profiles.
         var behaviour: [PanelRow] = [
-            PanelRow(id: "name", title: T.text(.profileName), symbol: "person.crop.circle", kind: .text(preferences.profileName) { [weak self] value in self?.preferences.profileName = value }),
-        ] + profilePictureRows() + [
             PanelRow(id: "sounds", title: T.text(.sounds), symbol: "speaker.wave.2",
                      kind: .stepper(value: preferences.sounds ? preferences.soundVolume ?? 100 : 0, range: 0...100, step: 10, format: Self.percent) { [weak self] value in
                          self?.preferences.sounds = value > 0
@@ -168,6 +227,12 @@ extension AppModel {
             PanelRow(id: "music", title: T.text(.gameMusic), detail: T.text(.gameMusicDetail), symbol: "music.note",
                      kind: .stepper(value: musicVolume, range: 0...100, step: 10, format: Self.percent) { [weak self] value in
                          self?.preferences.musicVolume = value
+                     }),
+            PanelRow(id: "vibration", title: TU.text(.controllerVibration), detail: TU.text(.controllerVibrationDetail), symbol: "gamecontroller",
+                     kind: .toggle(preferences.controllerVibration ?? true) { [weak self] value in
+                         self?.preferences.controllerVibration = value ? nil : false
+                         // Turned on from the pad: a pulse at once says what it feels like.
+                         if value { Feel.shared.vibrate(.select) }
                      }),
             PanelRow(id: "hide", title: T.text(.hideWhilePlaying), symbol: "eye.slash", kind: .toggle(preferences.hideWhilePlaying) { [weak self] value in self?.preferences.hideWhilePlaying = value }),
             PanelRow(id: "hiddenTrophies", title: T.text(.alwaysShowHiddenTrophies), detail: T.text(.alwaysShowHiddenTrophiesDetail), symbol: "trophy",
@@ -184,10 +249,12 @@ extension AppModel {
             PanelRow(id: "clips", title: T.text(.clips), detail: T.format(.clipsDetail, clipSeconds), symbol: "record.circle", kind: .toggle(preferences.clips == true) { [weak self] value in
                 self?.clipsChanged(value)
             }),
-            PanelRow(id: "clipLength", title: T.text(.clipLength), symbol: "timer",
-                     kind: .stepper(value: clipSeconds, range: 15...120, step: 15, format: { T.format(.seconds, $0) }) { [weak self] value in
-                         self?.preferences.clipLength = value
+            PanelRow(id: "clipLength", title: T.text(.clipLength), detail: TH.format(.clipsCost, clipMegabytes), symbol: "timer",
+                     kind: .choice(options: ReplayBudget.lengths.map(TH.length), selected: ReplayBudget.lengths.firstIndex(of: clipSeconds) ?? 1) { [weak self] index in
+                         self?.setClipLength(ReplayBudget.lengths[index])
                      }),
+            PanelRow(id: "pauseOnMenu", title: TH.text(.pauseOnMenu), detail: TH.text(.pauseOnMenuDetail), symbol: "pause.circle",
+                     kind: .toggle(preferences.pauseOnMenu ?? true) { [weak self] value in self?.preferences.pauseOnMenu = value ? nil : false }),
         ] + saveSyncRows() + [
             PanelRow(id: "checkUpdates", title: T.text(.checkUpdates), detail: T.text(.checkUpdatesDetail), symbol: "arrow.down.circle", kind: .toggle(preferences.checkUpdates ?? true) { [weak self] value in
                 self?.preferences.checkUpdates = value
@@ -210,17 +277,32 @@ extension AppModel {
                          self?.setUpdateChannel(index == 1 ? .nightly : .stable)
                      }),
         ]
-        if let update = availableUpdate {
-            let detail = updateProgress.map { T.format(.updateDownloading, Int($0 * 100)) } ?? T.text(.updateDetail)
-            about.append(PanelRow(id: "update", title: T.format(.updateTo, update.version), detail: detail, symbol: "arrow.down.circle.fill", kind: .action(destructive: false) { [weak self] in
-                self?.installUpdate()
-            }))
+        // The launcher's own update: at most one row that acts, then the check and its state.
+        let updateState = launcherUpdateState
+        switch updateState {
+        case .ready(let version):
+            if restartAfterGame {
+                about.append(PanelRow(id: "update", title: TU.text(.noticeWaiting), detail: TU.text(.cancelRestart), symbol: "hourglass", kind: .action(destructive: false) { [weak self] in
+                    self?.cancelRestartAfterGame()
+                }))
+            } else {
+                about.append(PanelRow(id: "update", title: TU.format(.noticeReady, version) + " · " + TU.text(.restartNow), detail: TU.text(.noticeReadyDetail),
+                                      symbol: "arrow.clockwise.circle.fill", kind: .action(destructive: false) { [weak self] in self?.restartForUpdate() }))
+            }
+        case .downloading(let version, _):
+            about.append(PanelRow(id: "update", title: TU.format(.stateDownloading, version, updateState.percent ?? 0), symbol: "arrow.down.circle", kind: .info("")))
+        case .available(let version):
+            about.append(PanelRow(id: "update", title: T.format(.updateTo, version), detail: canReplaceItself ? TU.text(.stateAvailableDetail) : T.text(.updateNotWritable),
+                                  symbol: "arrow.down.circle.fill", kind: .action(destructive: false) { [weak self] in self?.installUpdate() }))
+        default:
+            break
+        }
+        if let update = readyUpdate?.release ?? availableUpdate {
             about.append(PanelRow(id: "whatsNew", title: T.text(.whatsNew), detail: update.page.absoluteString.replacingOccurrences(of: "https://", with: ""), symbol: "sparkles", kind: .action(destructive: false) {
                 NSWorkspace.shared.open(update.page)
             }))
         }
-        let checked = lastUpdateCheck.map { T.format(.lastChecked, $0.formatted(date: .omitted, time: .shortened)) } ?? T.text(.checkForUpdatesDetail)
-        about.append(PanelRow(id: "checkForUpdates", title: T.text(.checkForUpdatesNow), detail: checkingUpdates ? T.text(.checkingUpdates) : checked,
+        about.append(PanelRow(id: "checkForUpdates", title: T.text(.checkForUpdatesNow), detail: TU.checkLine(updateState),
                               symbol: "arrow.triangle.2.circlepath", kind: .action(destructive: false) { [weak self] in self?.checkForUpdatesNow() }))
         about += [
             PanelRow(id: "toolkit", title: T.text(.toolkitVersion), kind: .info(builtInToolkit.map { Toolkit.shortVersion($0.version) } ?? "—")),
@@ -251,17 +333,23 @@ extension AppModel {
                 self?.removePhone(device.id)
             }))
         }
+        advanced += browserPlayRows()
 
         return [
+            PanelCategory(id: "profiles", title: TPro.text(.profilesCategory), symbol: "person.crop.circle", rows: profileRows()),
             PanelCategory(id: "appearance", title: T.text(.appearance), symbol: "paintbrush", rows: appearance),
             PanelCategory(id: "library", title: T.text(.storage), symbol: "square.grid.2x2", rows: library),
             PanelCategory(id: "language", title: T.text(.language), symbol: "globe", rows: [language]),
             PanelCategory(id: "behaviour", title: T.text(.behaviour), symbol: "slider.horizontal.3", rows: behaviour),
+            PanelCategory(id: "power", title: TPow.text(.title), symbol: "battery.75percent", rows: powerRows()),
+            PanelCategory(id: "controllers", title: TP.text(.title), symbol: "gamecontroller", rows: controllerRows()),
+            PanelCategory(id: "shortcuts", title: TH.text(.shortcuts), symbol: "command", rows: shortcutRows()),
             PanelCategory(id: "together", title: "AnyTogether", symbol: "person.2.circle", rows: togetherRows()),
             PanelCategory(id: "broadcast", title: TB.text(.title), symbol: "dot.radiowaves.left.and.right", rows: broadcastSettingsRows()),
             PanelCategory(id: "engine", title: TE.text(.engineTitle), symbol: "gearshape.2", rows: engineRows()),
             PanelCategory(id: "fonts", title: TF.text(.title), symbol: "textformat", rows: fontRows()),
             PanelCategory(id: "advanced", title: T.text(.advanced), symbol: "wrench.and.screwdriver", rows: advanced),
+            PanelCategory(id: "steam", title: TSteam.text(.title), symbol: "gamecontroller.fill", rows: steamRows()),
             PanelCategory(id: "about", title: T.text(.about), symbol: "info.circle", rows: about),
         ]
     }
@@ -459,7 +547,8 @@ extension AppModel {
     func panelCommand(_ command: Command) -> Bool {
         let categories = panelCategories()
         guard !categories.isEmpty else { return false }
-        panelCategory = min(panelCategory, categories.count - 1)
+        // Written only when it changes: a command that changed nothing hit the end (Input's bump).
+        if panelCategory > categories.count - 1 { panelCategory = categories.count - 1 }
         let rows = categories[panelCategory].rows
         let single = categories.count == 1
         if !panelInRows && !single {
@@ -479,28 +568,52 @@ extension AppModel {
         focusRow(focusedRow(in: rows), in: rows)
         if !rows[panelRow].focusable, let first = rows.firstIndex(where: \.focusable) { focusRow(first, in: rows) }
         let row = rows[panelRow]
-        switch command {
-        case .up: movePanelRow(-1, rows)
-        case .down: movePanelRow(1, rows)
-        case .left:
-            if !change(row, by: -1) { leaveRows(single) }
-        case .right:
-            _ = change(row, by: 1)
-        case .select:
-            activate(row)
-        case .back:
-            leaveRows(single)
-        case .options:
-            closeOverlay()
-        case .previousGame, .nextGame, .home, .capture:
-            break
+        // △ on a shortcut's row clears it.
+        if command == .options, row.id.hasPrefix("shortcut-"), clearShortcut(row: row.id) { return true }
+        // With the pad a choice changes only while it is edited (✕ starts, ✕ or ○ end); the
+        // keyboard and the mouse change it at once.
+        // Written only when it changes, so a move that went nowhere still bumps.
+        var editor = rowEditor
+        let intent = editor.intent(for: command, row: row.id, kind: row.valueKind, mode: InputModeState.shared.mode)
+        if editor != rowEditor { rowEditor = editor }
+        switch intent {
+        case .move(let delta): movePanelRow(delta, rows)
+        case .change(let delta): change(row, by: delta)
+        case .activate: activate(row)
+        case .startEditing, .stopEditing: Sounds.shared.play(.select)
+        case .leaveRows:
+            // On a value with the pad, left in a panel without categories goes nowhere rather
+            // than closing it.
+            if command == .left && single && row.valueKind != .other && InputModeState.shared.mode == .pad { break }
+            // A question asked in place (AskFirst.swift) is answered Cancel first.
+            if !cancelAsk() { leaveRows(single) }
+        case .close: closeOverlay()
+        case .none: break
         }
+        return true
+    }
+
+    /// L1 and R1 in Settings (and the other panels with categories): the category before or after.
+    func panelCategoryStep(_ delta: Int) -> Bool {
+        let categories = panelCategories()
+        guard categories.count > 1, capturing == nil, shortcutCapture == nil else { return true }
+        let next = min(categories.count - 1, max(0, panelCategory + delta))
+        guard next != panelCategory else { return true }
+        if rowEditor.editing != nil { rowEditor.stop() }
+        withAnimation(Motion.focus) { panelCategory = next }
+        panelRow = 0
+        if panelInRows {
+            let rows = categories[next].rows
+            if let first = rows.firstIndex(where: \.focusable) { focusRow(first, in: rows) } else { panelInRows = false }
+        }
+        Sounds.shared.play(.move)
         return true
     }
 
     private func movePanelCategory(_ delta: Int, count: Int) {
         let next = min(count - 1, max(0, panelCategory + delta))
         guard next != panelCategory else { return }
+        if rowEditor.editing != nil { rowEditor.stop() }
         panelCategory = next
         panelRow = 0
         Sounds.shared.play(.move)
@@ -514,6 +627,7 @@ extension AppModel {
     }
 
     private func leaveRows(_ single: Bool) {
+        if rowEditor.editing != nil { rowEditor.stop() }
         if single { closeOverlay(); return }
         panelInRows = false
         Sounds.shared.play(.back)
@@ -596,8 +710,9 @@ struct SettingsPanel: View {
                     .foregroundStyle(focused ? Color.black : .white.opacity(selected ? 1 : 0.7))
                     .padding(.horizontal, 18 * scale)
                     .frame(height: 52 * scale)
-                    .background(RoundedRectangle(cornerRadius: 12 * scale, style: .continuous).fill(focused ? Color.white : Color.white.opacity(selected ? 0.12 : 0)))
+                    .background(FocusFill(RoundedRectangle(cornerRadius: 12 * scale, style: .continuous), focused: focused, idle: Color.white.opacity(selected ? 0.12 : 0), rim: selected))
                     .contentShape(Rectangle())
+                    .hoverTick("category-\(index)")
                     .onTapGesture {
                         model.panelCategory = index
                         model.panelRow = 0
@@ -619,7 +734,7 @@ struct SettingsPanel: View {
         .padding(.top, 70 * scale)
         .padding(.bottom, 50 * scale)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.black.opacity(0.74).background(.ultraThinMaterial))
+        .screenFrost(0.74)
         .animation(Motion.focus, value: model.panelCategory)
     }
 }
@@ -644,7 +759,7 @@ struct SidePanel: View {
             .padding(36 * scale)
             .frame(width: 560 * scale, alignment: .topLeading)
             .frame(maxHeight: .infinity, alignment: .topLeading)
-            .background(Color(white: 0.06).opacity(0.92).background(.ultraThinMaterial))
+            .panelFrost()
             .overlay(Rectangle().fill(Color.white.opacity(0.08)).frame(width: 1), alignment: .leading)
         }
     }
@@ -673,11 +788,13 @@ struct RowList: View {
     private var content: some View {
         VStack(spacing: 8 * scale) {
             ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
-                RowView(row: row, focused: focusedRow == index)
+                RowView(row: row, focused: focusedRow == index, editing: focusedRow == index && model.rowEditor.isEditing(row.id))
                     .id(row.id)
+                    .hoverTick("row-\(row.id)")
                     .onTapGesture {
                         if model.overlayHasCategories { model.panelInRows = true }
                         model.focusRow(index, in: rows)
+                        if model.rowEditor.editing != nil { model.rowEditor.stop() }
                         model.activate(row)
                     }
             }
@@ -709,7 +826,10 @@ struct RowList: View {
 struct RowView: View {
     let row: PanelRow
     let focused: Bool
+    /// The pad is changing this choice: its value wears the accent and its arrows show.
+    var editing = false
     @EnvironmentObject private var model: AppModel
+    @ObservedObject private var inputMode = InputModeState.shared
     @Environment(\.scale) private var scale
     @State private var text = ""
     @Environment(\.previewRender) private var previewRender
@@ -722,7 +842,9 @@ struct RowView: View {
                     .overlay(Circle().strokeBorder(model.accent, lineWidth: 2.5 * scale).padding(-3 * scale).opacity(person.speaking ? 1 : 0))
                     .animation(.easeOut(duration: 0.15), value: person.speaking)
                     .overlay(alignment: .bottomTrailing) {
-                        if let status = person.status, status != .offline {
+                        if person.appearingOffline {
+                            AppearingOfflineDot(size: 14 * scale).offset(x: 3 * scale, y: 3 * scale)
+                        } else if let status = person.status, status != .offline {
                             Circle().fill(status == .playing ? model.accent : Color(red: 0.3, green: 0.85, blue: 0.45))
                                 .frame(width: 10 * scale, height: 10 * scale)
                                 .overlay(Circle().strokeBorder(focused ? Color.white : Color(white: 0.1), lineWidth: 2 * scale))
@@ -739,17 +861,19 @@ struct RowView: View {
                     .foregroundStyle(destructive && !focused ? Color(red: 1, green: 0.6, blue: 0.55) : foreground.opacity(row.focusable ? 1 : 0.62))
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail = row.detail {
-                    Text(detail).font(.display(13 * scale)).foregroundStyle(foreground.opacity(0.55)).lineLimit(2).truncationMode(.middle)
+                    Text(detail).font(.display(13 * scale)).foregroundStyle(foreground.opacity(0.55)).lineLimit(row.wraps ? nil : 2).truncationMode(.middle)
+                        .fixedSize(horizontal: false, vertical: row.wraps)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 12 * scale)
+            if let level = row.person?.level { LevelBadgeView(badge: level, size: 30 * scale) }
             value.foregroundStyle(foreground)
         }
         .padding(.horizontal, 18 * scale)
         .padding(.vertical, 8 * scale)
         .frame(minHeight: 58 * scale)
-        .background(RoundedRectangle(cornerRadius: 12 * scale, style: .continuous).fill(focused ? Color.white : Color.white.opacity(row.focusable ? 0.07 : 0)))
+        .background(FocusFill(RoundedRectangle(cornerRadius: 12 * scale, style: .continuous), focused: focused, idle: Color.white.opacity(row.focusable ? 0.07 : 0)))
         .shadow(color: .white.opacity(focused ? 0.22 : 0), radius: 12 * scale)
         .scaleEffect(focused ? 1.015 : 1)
         .animation(Motion.focus, value: focused)
@@ -770,6 +894,7 @@ struct RowView: View {
                     .lineLimit(1).minimumScaleFactor(0.7).frame(minWidth: 120 * scale, maxWidth: 190 * scale)
                 chevron("chevron.right", enabled: selected < options.count - 1) { set(selected + 1) }
             }
+            .modifier(EditRing(editing: editing))
         case .toggle(let value, let set):
             Switch(on: value, accent: model.accent, focused: focused) { set(!value); Sounds.shared.play(.move) }
         case .stepper(let value, let range, let step, let format, let set):
@@ -778,12 +903,13 @@ struct RowView: View {
                 Text(format(value)).font(.display(16 * scale, .semibold)).monospacedDigit().frame(minWidth: 70 * scale)
                 chevron("plus", enabled: value < range.upperBound) { set(min(range.upperBound, value + step)) }
             }
+            .modifier(EditRing(editing: editing))
         case .action:
             Image(systemName: "chevron.right").font(.system(size: 14 * scale, weight: .semibold)).opacity(0.6)
         case .info(let value):
             Text(value).font(.display(15 * scale, .medium)).opacity(0.7).textSelection(.enabled)
         case .keys(let sources, let capturing, _):
-            KeyCaps(sources: sources, capturing: capturing, focused: focused)
+            KeyCaps(sources: sources, capturing: capturing, focused: focused, prompt: row.id.hasPrefix("shortcut-pad-") ? TH.text(.pressButtons) : nil)
         case .text(let value, let set):
             if previewRender {
                 // A text field does not draw offscreen.
@@ -801,13 +927,17 @@ struct RowView: View {
         }
     }
 
-    private func chevron(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+    /// A value's arrow for the pointer. With the pad they show only while the value is edited,
+    /// where they say left and right change it.
+    @ViewBuilder private func chevron(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
+        let shown = inputMode.mode == .keyboard || editing
         Button(action: { action(); Sounds.shared.play(.move) }) {
             Image(systemName: symbol).font(.system(size: 13 * scale, weight: .bold)).frame(width: 26 * scale, height: 26 * scale).contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .opacity(enabled ? 0.85 : 0.25)
-        .disabled(!enabled)
+        .opacity(shown ? (enabled ? 0.85 : 0.25) : 0)
+        .disabled(!enabled || !shown)
+        .animation(Motion.focus, value: shown)
     }
 }
 
@@ -836,13 +966,15 @@ struct KeyCaps: View {
     let sources: [String]
     let capturing: Bool
     let focused: Bool
+    /// What the row waits for, if not a key (Settings → Shortcuts: buttons).
+    var prompt: String?
     @Environment(\.scale) private var scale
     @State private var pulse = false
 
     var body: some View {
         HStack(spacing: 6 * scale) {
             if capturing {
-                Text(T.text(.pressKey)).font(.display(15 * scale, .semibold))
+                Text(prompt ?? T.text(.pressKey)).font(.display(15 * scale, .semibold))
                     .opacity(pulse ? 0.45 : 1)
                     .onAppear { withAnimation(.easeInOut(duration: 0.7).repeatForever()) { pulse = true } }
             } else if sources.allSatisfy({ $0 == Controls.unbound }) {
@@ -956,5 +1088,26 @@ extension PadAction {
         case .rightStickUp, .rightStickDown, .rightStickLeft, .rightStickRight: return "r.joystick"
         case .stickModifier: return "tortoise"
         }
+    }
+}
+
+/// The value of a choice the pad is changing: an accent ring around it, as the console marks a
+/// value being set.
+struct EditRing: ViewModifier {
+    let editing: Bool
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.scale) private var scale
+
+    func body(content: Content) -> some View {
+        content
+            .padding(.horizontal, 6 * scale)
+            .padding(.vertical, 3 * scale)
+            .background {
+                Capsule().fill(model.accent.opacity(editing ? 0.22 : 0))
+            }
+            .overlay {
+                Capsule().strokeBorder(model.accent, lineWidth: 2 * scale).opacity(editing ? 1 : 0)
+            }
+            .animation(Motion.focus, value: editing)
     }
 }

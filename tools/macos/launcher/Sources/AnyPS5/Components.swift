@@ -42,16 +42,41 @@ extension Font {
     }
 }
 
-/// A dark, frosted panel.
+/// A dark, frosted panel; in the Glass theme a pane of frosted ice (see IceSurface).
 struct Glass: ViewModifier {
     var radius: CGFloat
     var opacity: Double = 0.38
 
     func body(content: Content) -> some View {
-        content
-            .background(.ultraThinMaterial.opacity(0.55), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .background(Color.black.opacity(opacity), in: RoundedRectangle(cornerRadius: radius, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: radius, style: .continuous).strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
+        content.iceSurface(RoundedRectangle(cornerRadius: radius, style: .continuous), classicOpacity: opacity)
+    }
+}
+
+/// The white ring and glow a focused element wears; in the Glass theme an ice rim with a cold
+/// glow.
+struct FocusRing: ViewModifier {
+    let focused: Bool
+    let radius: CGFloat
+    let width: CGFloat
+    @Environment(\.look) private var look
+
+    func body(content: Content) -> some View {
+        content.overlay(
+            Group {
+                if look.glass {
+                    RoundedRectangle(cornerRadius: radius + width, style: .continuous)
+                        .strokeBorder(LinearGradient(colors: [.white, Ice.frost, Ice.cyan], startPoint: .topLeading, endPoint: .bottomTrailing), lineWidth: width)
+                        .padding(-width * 1.6)
+                        .opacity(focused ? 1 : 0)
+                        .shadow(color: Ice.cyan.opacity(focused ? 0.55 : 0), radius: 14)
+                } else {
+                    RoundedRectangle(cornerRadius: radius + width, style: .continuous)
+                        .strokeBorder(Color.white.opacity(focused ? 0.95 : 0), lineWidth: width)
+                        .padding(-width * 1.6)
+                        .shadow(color: .white.opacity(focused ? 0.45 : 0), radius: 10)
+                }
+            }
+        )
     }
 }
 
@@ -60,16 +85,12 @@ extension View {
 
     /// The white ring and glow a focused element wears.
     func focusRing(_ focused: Bool, radius: CGFloat, width: CGFloat = 3) -> some View {
-        overlay(
-            RoundedRectangle(cornerRadius: radius + width, style: .continuous)
-                .strokeBorder(Color.white.opacity(focused ? 0.95 : 0), lineWidth: width)
-                .padding(-width * 1.6)
-                .shadow(color: .white.opacity(focused ? 0.45 : 0), radius: 10)
-        )
+        modifier(FocusRing(focused: focused, radius: radius, width: width))
     }
 }
 
-/// A console button: translucent until focused, then solid white.
+/// A console button: translucent until focused, then solid white; in the Glass theme a pane of
+/// glass that turns into the ice chip.
 struct ConsoleButton: View {
     let title: String
     var symbol: String?
@@ -77,30 +98,42 @@ struct ConsoleButton: View {
     var prominent = false
     var destructive = false
     var minWidth: CGFloat = 0
+    /// The Liquid Glass id this button's glass morphs by (see ButtonGlass).
+    var lens: (id: String, namespace: Namespace.ID)?
     let action: () -> Void
     @Environment(\.scale) private var scale
+    @Environment(\.look) private var look
     @State private var hovering = false
 
     var body: some View {
+        let shape = RoundedRectangle(cornerRadius: 14 * scale, style: .continuous)
         Button(action: action) {
-            HStack(spacing: 10 * scale) {
+            let label = HStack(spacing: 10 * scale) {
                 if let symbol { Image(systemName: symbol).font(.system(size: 17 * scale, weight: .semibold)) }
                 if !title.isEmpty { Text(title).font(.display(19 * scale, .semibold)) }
             }
             .padding(.horizontal, (title.isEmpty ? 18 : 30) * scale)
             .frame(minWidth: minWidth * scale, minHeight: 54 * scale)
-            .foregroundStyle(focused ? Color.black : (destructive ? Color(red: 1, green: 0.55, blue: 0.5) : .white))
-            .background(
-                RoundedRectangle(cornerRadius: 14 * scale, style: .continuous)
-                    .fill(focused ? Color.white : Color.white.opacity(prominent ? 0.2 : (hovering ? 0.16 : 0.1)))
-            )
-            .overlay(RoundedRectangle(cornerRadius: 14 * scale, style: .continuous).strokeBorder(Color.white.opacity(focused ? 0 : 0.12), lineWidth: 1))
-            .shadow(color: .white.opacity(focused ? 0.28 : 0), radius: 18 * scale)
-            .scaleEffect(focused ? 1.05 : 1)
-            .contentShape(Rectangle())
+            if look.glass {
+                label
+                    .foregroundStyle(focused ? Ice.ink : (destructive ? Color(red: 1, green: 0.6, blue: 0.55) : .white))
+                    .modifier(ButtonGlass(shape: shape, focused: focused, idle: prominent ? 0.1 : (hovering ? 0.08 : 0), lens: lens))
+                    .sheenSweep(focused, in: shape)
+                    .scaleEffect(focused ? 1.04 : 1)
+                    .contentShape(Rectangle())
+            } else {
+                label
+                    .foregroundStyle(focused ? Color.black : (destructive ? Color(red: 1, green: 0.55, blue: 0.5) : .white))
+                    .background(shape.fill(focused ? Color.white : Color.white.opacity(prominent ? 0.2 : (hovering ? 0.16 : 0.1))))
+                    .overlay(shape.strokeBorder(Color.white.opacity(focused ? 0 : 0.12), lineWidth: 1))
+                    .shadow(color: .white.opacity(focused ? 0.28 : 0), radius: 18 * scale)
+                    .scaleEffect(focused ? 1.05 : 1)
+                    .contentShape(Rectangle())
+            }
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
+        .hoverTick("button-\(title)-\(symbol ?? "")")
         .animation(Motion.focus, value: focused)
     }
 }
@@ -168,21 +201,42 @@ extension EnvironmentValues {
         get { self[HintHover.self] }
         set { self[HintHover.self] = newValue }
     }
+
+    /// Settings → Controllers → Confirm Button is Circle: the hints show ○ to select and ✕ to go back.
+    var circleConfirms: Bool {
+        get { self[CircleConfirms.self] }
+        set { self[CircleConfirms.self] = newValue }
+    }
+}
+
+struct CircleConfirms: EnvironmentKey {
+    static let defaultValue = false
 }
 
 /// A key or button glyph with what it does. A click does what the key does: the whole pill when
 /// its glyphs all give one command ("↩ / ✕"), each glyph on its own when they give several (the
 /// arrows, Q and E). The click goes through the same handler as the key.
 struct Hint: View {
-    let keys: String
     let label: String
     @Environment(\.scale) private var scale
+    @Environment(\.circleConfirms) private var circleConfirms
+    @ObservedObject private var inputMode = InputModeState.shared
+
+    /// The keys of the input in use: a controller's glyphs or the keyboard's, never both.
+    private var keys: String { HintKeys.keys(allKeys, for: inputMode.mode) }
+
+    init(keys: String, label: String) {
+        self.allKeys = keys
+        self.label = label
+    }
+
+    private let allKeys: String
 
     var body: some View {
         if let command = HintKeys.single(keys) {
             Button { Input.shared.press(command) } label: {
                 HStack(spacing: 8 * scale) {
-                    keycap(Text(keys).font(glyphFont).padding(.horizontal, 7 * scale).padding(.vertical, 3 * scale))
+                    keycap(Text(ConfirmButton.glyphs(keys, circleConfirms: circleConfirms)).font(glyphFont).padding(.horizontal, 7 * scale).padding(.vertical, 3 * scale))
                     Text(label).font(.display(13 * scale, .medium))
                 }
             }
@@ -193,7 +247,7 @@ struct Hint: View {
                     ForEach(Array(HintKeys.tokens(keys).enumerated()), id: \.offset) { _, token in
                         if let command = token.command {
                             Button { Input.shared.press(command) } label: {
-                                Text(token.text).font(glyphFont)
+                                Text(ConfirmButton.glyphs(token.text, circleConfirms: circleConfirms)).font(glyphFont)
                             }
                             .buttonStyle(HintGlyphStyle(command: command))
                         } else {
@@ -257,6 +311,7 @@ private struct HintPress<Label: View>: View {
             .overlay(shape.strokeBorder(Color.white.opacity(whole && lit ? 0.14 : 0), lineWidth: 1))
             .contentShape(shape)
             .pointingHand($hovering)
+            .hoverTick("hint-\(command.rawValue)-\(whole)")
             .padding(.horizontal, whole ? -inset.width : 0)
             .padding(.vertical, whole ? -inset.height : 0)
             .scaleEffect(pressed ? (whole ? 0.96 : 0.9) : 1)
@@ -293,6 +348,7 @@ struct HintBar: View {
             Hint(keys: "esc / ○", label: T.text(.hintBack))
             if options { Hint(keys: "O / △", label: T.text(.hintOptions)) }
         }
+        .legible(14)
     }
 }
 

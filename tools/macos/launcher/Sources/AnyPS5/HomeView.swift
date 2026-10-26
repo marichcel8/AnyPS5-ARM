@@ -5,35 +5,49 @@ import SwiftUI
 struct Backdrop: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.stillBackground) private var stillBackground
+    @Environment(\.look) private var look
 
     var body: some View {
         let preferences = model.preferences
-        let paused = model.running != nil || !model.active || preferences.reducedMotion
+        let paused = model.running != nil || !model.active || preferences.reducedMotion || model.powerDimmed
         ZStack {
             if let design = model.activeDesign, let file = model.themes.file(design.background, of: design) {
                 if design.backgroundIsVideo {
                     LoopingVideo(url: file, paused: paused)
                 } else {
-                    DriftingImage(url: file, animated: !preferences.reducedMotion)
+                    DriftingImage(url: file, animated: !preferences.reducedMotion && !paused)
                 }
             } else {
             switch preferences.backdrop {
             case .image where preferences.backdropFile != nil:
-                DriftingImage(url: URL(fileURLWithPath: preferences.backdropFile!), animated: !preferences.reducedMotion)
+                DriftingImage(url: URL(fileURLWithPath: preferences.backdropFile!), animated: !preferences.reducedMotion && !paused)
             case .video where preferences.backdropFile != nil:
                 LoopingVideo(url: URL(fileURLWithPath: preferences.backdropFile!), paused: paused)
             default:
-                if let still = stillBackground {
+                // Glass's see-through window: the desktop behind it is the background.
+                if look.seeThrough {
+                    Color.clear
+                } else if let still = stillBackground {
                     Image(nsImage: still).resizable()
                 } else {
                     ThemeBackground(theme: model.lookStyle, palette: model.activeDesign?.palette, paused: paused)
                 }
             }
             }
-            if preferences.onboarded, preferences.gameArtwork, model.overlay != .settings, let game = model.selectedGame, let background = game.background {
-                GameArtwork(url: background, animated: !preferences.reducedMotion)
-                    .id(game.id)
-                    .transition(.opacity)
+            // Over the see-through window the key art is laid only when asked for (Show Game Art
+            // Behind), and lets some of the desktop through.
+            let artwork = look.seeThrough ? preferences.glassArtwork == true : preferences.gameArtwork
+            if preferences.onboarded, artwork, model.overlay != .settings, let game = model.selectedGame, let background = game.background {
+                Group {
+                    if look.glass {
+                        FrostedArtwork(url: background, animated: !look.reduceMotion && !paused, solid: look.solid)
+                            .opacity(look.seeThrough ? 0.72 : 1)
+                    } else {
+                        GameArtwork(url: background, animated: !preferences.reducedMotion && !paused)
+                    }
+                }
+                .id(game.id)
+                .transition(.opacity)
             }
         }
         .animation(Motion.fade, value: model.selectedGame?.id)
@@ -60,10 +74,74 @@ struct GameArtwork: View {
                 LinearGradient(stops: [.init(color: .black.opacity(0.55), location: 0), .init(color: .clear, location: 0.3), .init(color: .clear, location: 0.55), .init(color: .black.opacity(0.85), location: 1)], startPoint: .top, endPoint: .bottom)
             }
         }
-        .onAppear {
-            guard animated else { return }
-            withAnimation(.easeInOut(duration: 24).repeatForever(autoreverses: true)) { drift = true }
+        .drifting($drift, animated: animated, period: 24)
+    }
+}
+
+/// The Glass theme's key art: pic0.png seen through frosted ice — blurred once at a small size,
+/// a navy scrim over it everywhere (deeper where the text sits), a cold light from the top right
+/// and fine grain. With Reduce Transparency the art gives way to the theme's solid colors.
+struct FrostedArtwork: View {
+    let url: URL
+    var animated: Bool
+    var solid = false
+    @ObservedObject private var artwork = Artwork.shared
+    @State private var drift = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack {
+                if solid {
+                    LinearGradient(colors: [Ice.solid, Ice.scrim], startPoint: .topTrailing, endPoint: .bottomLeading)
+                } else {
+                    if let image = artwork.frosted(url) {
+                        Image(nsImage: image).resizable().interpolation(.medium).aspectRatio(contentMode: .fill)
+                            .frame(width: proxy.size.width, height: proxy.size.height)
+                            .scaleEffect(drift ? 1.09 : 1.04, anchor: .topTrailing)
+                            .clipped()
+                            .transition(.opacity)
+                    }
+                    // A cold cast over any art: ice is blue whatever is behind it.
+                    LinearGradient(colors: [Ice.frost, Color(red: 0.32, green: 0.56, blue: 0.82)], startPoint: .topTrailing, endPoint: .bottomLeading)
+                        .blendMode(.color)
+                        .opacity(0.32)
+                    Ice.scrim.opacity(GlassRecipe.scrimOpacity)
+                    LinearGradient(stops: [.init(color: Ice.scrim.opacity(0.5), location: 0), .init(color: Ice.scrim.opacity(0.18), location: 0.5), .init(color: .clear, location: 0.85)], startPoint: .leading, endPoint: .trailing)
+                    LinearGradient(stops: [.init(color: Ice.scrim.opacity(0.3), location: 0), .init(color: .clear, location: 0.28), .init(color: .clear, location: 0.5), .init(color: Ice.scrim.opacity(0.72), location: 1)], startPoint: .top, endPoint: .bottom)
+                    RadialGradient(colors: [Ice.frost.opacity(0.16), .clear], center: UnitPoint(x: 0.88, y: -0.08), startRadius: 0, endRadius: proxy.size.width * 0.5)
+                    // Where the pane refracts: a soft streak of light, cold along one edge.
+                    LightStreak(drift: drift)
+                    GrainLayer(strength: 0.045)
+                }
+            }
+            .animation(.easeOut(duration: 0.35), value: artwork.frosted(url) != nil)
         }
+        .drifting($drift, animated: animated, period: 28)
+    }
+}
+
+/// A diagonal streak of light across the Glass theme's key art, moving a little with its drift.
+struct LightStreak: View {
+    var drift: Bool
+
+    var body: some View {
+        GeometryReader { proxy in
+            let width = proxy.size.width, height = proxy.size.height
+            ZStack {
+                LinearGradient(stops: [.init(color: .white.opacity(0), location: 0), .init(color: .white.opacity(0.07), location: 0.5), .init(color: .white.opacity(0), location: 1)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: width * 0.16)
+                LinearGradient(stops: [.init(color: Ice.cyan.opacity(0), location: 0), .init(color: Ice.cyan.opacity(0.07), location: 0.5), .init(color: Ice.cyan.opacity(0), location: 1)],
+                               startPoint: .leading, endPoint: .trailing)
+                    .frame(width: 22)
+                    .offset(x: width * 0.08)
+            }
+            .frame(height: height * 2)
+            .rotationEffect(.degrees(28))
+            .position(x: width * (drift ? 0.66 : 0.62), y: height * 0.45)
+        }
+        .blendMode(.plusLighter)
+        .allowsHitTesting(false)
     }
 }
 
@@ -103,16 +181,24 @@ struct HomeView: View {
 struct TopBar: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
+    @Environment(\.look) private var look
+    @Namespace private var lens
 
     var body: some View {
         HStack(spacing: 22 * scale) {
             Text(T.text(.games))
                 .font(.display(24 * scale, .semibold))
                 .foregroundStyle(.white)
+                .legible(14)
             if model.scanning {
                 ProgressView().controlSize(.small).tint(.white).scaleEffect(scale)
             }
             Spacer()
+            if model.showsUpdateNotice {
+                UpdateNoticeView()
+                    .transition(.opacity.combined(with: .offset(y: -8 * scale)))
+                    .padding(.trailing, 6 * scale)
+            }
             iconButton("square.grid.3x3.fill", index: 0) { model.open(.library) }
             iconButton("gearshape.fill", index: 1) { model.open(.settings) }
             iconButton("person.2.fill", index: 2, badge: model.togetherRequests.incoming.count + model.friendsOnline) { model.open(.friends) }
@@ -121,39 +207,124 @@ struct TopBar: View {
             iconButton(model.voiceCall == nil ? (model.party == nil ? "person.3" : "person.3.fill") : (model.micSending ? "mic.fill" : "mic.slash.fill"),
                        index: 4, badge: model.partyInvites.count, ring: !model.voiceSpeaking.isEmpty) { model.open(.party) }
             iconButton(model.social.notifications.unread > 0 ? "bell.badge.fill" : "bell.fill", index: 5, badge: model.social.notifications.unread) { model.openNotifications() }
+            // A controller running out of battery says so here (and in Settings → Controllers).
+            if let line = PadTroubleshooter.statusLine(Controllers.shared.pads) { PadStatusPill(text: line) }
             PhoneIndicator(phone: model.phone, connecting: model.phoneConnecting, badges: model.phoneBadges)
             HStack(spacing: 10 * scale) {
                 // Signed in to AnyTogether: the avatar and name others see.
                 let name = model.togetherUser?.displayName ?? model.preferences.profileName
                 ProfileAvatar(url: model.togetherUser?.avatar, name: name, size: 36 * scale, glow: false, picture: model.profilePicture)
-                Text(name).font(.display(16 * scale, .medium)).foregroundStyle(.white.opacity(0.9))
+                    .overlay(alignment: .bottomTrailing) {
+                        // Appearing offline: a moon where friends would see a dot.
+                        if model.togetherUser != nil, model.appearingOffline { AppearingOfflineDot(size: 15 * scale).offset(x: 3 * scale, y: 3 * scale) }
+                    }
+                Text(name).font(.display(16 * scale, .medium)).foregroundStyle(.white.opacity(0.9)).legible(12)
+                if let level = model.myLevel { LevelBadgeView(badge: level.badge, size: 30 * scale) }
             }
-            Clock()
+            Clock().legible(12)
         }
+        .glassGroup(look, spacing: 10 * scale)
+        .animation(Motion.overlay, value: model.showsUpdateNotice)
     }
 
     private func iconButton(_ symbol: String, index: Int, badge: Int = 0, ring: Bool = false, action: @escaping () -> Void) -> some View {
         let focused = model.focus == .top(index) && model.overlay == nil
         return Button(action: action) {
-            Image(systemName: symbol)
-                .font(.system(size: 18 * scale, weight: .semibold))
-                .foregroundStyle(focused ? Color.black : .white.opacity(0.9))
-                .frame(width: 44 * scale, height: 44 * scale)
-                .background(Circle().fill(focused ? Color.white : Color.white.opacity(0.1)))
+            Group {
+                let icon = Image(systemName: symbol)
+                    .font(.system(size: 18 * scale, weight: .semibold))
+                    .frame(width: 44 * scale, height: 44 * scale)
+                if look.glass {
+                    icon.foregroundStyle(focused ? Ice.ink : .white.opacity(0.92))
+                        .modifier(ButtonGlass(shape: Circle(), focused: focused, lens: ("top-\(index)", lens)))
+                } else {
+                    icon.foregroundStyle(focused ? Color.black : .white.opacity(0.9))
+                        .background(Circle().fill(focused ? Color.white : Color.white.opacity(0.1)))
+                }
+            }
                 .overlay(Circle().strokeBorder(model.accent, lineWidth: 2.5 * scale).padding(-3 * scale).opacity(ring ? 1 : 0).animation(.easeOut(duration: 0.15), value: ring))
                 .overlay(alignment: .topTrailing) {
                     // Friends online or asking, in the accent.
                     if badge > 0 {
-                        Text("\(min(badge, 99))").font(.display(11 * scale, .bold)).foregroundStyle(.white)
+                        Text("\(min(badge, 99))").font(.display(11 * scale, .bold)).foregroundStyle(look.glass ? model.accent.onFill : .white)
                             .padding(.horizontal, 5 * scale).frame(minWidth: 18 * scale, minHeight: 18 * scale)
                             .background(Capsule().fill(model.accent)).offset(x: 4 * scale, y: -4 * scale)
                     }
                 }
                 .scaleEffect(focused ? 1.1 : 1)
-                .shadow(color: .white.opacity(focused ? 0.4 : 0), radius: 10 * scale)
+                .shadow(color: .white.opacity(focused && !look.glass ? 0.4 : 0), radius: 10 * scale)
         }
         .buttonStyle(.plain)
+        .hoverTick("top-\(index)")
         .animation(Motion.focus, value: focused)
+    }
+}
+
+/// The launcher's own update, ready: a quiet line beside the top bar's buttons with Restart Now
+/// and Later; nothing blocks, nothing comes back after Later. With a game running, Restart Now
+/// waits for it and the line says so.
+struct UpdateNoticeView: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.scale) private var scale
+    @Environment(\.look) private var look
+
+    var body: some View {
+        let waiting = model.restartAfterGame
+        let version = model.readyUpdate?.release.version ?? ""
+        HStack(spacing: 12 * scale) {
+            Image(systemName: waiting ? "hourglass" : "arrow.down.circle.fill")
+                .font(.system(size: 16 * scale, weight: .semibold))
+                .foregroundStyle(model.accent)
+            Text(waiting ? TU.text(.noticeWaiting) : TU.format(.noticeReady, version))
+                .font(.display(15 * scale, .medium))
+                .foregroundStyle(.white.opacity(0.92))
+                .lineLimit(1)
+                .fixedSize()
+            HStack(spacing: 6 * scale) {
+                pill(waiting ? TU.text(.cancelRestart) : TU.text(.restartNow), index: 0) {
+                    waiting ? model.cancelRestartAfterGame() : model.restartForUpdate()
+                }
+                if !waiting {
+                    pill(TU.text(.later), index: 1) { model.updateLater() }
+                }
+            }
+        }
+        .padding(.leading, 16 * scale)
+        .padding(.trailing, 5 * scale)
+        .frame(height: 44 * scale)
+        .modifier(NoticeCapsule())
+    }
+
+    private func pill(_ title: String, index: Int, action: @escaping () -> Void) -> some View {
+        let focused = model.focus == .notice(index) && model.overlay == nil
+        return Button(action: action) {
+            Text(title)
+                .font(.display(13 * scale, .semibold))
+                .foregroundStyle(focused ? (look.glass ? Ice.ink : Color.black) : .white.opacity(index == 0 ? 0.95 : 0.7))
+                .padding(.horizontal, 14 * scale)
+                .frame(height: 34 * scale)
+                .background(FocusFill(Capsule(), focused: focused, idle: Color.white.opacity(index == 0 ? 0.14 : 0.06)))
+                .contentShape(Capsule())
+                .scaleEffect(focused ? 1.05 : 1)
+        }
+        .buttonStyle(.plain)
+        .hoverTick("notice-\(index)")
+        .animation(Motion.focus, value: focused)
+    }
+}
+
+/// The update notice's capsule: dark frost, or a pane of glass in the Glass theme.
+private struct NoticeCapsule: ViewModifier {
+    @Environment(\.look) private var look
+
+    func body(content: Content) -> some View {
+        if look.glass {
+            content.iceSurface(Capsule(), shadow: false)
+        } else {
+            content
+                .background(Capsule().fill(Color.black.opacity(0.28)).background(.ultraThinMaterial, in: Capsule()))
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.1), lineWidth: 1))
+        }
     }
 }
 
@@ -180,6 +351,7 @@ struct TileRow: View {
                     GameTile(game: game, size: selected ? large : small, focused: selected && model.focus == .tiles && model.overlay == nil)
                         .offset(x: x, y: selected ? 0 : (large - small) * 0.18)
                         .opacity(offset < 0 ? 0.0 : 1)
+                        .hoverTick("tile-\(game.id)")
                         .onTapGesture(count: 2) { model.selected = index; model.primaryAction(game) }
                         .onTapGesture {
                             if model.selected != index { Sounds.shared.play(.move) }
@@ -193,8 +365,9 @@ struct TileRow: View {
                                 .font(.display(22 * scale, .semibold))
                                 .foregroundStyle(.white)
                                 .lineLimit(2)
-                            StateLabel(state: model.state(of: game))
+                            StateLabel(state: model.state(of: game), game: game)
                         }
+                        .legible(16)
                         .frame(width: label - gap, alignment: .leading)
                         .offset(x: leading + large + gap * 1.4, y: large * 0.32)
                         .transition(.opacity)
@@ -213,6 +386,7 @@ struct GameTile: View {
     let focused: Bool
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
+    @Environment(\.look) private var look
 
     var body: some View {
         let state = model.state(of: game)
@@ -225,10 +399,16 @@ struct GameTile: View {
                 Image(systemName: "gamecontroller.fill").font(.system(size: size * 0.32)).foregroundStyle(.white.opacity(0.5))
             }
             overlay(for: state)
+            if look.glass {
+                // The icon under glass: light across its top, the ice rim around it.
+                LinearGradient(stops: [.init(color: .white.opacity(focused ? 0.2 : 0.12), location: 0), .init(color: .white.opacity(0), location: 0.42)], startPoint: .topLeading, endPoint: .bottomTrailing)
+                    .allowsHitTesting(false)
+                IceRim(shape: RoundedRectangle(cornerRadius: radius, style: .continuous), strength: focused ? 0.9 : 0.6)
+            }
         }
         .frame(width: size, height: size)
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
-        .shadow(color: .black.opacity(0.45), radius: focused ? 22 * scale : 10 * scale, y: 8 * scale)
+        .shadow(color: look.glass ? Ice.scrim.opacity(0.7) : .black.opacity(0.45), radius: focused ? 22 * scale : 10 * scale, y: 8 * scale)
         .focusRing(focused, radius: radius)
         .animation(Motion.focus, value: focused)
         .animation(Motion.layout, value: size)
@@ -269,15 +449,20 @@ struct GameTile: View {
 
 struct StateLabel: View {
     let state: GameState
+    /// The game it is about, for what the background preparation adds.
+    var game: Game? = nil
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
 
     var body: some View {
         let (symbol, text, tint): (String, String, Color) = {
             switch state {
+            case .locked where model.prepare.pending.contains(game?.id ?? ""): return ("clock", TPrep.text(.waitingToPrepare), .white.opacity(0.75))
             case .locked: return ("lock.fill", T.text(.locked), .white.opacity(0.75))
             case .unreadable: return ("xmark.octagon.fill", T.text(.unreadableDump), Color(red: 1, green: 0.6, blue: 0.55))
             case .queued: return ("clock", T.text(.queued), .white.opacity(0.75))
+            case .installing where game.map(model.isPreparing) == true:
+                return model.prepare.paused ? ("pause.circle.fill", TPrep.text(.preparingPaused), .white.opacity(0.75)) : ("arrow.down.circle.fill", TPrep.text(.preparing), model.accent)
             case .installing(let step, _): return ("arrow.down.circle.fill", step.title, model.accent)
             case .failed: return ("exclamationmark.triangle.fill", T.text(.failed), Color(red: 1, green: 0.6, blue: 0.55))
             case .installed(let outdated): return (outdated ? "arrow.triangle.2.circlepath" : "checkmark.circle.fill", outdated ? T.text(.updateAvailable) : T.text(.ready), outdated ? Color(red: 1, green: 0.82, blue: 0.4) : .white.opacity(0.75))
@@ -297,6 +482,8 @@ struct HeroInfo: View {
     let game: Game
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
+    @Environment(\.look) private var look
+    @Namespace private var lens
 
     var body: some View {
         let state = model.state(of: game)
@@ -307,27 +494,29 @@ struct HeroInfo: View {
                 .lineLimit(2)
                 .minimumScaleFactor(0.6)
                 .shadow(color: .black.opacity(0.35), radius: 12)
+                .legible(26)
             HStack(spacing: 16 * scale) {
                 let family = model.familyPrimary(game, state)
-                ConsoleButton(title: family?.title ?? primaryTitle(state), symbol: family?.symbol ?? primarySymbol(state), focused: model.focus == .actions(0) && model.overlay == nil, prominent: true, minWidth: 210) {
+                let preparing = model.isPreparing(game)
+                ConsoleButton(title: family?.title ?? (preparing ? TPrep.text(.playWhenReady) : primaryTitle(state)), symbol: family?.symbol ?? (preparing ? "play.fill" : primarySymbol(state)), focused: model.focus == .actions(0) && model.overlay == nil, prominent: true, minWidth: 210, lens: ("action-0", lens)) {
                     model.focus = .actions(0)
                     model.primaryAction(game)
                 }
                 if let set = model.trophies[game.id] {
-                    ConsoleButton(title: "\(set.unlockedCount)/\(set.trophies.count)", symbol: "trophy.fill", focused: model.focus == .actions(1) && model.overlay == nil) {
+                    ConsoleButton(title: "\(set.unlockedCount)/\(set.trophies.count)", symbol: "trophy.fill", focused: model.focus == .actions(1) && model.overlay == nil, lens: ("action-1", lens)) {
                         model.focus = .actions(1)
                         model.open(.trophies)
                     }
                 }
                 let settingsIndex = model.actionCount - 1
-                ConsoleButton(title: "", symbol: "ellipsis", focused: model.focus == .actions(settingsIndex) && model.overlay == nil) {
+                ConsoleButton(title: "", symbol: "ellipsis", focused: model.focus == .actions(settingsIndex) && model.overlay == nil, lens: ("action-settings", lens)) {
                     model.focus = .actions(settingsIndex)
                     model.open(.gameSettings)
                 }
                 if case .installing(let step, let fraction) = state {
                     VStack(alignment: .leading, spacing: 8 * scale) {
                         HStack {
-                            Text(step.title).font(.display(15 * scale, .medium))
+                            Text(model.isPreparing(game) ? (model.prepare.paused ? TPrep.text(.preparingPaused) : TPrep.format(.preparingStep, step.title)) : step.title).font(.display(15 * scale, .medium))
                             Spacer()
                             Text("\(Int(step.overall(fraction) * 100))%").font(.display(15 * scale, .semibold)).monospacedDigit()
                         }
@@ -339,6 +528,7 @@ struct HeroInfo: View {
                         }
                     }
                     .frame(width: 340 * scale)
+                    .legible(12)
                     .padding(.leading, 10 * scale)
                     .transition(.opacity)
                 } else if case .failed(let message) = state {
@@ -347,6 +537,7 @@ struct HeroInfo: View {
                         .foregroundStyle(Color(red: 1, green: 0.7, blue: 0.65))
                         .lineLimit(2)
                         .frame(maxWidth: 520 * scale, alignment: .leading)
+                        .legible(12)
                 } else if let diagnosis = model.diagnoses[game.id] {
                     Label(diagnosis.summary, systemImage: "exclamationmark.triangle.fill")
                         .font(.display(14 * scale))
@@ -356,9 +547,10 @@ struct HeroInfo: View {
                         .transition(.opacity)
                 }
             }
+            .glassGroup(look, spacing: 12 * scale)
             .animation(Motion.layout, value: state)
             HStack(spacing: 14 * scale) {
-                InfoCard(title: T.text(.status), symbol: "circle.dashed") { StateLabel(state: state) }
+                InfoCard(title: T.text(.status), symbol: "circle.dashed") { StateLabel(state: state, game: game) }
                 InfoCard(title: T.text(.size), symbol: "internaldrive") {
                     Text((model.sizes[game.id] ?? -1).byteText).font(.display(17 * scale, .semibold)).foregroundStyle(.white)
                 }
@@ -435,10 +627,10 @@ struct EmptyLibrary: View {
             Image(systemName: model.scanning ? "magnifyingglass" : "square.stack.3d.up.slash")
                 .font(.system(size: 54 * scale, weight: .thin))
                 .foregroundStyle(.white.opacity(0.8))
-            Text(model.scanning ? T.text(.scanning) : T.text(.emptyLibraryTitle)).font(.display(34 * scale, .light)).foregroundStyle(.white)
-            Text(T.text(.emptyLibraryText)).font(.display(17 * scale)).foregroundStyle(.white.opacity(0.65))
+            Text(model.scanning ? T.text(.scanning) : T.text(.emptyLibraryTitle)).font(.display(34 * scale, .light)).foregroundStyle(.white).legible(16)
+            Text(T.text(.emptyLibraryText)).font(.display(17 * scale)).foregroundStyle(.white.opacity(0.75)).legible(12)
             if let folder = model.preferences.gamesFolder {
-                Text(folder).font(.display(13 * scale)).foregroundStyle(.white.opacity(0.45)).truncationMode(.middle).lineLimit(1)
+                Text(folder).font(.display(13 * scale)).foregroundStyle(.white.opacity(0.7)).truncationMode(.middle).lineLimit(1).legible(10)
             }
             ConsoleButton(title: T.text(.changeFolder), symbol: "folder", focused: true) { model.pickGamesFolder() }
                 .padding(.top, 10 * scale)
@@ -478,7 +670,7 @@ struct LibraryGrid: View {
         .padding(.horizontal, 80 * scale)
         .padding(.vertical, 60 * scale)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.black.opacity(0.74).background(.ultraThinMaterial))
+        .screenFrost(0.74)
     }
 
     private var grid: some View {
@@ -488,9 +680,10 @@ struct LibraryGrid: View {
                             VStack(alignment: .leading, spacing: 10 * scale) {
                                 GameTile(game: game, size: 196 * scale, focused: focused)
                                 Text(game.name).font(.display(15 * scale, focused ? .semibold : .regular)).foregroundStyle(.white.opacity(focused ? 1 : 0.75)).lineLimit(1)
-                                StateLabel(state: model.state(of: game)).font(.display(12 * scale))
+                                StateLabel(state: model.state(of: game), game: game).font(.display(12 * scale))
                             }
                             .id(game.id)
+                            .hoverTick("library-\(game.id)")
                             .onTapGesture { model.libraryIndex = index; model.pickFromLibrary() }
                         }
                     }
@@ -532,7 +725,7 @@ struct LogView: View {
             .glass(14 * scale, opacity: 0.55)
         }
         .padding(70 * scale)
-        .background(Color.black.opacity(0.65).background(.ultraThinMaterial))
+        .screenFrost(0.65)
     }
 }
 
@@ -581,19 +774,22 @@ extension AppModel {
             return true
         }
         if command == .home {
-            togglePlaying()
+            homeButton(hold: false)
             return true
         }
         if command == .capture {
             saveClip()
             return true
         }
+        if let handled = gameMenuCommandIfOpen(command) { return handled }
         if command == .previousGame || command == .nextGame {
+            // In panels with categories L1 and R1 change the category, wherever the focus is.
+            if overlayHasCategories { return panelCategoryStep(command == .nextGame ? 1 : -1) }
             switchGame(command == .nextGame ? 1 : -1)
             return true
         }
         switch overlay {
-        case .settings, .gameSettings, .confirmUninstall, .updateChoice:
+        case .settings, .gameSettings, .confirmUninstall, .updateChoice, .updateRequired, .noSpace:
             return panelCommand(command)
         case .controls, .advanced:
             if command == .back || command == .options {
@@ -609,12 +805,16 @@ extension AppModel {
             return panelCommand(command)
         case .friends, .party:
             if command == .back {
-                closeOverlay()
+                // A question asked in place (AskFirst.swift) is answered Cancel first.
+                if !cancelAsk() { closeOverlay() }
                 return true
             }
             return panelCommand(command)
         case .profile:
             profileCommand(command)
+            return true
+        case .compare:
+            compareCommand(command)
             return true
         case .cropPicture:
             cropCommand(command)
@@ -668,6 +868,18 @@ extension AppModel {
             return true
         case .crashReport:
             return crashReportCommand(command)
+        case .controllerTest:
+            return controllerTestCommand(command)
+        case .browserPlay:
+            return browserPlayCommand(command)
+        case .quickMenu, .closeGame, .homeMenu, .profileMenu:
+            return gameMenuCommand(command)
+        case .profilePicker:
+            return pickerCommand(command)
+        case .addProfile:
+            return modeChoiceCommand(command)
+        case .signIn:
+            return signInCommand(command)
         case .gallery:
             galleryCommand(command)
             return true
@@ -700,13 +912,26 @@ extension AppModel {
             if command == .select { pickGamesFolder() }
             return true
         }
+        // The notice went (Later, or the update went in): its focus goes to the top bar.
+        if case .notice = focus, !showsUpdateNotice { focus = .top(0) }
+        if case .notice(1) = focus, restartAfterGame { focus = .notice(0) }
         switch (focus, command) {
         case (.tiles, .left): moveSelection(-1)
         case (.tiles, .right): moveSelection(1)
         case (.tiles, .down): moveFocus(.actions(0))
         case (.tiles, .up): moveFocus(.top(1))
         case (.tiles, .select): primaryAction(game)
+        case (.top(0), .left) where showsUpdateNotice: moveFocus(.notice(restartAfterGame ? 0 : 1))
         case (.top(let index), .left): moveFocus(.top(max(0, index - 1)))
+        case (.notice(let index), .left): moveFocus(.notice(max(0, index - 1)))
+        case (.notice(let index), .right): moveFocus(index == 1 || restartAfterGame ? .top(0) : .notice(1))
+        case (.notice, .down), (.notice, .back): moveFocus(.tiles)
+        case (.notice(0), .select):
+            Sounds.shared.play(.select)
+            restartAfterGame ? cancelRestartAfterGame() : restartForUpdate()
+        case (.notice, .select):
+            updateLater()
+            moveFocus(.top(0))
         case (.top(let index), .right): moveFocus(.top(min(5, index + 1)))
         case (.top, .down), (.top, .back): moveFocus(.tiles)
         case (.top(3), .select): openMessages()

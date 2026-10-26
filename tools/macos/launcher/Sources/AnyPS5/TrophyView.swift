@@ -32,7 +32,7 @@ struct TrophyList: View {
         .padding(.horizontal, 80 * scale)
         .padding(.vertical, 56 * scale)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.black.opacity(0.74).background(.ultraThinMaterial))
+        .screenFrost(0.74)
     }
 
     private var header: some View {
@@ -88,6 +88,7 @@ struct TrophyList: View {
             ForEach(Array(set.trophies.enumerated()).dropFirst(first), id: \.element.id) { index, trophy in
                 TrophyRow(game: game, trophy: trophy, focused: index == model.trophyIndex)
                     .id(trophy.id)
+                    .hoverTick("trophy-\(trophy.id)")
                     .onTapGesture { model.trophyIndex = index }
             }
         }

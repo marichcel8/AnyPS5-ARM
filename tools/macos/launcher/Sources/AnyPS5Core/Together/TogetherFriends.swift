@@ -18,21 +18,30 @@ public struct TogetherFriend: Decodable, Equatable, Sendable, Identifiable {
             }
         }
 
-        /// The game session they host: open to friends and not full when joinable.
+        /// The game session they host (or, Play Together, play in): open to friends and not full
+        /// when joinable.
         public struct Game: Decodable, Equatable, Sendable {
             public let sessionId: String
             public let titleId: String
             public let joinable: Bool
             public let players: Int
             public let capacity: Int
+            /// online, lan (Play Together) or local; nil from older servers.
+            public let kind: String?
+            public let hostId: String?
 
-            public init(sessionId: String, titleId: String, joinable: Bool, players: Int, capacity: Int) {
+            public init(sessionId: String, titleId: String, joinable: Bool, players: Int, capacity: Int, kind: String? = nil, hostId: String? = nil) {
                 self.sessionId = sessionId
                 self.titleId = titleId
                 self.joinable = joinable
                 self.players = players
                 self.capacity = capacity
+                self.kind = kind
+                self.hostId = hostId
             }
+
+            /// Playing together (a LAN game with their party).
+            public var together: Bool { kind == "lan" }
         }
 
         public let state: String
@@ -62,13 +71,33 @@ public struct TogetherFriend: Decodable, Equatable, Sendable, Identifiable {
     public let displayName: String
     public let avatar: String?
     public let presence: Presence?
+    /// Their trophy level; nil when their trophies are private to this user (or an older server).
+    public var level: TogetherLevelBadge?
+    /// The friends-only name and picture (docs/private-identity.md): nil when not set or not
+    /// for this user to see. The picture is a signed link that runs out: not kept for later.
+    public var privateName: String?
+    public var privateAvatar: String?
 
-    public init(userId: String, handle: String, displayName: String, avatar: String?, presence: Presence?) {
+    public init(userId: String, handle: String, displayName: String, avatar: String?, presence: Presence?, level: TogetherLevelBadge? = nil,
+                privateName: String? = nil, privateAvatar: String? = nil) {
         self.userId = userId
         self.handle = handle
         self.displayName = displayName
         self.avatar = avatar
         self.presence = presence
+        self.level = level
+        self.privateName = privateName
+        self.privateAvatar = privateAvatar
+    }
+
+    enum CodingKeys: String, CodingKey { case userId, handle, displayName, avatar, presence, level, privateName, privateAvatar }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(userId: try container.decode(String.self, forKey: .userId), handle: try container.decode(String.self, forKey: .handle),
+                  displayName: try container.decode(String.self, forKey: .displayName), avatar: try container.decodeIfPresent(String.self, forKey: .avatar),
+                  presence: try container.decodeIfPresent(Presence.self, forKey: .presence), level: container.lenient(TogetherLevelBadge.self, .level),
+                  privateName: container.lenient(String.self, .privateName), privateAvatar: container.lenient(String.self, .privateAvatar))
     }
 }
 
@@ -79,12 +108,17 @@ public struct TogetherPerson: Codable, Equatable, Sendable, Identifiable {
     public let handle: String
     public let displayName: String
     public let avatar: String?
+    /// The friends-only name and picture, on the cards of friends in answers that carry them.
+    public var privateName: String?
+    public var privateAvatar: String?
 
-    public init(userId: String, handle: String, displayName: String, avatar: String?) {
+    public init(userId: String, handle: String, displayName: String, avatar: String?, privateName: String? = nil, privateAvatar: String? = nil) {
         self.userId = userId
         self.handle = handle
         self.displayName = displayName
         self.avatar = avatar
+        self.privateName = privateName
+        self.privateAvatar = privateAvatar
     }
 }
 

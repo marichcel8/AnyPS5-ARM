@@ -14,9 +14,9 @@ extension AppModel {
         case phone(name: String, handoff: String)
     }
 
-    static func makeTogetherClient(base: URL) -> TogetherClient {
+    static func makeTogetherClient(base: URL, store: TokenStore) -> TogetherClient {
         let os = ProcessInfo.processInfo.operatingSystemVersion
-        return TogetherClient(base: base, clientName: "launcher-macos/\(runningVersion) (macOS \(os.majorVersion).\(os.minorVersion))")
+        return TogetherClient(base: base, store: store, clientName: "launcher-macos/\(runningVersion) (macOS \(os.majorVersion).\(os.minorVersion))")
     }
 
     // MARK: Server
@@ -47,7 +47,7 @@ extension AppModel {
         let switchOver = { [weak self] in
             guard let self else { return }
             self.preferences.togetherServer = url == TogetherServer.standard ? nil : url.absoluteString
-            self.together = AppModel.makeTogetherClient(base: url)
+            self.together = self.wireTogether(AppModel.makeTogetherClient(base: url, store: self.sessionStore(for: self.sessionProfileID)))
             self.remote?.togetherServer = url.absoluteString
             self.togetherSync = TogetherSync(client: self.together, deviceName: Host.current().localizedName ?? "Mac", model: AppModel.machineModel)
             self.serverDraft = ""
@@ -62,16 +62,26 @@ extension AppModel {
     // MARK: Rows
 
     func togetherRows() -> [PanelRow] {
+        // An offline profile that had an account (it went offline, its session kept): going online
+        // is the way in. One that never had one signs in here as ever, and is online then.
+        if togetherUser == nil, let profile = currentProfile, profile.mode == .offline, profile.account != nil, profileFlow.pendingID == nil, overlay != .signIn {
+            return [
+                PanelRow(id: "together-offline", title: TPro.text(.offlineTogether), detail: TPro.text(.offlineTogetherDetail), symbol: "wifi.slash", kind: .info(""), wraps: true),
+                PanelRow(id: "together-go-online", title: TPro.text(.goOnline), detail: TPro.text(.goOnlineDetail), symbol: "wifi",
+                         kind: .action(destructive: false) { [weak self] in self?.toggleProfileMode() }),
+            ] + familyRows()
+        }
         if let user = togetherUser {
             var rows = [
-                PanelRow(id: "together-user", title: "@\(user.handle)", detail: user.displayName, symbol: "person.crop.circle.badge.checkmark", kind: .info(""),
-                         person: PanelPerson(name: user.displayName, avatar: user.avatar)),
+                PanelRow(id: "together-user", title: "@\(user.handle)", detail: appearingOffline ? user.displayName + " · " + TL.text(.appearingOffline) : user.displayName,
+                         symbol: "person.crop.circle.badge.checkmark", kind: .info(""),
+                         person: PanelPerson(name: user.displayName, avatar: user.avatar, level: togetherProfile?.trophyLevel?.badge, appearingOffline: appearingOffline)),
                 PanelRow(id: "together-profile", title: T.text(.profileMine), detail: T.text(.profileMineDetail), symbol: "person.text.rectangle", kind: .action(destructive: false) { [weak self] in
                     self?.openMyProfile()
                 }),
                 PanelRow(id: "together-online", title: T.text(.togetherOnline), detail: togetherConnected ? T.text(.togetherConnected) : T.text(.togetherConnecting),
                          symbol: togetherConnected ? "dot.radiowaves.left.and.right" : "wifi.exclamationmark", kind: .info("")),
-            ] + familyRows()
+            ] + presenceRows() + familyRows()
             if cloudAvailable { rows.append(cloudStorageRow()) }
             rows.append(PanelRow(id: "together-join", title: T.text(.togetherFriendsJoin), detail: T.text(.togetherFriendsJoinDetail), symbol: "person.2.wave.2",
                                  kind: .toggle(preferences.friendsJoin ?? true) { [weak self] value in self?.friendsJoinChanged(value) }))
@@ -80,7 +90,7 @@ extension AppModel {
                                      OnlinePlayHost.enabled = value
                                      self?.objectWillChange.send()
                                  }))
-            rows += profileEditRows() + privacyRows() + (familyAllows(.discovery) ? discoveryRows() : []) + serverRows()
+            rows += profileEditRows() + privateIdentityRows() + privacyRows() + (familyAllows(.discovery) ? discoveryRows() : []) + serverRows()
             rows.append(PanelRow(id: "together-signout", title: T.text(.togetherSignOut), symbol: "rectangle.portrait.and.arrow.right", kind: .action(destructive: true) { [weak self] in
                 self?.togetherSignOut()
             }))
@@ -168,7 +178,7 @@ extension AppModel {
         var sections = known.map { ($0.0, T.text($0.1), $0.2) }
         // The gallery's own setting, where the server keeps files.
         if cloud.enabled { sections.append((.gallery, TCloud.text(.privacyGallery), "photo.stack")) }
-        return [PanelRow(id: "together-privacy", title: T.text(.togetherPrivacyTitle), symbol: "lock", kind: .info(""))] + sections.map { section, title, symbol in
+        let choices = sections.map { section, title, symbol in
             let names = TogetherVisibility.allCases.map { visibility -> String in
                 switch visibility {
                 case .everyone: return T.text(.visibilityEveryone)
@@ -181,6 +191,7 @@ extension AppModel {
                                 self?.setPrivacy(section, TogetherVisibility.allCases[index])
                             })
         }
+        return [PanelRow(id: "together-privacy", title: T.text(.togetherPrivacyTitle), symbol: "lock", kind: .info(""))] + choices + [readReceiptsRow()].compactMap { $0 }
     }
 
     func previewOwnProfile(_ profile: TogetherOwnProfile) {
@@ -360,11 +371,12 @@ extension AppModel {
         togetherStep = .idle
     }
 
-    private func signedIn(_ user: TogetherUser) {
+    func signedIn(_ user: TogetherUser) {
         withAnimation(Motion.overlay) {
             togetherUser = user
             togetherStep = .idle
         }
+        profileSignedIn(user)
         togetherCode = ""
         Sounds.shared.play(.select)
         show(T.format(.togetherWelcome, user.displayName), symbol: "person.2.circle.fill")
@@ -375,10 +387,20 @@ extension AppModel {
 
     /// `then` runs once the server has heard it and the session is forgotten here.
     func togetherSignOut(then: (@MainActor () -> Void)? = nil) {
+        let client = together
+        disconnectTogether()
+        Task {
+            await client.signOut()
+            then?()
+        }
+    }
+
+    /// Everything of the account here stops (socket, voice, share play, the social screens),
+    /// its session kept: a profile switch or going offline, not a sign-out.
+    func disconnectTogether() {
         leaveVoice()
         stopSharePlay()
         share.invites = []
-        let client = together
         // What waits stays in this account's outbox, for when it signs in again.
         togetherFlush?.cancel()
         togetherSocket?.stop()
@@ -396,10 +418,6 @@ extension AppModel {
             togetherRequests = TogetherRequests(incoming: [], outgoing: [])
             discover = DiscoverState()
         }
-        Task {
-            await client.signOut()
-            then?()
-        }
     }
 
     /// Keeps the session live: friends see the launcher online, and a sign-out elsewhere ends it here.
@@ -416,6 +434,7 @@ extension AppModel {
                 guard let self else { return }
                 self.togetherSocket = nil
                 self.endShareSession()
+                if self.overlay == .compare { self.overlay = .profile }
                 if self.overlay == .profile { self.closeProfile() }
                 withAnimation(Motion.overlay) {
                     self.togetherUser = nil
