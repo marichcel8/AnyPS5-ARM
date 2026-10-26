@@ -343,8 +343,7 @@ static inline device atomic_uint* aps5_buffer_atomic(thread aps5_ctx& c, uint el
     aps5_guest_buffer buffer = c.buffers[element];
     if (ulong(byte) + 4ul > ulong(buffer.size)) return nullptr;
     uint skew = uint((r.base + ulong(byte)) & 3ul);
-    if (skew > byte) return nullptr;
-    return reinterpret_cast<device atomic_uint*>(buffer.data + (byte - skew));
+    return reinterpret_cast<device atomic_uint*>(buffer.data + (long(byte) - long(skew)));
 }
 )";
 

@@ -965,10 +965,28 @@ struct VulkanDevice::State {
     }
 
     const HostImport* findImport(std::uint64_t address, std::uint64_t bytes) const {
+        const HostImport* best = nullptr;
         for (const auto& import : imports) {
-            if (import.span.Contains(address, bytes)) return &import;
+            if (import.span.Contains(address, bytes) && (best == nullptr || import.span.bytes > best->span.bytes)) best = &import;
         }
-        return nullptr;
+        return best;
+    }
+
+    void importOverlapping(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges) {
+        std::vector<Metal::HostSpan> spans;
+        for (const auto& [address, bytes] : ranges) {
+            const auto span = Metal::HostPagesCovering(address, bytes, device->Limits().hostPageBytes);
+            if (span.bytes != 0) spans.push_back(span);
+        }
+        std::sort(spans.begin(), spans.end(), [](const auto& left, const auto& right) { return left.base < right.base; });
+        for (std::size_t first = 0; first < spans.size();) {
+            auto base = spans[first].base;
+            auto end = spans[first].base + spans[first].bytes;
+            std::size_t next = first + 1u;
+            for (; next < spans.size() && spans[next].base < end; ++next) end = std::max<std::uint64_t>(end, spans[next].base + spans[next].bytes);
+            if (next - first > 1u) importHost(base, end - base);
+            first = next;
+        }
     }
 
     const HostImport* importHost(std::uint64_t address, std::uint64_t bytes) {
@@ -1958,6 +1976,13 @@ struct VulkanDevice::State {
             case ShaderRecompiler::DescriptorRole::GuestBuffers: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest buffer descriptor must contain four DWORDs per element");
                 std::vector<ShaderRecompiler::MetalAbi::GuestBufferEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0, 0, 0});
+                std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+                for (std::uint32_t element = 0; binding.count > 1u && element < binding.count; ++element) {
+                    const ShaderRecompiler::ShaderBufferResource descriptor{{binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u]}};
+                    const auto bytes = std::min<std::uint64_t>(descriptor.GetSize(), 0xffffffffull);
+                    if (descriptor.Base48() != 0 && bytes != 0) ranges.emplace_back(descriptor.Base48(), bytes);
+                }
+                if (ranges.size() > 1u) importOverlapping(ranges);
                 for (std::uint32_t element = 0; element < binding.count; ++element) {
                     const ShaderRecompiler::ShaderBufferResource descriptor{{binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u]}};
                     const auto base = descriptor.Base48();
