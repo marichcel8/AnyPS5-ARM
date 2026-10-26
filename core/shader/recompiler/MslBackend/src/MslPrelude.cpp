@@ -222,6 +222,12 @@ static inline uint aps5_bda_load(thread aps5_ctx& c, ulong address, uint bytes, 
     }
     return value;
 }
+static inline uint aps5_bda_load_coherent(thread aps5_ctx& c, ulong address, uint pc) {
+    uint reason = 0u;
+    device uchar* pointer = aps5_bda_lookup(c, address, 4u, $READ, reason);
+    if (pointer != nullptr && (address & 3ul) == 0ul) return atomic_load_explicit(reinterpret_cast<device atomic_uint*>(pointer), memory_order_relaxed);
+    return aps5_bda_load(c, address, 4u, pc);
+}
 )";
 
 constexpr std::string_view BdaStoreText = R"(static inline void aps5_bda_store(thread aps5_ctx& c, ulong address, uint bytes, uint value, uint pc) {
