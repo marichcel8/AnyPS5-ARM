@@ -1150,6 +1150,9 @@ extern "C" int APS5_VABI shm_open_nid_postfix(const char* path, int flags, int m
     if (accessMode != SCE_KERNEL_O_RDONLY && accessMode != SCE_KERNEL_O_RDWR) return Fail(GuestInvalid);
     if ((flags & ~AcceptedFlags) != 0) return Fail(GuestInvalid);
     if (path != anonymousObject) {
+        std::string copy;
+        if (const int error = CopyGuestPath_nid_no_patch(path, copy)) return Fail(error);
+        path = copy.c_str();
 #ifdef __APPLE__
         static_cast<void>(mode);
         return OpenNamed(path, flags);
@@ -1166,6 +1169,9 @@ extern "C" int APS5_VABI shm_open_nid_postfix(const char* path, int flags, int m
 }
 
 extern "C" int APS5_VABI shm_unlink_nid_postfix(const char* path) {
+    std::string copy;
+    if (const int error = CopyGuestPath_nid_no_patch(path, copy)) return Fail(error);
+    path = copy.c_str();
 #ifdef _WIN32
     return UnlinkNamedFile(path);
 #elif defined(__APPLE__)

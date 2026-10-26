@@ -2,6 +2,13 @@
 
 #include "SceTypes.hpp"
 
+struct Asn1String {
+    std::int32_t length;
+    std::int32_t type;
+    unsigned char* data;
+    std::int64_t flags;
+};
+
 inline constexpr int MaxRounds = 14;
 
 struct AesKey {
@@ -46,12 +53,12 @@ struct Sha512Context {
 
 extern "C" {
 
-int APS5_VABI ASN1_INTEGER_get_nid_postfix(void);
-int APS5_VABI ASN1_STRING_data_nid_postfix(void);
-int APS5_VABI ASN1_STRING_length_nid_postfix(void);
+std::int64_t APS5_VABI ASN1_INTEGER_get_nid_postfix(const Asn1String* value);
+unsigned char* APS5_VABI ASN1_STRING_data_nid_postfix(Asn1String* value);
+int APS5_VABI ASN1_STRING_length_nid_postfix(const Asn1String* value);
 int APS5_VABI ASN1_STRING_print_nid_postfix(void);
-int APS5_VABI ASN1_STRING_to_UTF8_nid_postfix(void);
-int APS5_VABI ASN1_STRING_type_nid_postfix(void);
+int APS5_VABI ASN1_STRING_to_UTF8_nid_postfix(unsigned char** output, Asn1String* value);
+int APS5_VABI ASN1_STRING_type_nid_postfix(Asn1String* value);
 int APS5_VABI ASN1_TIME_print_nid_postfix(void);
 int APS5_VABI BIO_ctrl_nid_postfix(void);
 int APS5_VABI BIO_f_ssl_nid_postfix(void);

@@ -146,7 +146,7 @@ void VertexTailDraws(bool cullDistance) {
         const auto culled = Check(prefix, clipContinuation, 0x00400100u, clipContinuation.size());
         Require(culled == original, "a mixed-sign cull distance discarded the triangle");
     } else {
-        std::puts("the device lacks shaderCullDistance: the cull plane draw was not checked");
+        std::puts("cull distance draw skipped, the device has no shaderCullDistance");
     }
     ControlStateDraws(prefix);
 }

@@ -153,4 +153,17 @@ float APS5_VABI _FLog_nid_postfix(float x, int base) {
     return base == 0 ? logf_nid_postfix(x) : log2f_nid_postfix(x);
 }
 
+long double APS5_VABI _LLog_nid_postfix(long double x, int base) {
+    if (base > 0) return log10l_nid_postfix(x);
+    return base == 0 ? logl_nid_postfix(x) : log2l_nid_postfix(x);
+}
+
+long double APS5_VABI _LDivide_nid_postfix(long double x, long double y) {
+    return x / y;
+}
+
+long double APS5_VABI _LRecip_nid_postfix(long double x) {
+    return 1.0L / x;
+}
+
 }

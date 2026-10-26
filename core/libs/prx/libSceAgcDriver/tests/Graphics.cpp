@@ -3135,6 +3135,13 @@ void metadataPassTests() {
     auto mipmapped = queue;
     mipmapped.context[0x3b0] |= 1u << 28u;
     expectFailure([&] { DecodeColorMetadataPass(mipmapped); }, "mipmapped DCC");
+    const auto chain = AgcDriver::Graphics::DecodeColorBuffer(mipmapped.context, 0);
+    const auto chainSurface = AgcDriver::Graphics::SurfaceForTarget(chain);
+    Require(chain.dccAddress == 0 && chainSurface.mipCount == 2 && chainSurface.dccAddress == keysAddress, "the surface of a mipmapped DCC color target lost its keys");
+    auto mipmappedArray = mipmapped;
+    mipmappedArray.context[0x3b8] |= 1u;
+    mipmappedArray.context[0x31b] = 1u << 13u;
+    Require(AgcDriver::Graphics::SurfaceForTarget(AgcDriver::Graphics::DecodeColorBuffer(mipmappedArray.context, 0)).dccAddress == 0, "a mipmapped DCC array color target took keys whose layers are not modeled");
     const AgcDriver::Graphics::Context context{};
     const auto texels = [&](std::uint32_t value) {
         for (std::size_t offset = 0; offset < colorMemory.size(); offset += 4) {
@@ -7207,6 +7214,41 @@ void misalignedShaderDataTests() {
         Require(!resources.DataWordsDiffer(liveShader) && resources.DataWordsHash() == AgcDriver::Graphics::ShaderResources::DataWordsHash(liveShader), "the refreshed template's words are not the dispatch's");
     }
     Require(mock.live == 0, "misaligned shader data resources leaked Vulkan objects");
+}
+
+void imageTableTemplateRefreshTests() {
+    namespace Abi = ShaderRecompiler::ImageTableAbi;
+    mock = MockVulkan{};
+    auto context = mockContext();
+    context.imageTableCapacity = 2;
+    context.limits.maxDescriptorSetSampledImages = 2;
+    context.limits.maxPerStageDescriptorSampledImages = 2;
+    const auto commands = reinterpret_cast<VkCommandBuffer>(std::uintptr_t{1});
+    {
+        ShaderRecompiler::RecompileResult compute;
+        auto map = makeBinding(Role::ImageTableMap, static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::ImageTableMap), 1, std::vector<std::uint32_t>(Abi::HeaderWords));
+        map.guestDescriptor[Abi::HeaderVersion] = Abi::Version;
+        map.guestDescriptor[Abi::HeaderElementFaults] = Abi::HeaderWords;
+        map.guestDescriptor[Abi::HeaderSamplerFaults] = Abi::HeaderWords;
+        compute.bindings.push_back(map);
+        auto images = makeBinding(Role::ImageTable, ShaderRecompiler::RuntimeAbi::ImageTableBinding, 0, {});
+        images.kind = Kind::SampledImage;
+        compute.bindings.push_back(images);
+        compute.bindings.push_back(makeBinding(Role::ShaderData, 1, 1, ShaderDataWords({0x11, 0x22})));
+        compute.shaderDataDwords = ShaderRecompiler::RuntimeAbi::ShaderDataDwords;
+        auto live = compute;
+        live.bindings[2].guestDescriptor = ShaderDataWords({0x33, 0x44});
+        const AgcDriver::Graphics::CompiledShader shader{ShaderRecompiler::ShaderStage::Compute, &compute, 0};
+        const AgcDriver::Graphics::CompiledShader liveShader{ShaderRecompiler::ShaderStage::Compute, &live, 0};
+        AgcDriver::Graphics::ShaderResources resources(context, shader);
+        const auto data = findWrite(1).buffers.at(0).buffer;
+        Require(!resources.DataWordsDiffer(shader), "a template's own words differ from the shader that built it");
+        Require(resources.DataWordsDiffer(liveShader), "a template with an image table missed the dispatch's new words");
+        Require(resources.RefreshData(commands, liveShader), "a refresh of a template with an image table recorded nothing");
+        Require(sameBytes(bufferBytes(data), live.bindings[2].guestDescriptor.data(), 3u * sizeof(std::uint32_t)), "a refresh of a template with an image table did not write the dispatch's words");
+        Require(!resources.DataWordsDiffer(liveShader), "the refreshed template's words are not the dispatch's");
+    }
+    Require(mock.live == 0, "image table template refresh resources leaked Vulkan objects");
 }
 
 struct ModuleShape {
@@ -12278,6 +12320,7 @@ int main(int argc, char** argv) {
         samplerTableDeviceLimitTests();
         tableUpdateAfterBindTests();
         misalignedShaderDataTests();
+        imageTableTemplateRefreshTests();
         debugBranchTests();
         hostImportBudgetTests();
         textureCacheBudgetTests();
