@@ -1898,8 +1898,8 @@ enum class LinkMemoOutcome : std::size_t { Hit, Cold, Registry, Device, Shape, C
 
 struct LinkMemoCounters {
     std::array<std::atomic<std::uint64_t>, static_cast<std::size_t>(LinkMemoOutcome::Count)> counts{};
-    ~LinkMemoCounters() {
-        if (std::getenv("APS5_PROFILE_DRAW") == nullptr) return;
+    std::atomic<std::uint64_t> total{0};
+    void Print() const {
         static constexpr const char* names[] = {"hit", "cold", "registry", "device", "shape", "context", "primitive", "header", "code", "tracked", "uncommitted"};
         std::fprintf(stderr, "[link-memo]");
         for (std::size_t index = 0; index < counts.size(); ++index) std::fprintf(stderr, " %s=%llu", names[index], static_cast<unsigned long long>(counts[index].load()));
@@ -1909,7 +1909,10 @@ struct LinkMemoCounters {
 
 void CountLinkMemo(LinkMemoOutcome outcome) {
     static LinkMemoCounters counters;
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!profile) return;
     counters.counts[static_cast<std::size_t>(outcome)].fetch_add(1, std::memory_order_relaxed);
+    if (counters.total.fetch_add(1, std::memory_order_relaxed) % 2000 == 1999) counters.Print();
 }
 
 bool SameRegisters(const std::vector<ShaderRegister>& memo, std::span<const ShaderRegister> current) {
