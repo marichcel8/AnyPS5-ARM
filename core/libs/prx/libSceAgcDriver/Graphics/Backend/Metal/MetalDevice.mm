@@ -338,20 +338,27 @@ bool IntegerFormat(Metal::PixelFormat format) {
     }
 }
 
-std::uint32_t PointSamplerMask(const ShaderRecompiler::DescriptorBinding& binding) {
-    if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages || binding.imageSamplers.size() < binding.count || ImageKindOf(binding.binding).storage) return 0;
+struct SamplerUse {
+    std::uint32_t integer = 0;
+    std::uint32_t other = 0;
+};
+
+SamplerUse SamplerUseOf(const ShaderRecompiler::DescriptorBinding& binding) {
+    if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages || binding.imageSamplers.size() < binding.count || ImageKindOf(binding.binding).storage) return {};
     const bool integerView = ImageKindOf(binding.binding).numeric != Numeric::Float;
-    std::uint32_t mask = 0;
+    SamplerUse use;
     for (std::uint32_t element = 0; element < binding.count; ++element) {
         const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
         bool integer = integerView;
-        if (!integer && !std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) && !Graphics::IsNullTextureResource(words)) {
+        const bool empty = std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words);
+        if (!integer && !empty) {
             const auto* format = Metal::FindFormat(Graphics::DecodeTextureResource(words).format);
             integer = format != nullptr && IntegerFormat(format->pixelFormat);
         }
-        if (integer) mask |= binding.imageSamplers[element];
+        if (!integer && empty) continue;
+        (integer ? use.integer : use.other) |= binding.imageSamplers[element];
     }
-    return mask;
+    return use;
 }
 
 Metal::TextureKind ViewKindOf(ShaderRecompiler::DescriptorImageShape shape) {
@@ -1344,7 +1351,13 @@ struct VulkanDevice::State {
         std::uint32_t pointSamplers = 0;
         std::optional<std::uint32_t> tableElements;
         std::vector<std::uint32_t> map;
-        for (const auto& binding : shader.bindings) pointSamplers |= PointSamplerMask(binding);
+        std::uint32_t otherSamplers = 0;
+        for (const auto& binding : shader.bindings) {
+            const auto use = SamplerUseOf(binding);
+            pointSamplers |= use.integer;
+            otherSamplers |= use.other;
+        }
+        pointSamplers &= ~otherSamplers;
         for (const auto& binding : shader.bindings) {
             switch (binding.role) {
             case ShaderRecompiler::DescriptorRole::ShaderData:
