@@ -137,7 +137,12 @@ std::uint32_t LowMask(std::uint32_t bits) {
 
 SpirvBufferFormatInfo ConversionFormat(const ImageResource& image) {
     const auto format = image.conversionFormat;
-    if (format == FmaskExpansion) throw MslUnsupported("MSL backend: an image reads FMASK, which is not emitted");
+    if (format == FmaskExpansion) {
+        SpirvBufferFormatInfo fmask{};
+        fmask.format = FmaskExpansion;
+        fmask.type = SpirvFormatComponentType::Uint;
+        return fmask;
+    }
     if (format == IrBufferFormat::Invalid || (image.resourceClass == ImageResourceClass::Storage && SampledTextureNumericClass(format) == IrTextureNumericClass::Sint)) return {};
     const auto info = GetFormatInfo(format);
     if (SampledTextureNumericClass(format) != IrTextureNumericClass::Uint || (info.type != SpirvFormatComponentType::Uint && info.type != SpirvFormatComponentType::Unorm && info.type != SpirvFormatComponentType::Float) || !info.packedBitfield || info.byteSize != 4u || info.componentCount == 0u || info.componentCount > 4u) throw MslUnsupported("MSL backend: an image conversion format is not a packed 32-bit unsigned integer, unorm or float format");
@@ -338,9 +343,42 @@ std::array<std::string, 4> UnpackedComponents(Access& access, const SpirvBufferF
     return components;
 }
 
+std::string ExpandFmaskTexel(Access& access, const std::string& texel) {
+    State& state = access.state;
+    const auto format = Constant(state, PipelineSpecialization::FmaskFormatBase + access.mem.resource, 0u);
+    std::string layout = "0u";
+    for (auto value = static_cast<std::uint32_t>(IrBufferFormat::Fmask8_S2_F1); value <= static_cast<std::uint32_t>(IrBufferFormat::Fmask64_S16_F8); ++value) {
+        const auto fmask = FmaskLayoutOf(static_cast<IrBufferFormat>(value));
+        if (!fmask.has_value()) continue;
+        layout = "(" + format + " == " + U32(value) + " ? " + U32(fmask->sampleBits | (fmask->samples << 8u) | (fmask->fragments << 16u)) + " : " + layout + ")";
+    }
+    const auto packed = Temp(state);
+    const auto sampleBits = Temp(state);
+    const auto samples = Temp(state);
+    const auto fragments = Temp(state);
+    const auto expanded = Temp(state);
+    Line(state, "const uint " + packed + " = (" + texel + ").x;");
+    const auto layoutWord = Temp(state);
+    Line(state, "const uint " + layoutWord + " = " + layout + ";");
+    Line(state, "const uint " + sampleBits + " = " + layoutWord + " & 255u;");
+    Line(state, "const uint " + samples + " = (" + layoutWord + " >> 8u) & 255u;");
+    Line(state, "const uint " + fragments + " = " + layoutWord + " >> 16u;");
+    Line(state, "uint " + expanded + " = 0u;");
+    for (std::uint32_t sample = 0; sample < 8u; ++sample) {
+        const auto field = Temp(state);
+        Line(state, "const uint " + field + " = (" + packed + " >> min(" + sampleBits + " * " + U32(sample) + ", 31u)) & ((1u << " + sampleBits + ") - 1u);");
+        Line(state, expanded + " |= (" + U32(sample) + " < " + samples + " ? (" + field + " >= " + fragments + " ? 8u : " + field + ") : 0u) << " + U32(sample * 4u) + ";");
+    }
+    const std::array<std::string, 4> parts{expanded, "0u", "0u", "0u"};
+    std::array<std::string, 4> selected;
+    for (std::uint32_t component = 0; component < 4u; ++component) selected[component] = Swizzled(RegisterSelector(access, component), parts, "1u");
+    return "uint4(" + selected[0] + ", " + selected[1] + ", " + selected[2] + ", " + selected[3] + ")";
+}
+
 std::string UnpackTexel(Access& access, const std::string& texel) {
     const auto info = ConversionFormat(access.image);
     if (info.format == IrBufferFormat::Invalid) return texel;
+    if (info.format == FmaskExpansion) return ExpandFmaskTexel(access, texel);
     if (NormalizedConversion(info)) RequireConvertedAccess(access, info);
     State& state = access.state;
     const auto raw = Temp(state);
@@ -361,6 +399,7 @@ std::string UnpackTexel(Access& access, const std::string& texel) {
 std::string UnpackGather(Access& access, const std::string& gathered) {
     const auto info = ConversionFormat(access.image);
     if (info.format == IrBufferFormat::Invalid) return gathered;
+    if (info.format == FmaskExpansion) throw MslUnsupported("MSL backend: gathers of an FMASK image are not emitted");
     if (NormalizedConversion(info)) throw MslUnsupported("MSL backend: gathers of a converted unorm or float image need filtering in the shader and are not emitted");
     State& state = access.state;
     const auto source = Temp(state);
