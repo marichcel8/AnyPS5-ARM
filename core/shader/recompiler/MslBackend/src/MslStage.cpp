@@ -540,7 +540,7 @@ std::string StageHeader(const State& state, const std::string& parameters) {
         const auto word = [&](std::uint32_t index) { return masks[index] == 0xffffu ? std::string("0xffffffffu") : U32(masks[index]); };
         text += "    const uint aps5_sample_masks[4] = {" + word(0u) + ", " + word(1u) + ", " + word(2u) + ", " + word(3u) + "};\n";
         text += "    const uint aps5_sample_mask = aps5_sample_masks[(uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u)];\n";
-        if (PixelInfo(state).psIteratesSamples) text += "    if (((aps5_sample_mask >> aps5_sample) & 1u) == 0u) {\n        aps5_out.mask = 0u;\n        return aps5_out;\n    }\n";
+        if (PixelInfo(state).psIteratesSamples) text += "    if (((aps5_sample_mask >> aps5_sample) & 1u) == 0u) discard_fragment();\n";
     }
     return text;
 }
