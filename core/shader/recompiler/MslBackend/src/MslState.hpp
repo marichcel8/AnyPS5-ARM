@@ -65,6 +65,7 @@ struct State {
     std::uint32_t windowDwords = 0;
     std::uint32_t waveLds = 0;
     bool stopAllowed = false;
+    bool stopOnUnlinkedCall = false;
     std::uint32_t lanes = 1;
     std::unordered_set<const IrValue*> hoisted;
     std::unordered_set<const IrValue*> defined;

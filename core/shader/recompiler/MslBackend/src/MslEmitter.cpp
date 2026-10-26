@@ -349,7 +349,7 @@ void EmitInstruction(State& state, const IrValue& inst) {
     case IrOpcode::UnlinkedCall:
         state.features |= Fault;
         Line(state, "aps5_fault(aps5_c, " + U32(static_cast<std::uint32_t>(BdaAbi::FaultReason::UnlinkedCall)) + ", (ulong(" + Arg(state, inst, 1) + ") << 32u) | ulong(" + Arg(state, inst, 0) + "), 0u, " + Arg(state, inst, 2) + ");");
-        if (state.stopAllowed) Line(state, "return;");
+        if (state.stopOnUnlinkedCall) Line(state, "return;");
         return;
     default:
         break;
@@ -379,6 +379,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     state.windowDwords = program.Metadata().vectorWindowSize;
     state.waveLds = WaveLdsScope(program, workgroup);
     state.stopAllowed = compute && state.waveLds == 0u && !HasBarrier(program) && state.lanes == 1u;
+    state.stopOnUnlinkedCall = compute && state.waveLds == 0u && !HasBarrier(program);
     if (geometry) {
         PrepareGeometry(state);
     } else if (!compute) {
