@@ -230,6 +230,7 @@ struct CachedSurface {
     std::uint64_t validEpoch = 0;
     bool dirty = false;
     std::uint64_t drawnFrame = 0;
+    bool scanned = false;
 };
 
 struct SurfaceRef {
@@ -939,10 +940,20 @@ struct VulkanDevice::State {
         [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     }
 
-    void writebackDirty() {
+    void writebackDirty(bool scannedToo = true) {
         if (dirtySurfaces.empty()) return;
-        encodeWritebacks(dirtySurfaces);
-        dirtySurfaces.clear();
+        if (scannedToo) {
+            encodeWritebacks(dirtySurfaces);
+            dirtySurfaces.clear();
+            return;
+        }
+        std::vector<CachedSurface*> settle;
+        for (auto* surface : dirtySurfaces) {
+            if (!surface->scanned) settle.push_back(surface);
+        }
+        if (settle.empty()) return;
+        encodeWritebacks(settle);
+        std::erase_if(dirtySurfaces, [](const CachedSurface* surface) { return !surface->dirty; });
     }
 
     bool writebackOverlapping(std::uint64_t address, std::uint64_t bytes, const CachedSurface* self) {
@@ -960,7 +971,7 @@ struct VulkanDevice::State {
     void flush(bool settleSurfaces = true) {
         if (!open) return;
         @autoreleasepool {
-            if (settleSurfaces) writebackDirty();
+            if (settleSurfaces) writebackDirty(false);
             endRender();
             endCompute();
             sync->EncodeLabels(open);
@@ -1300,7 +1311,7 @@ struct VulkanDevice::State {
             if (surface.guestAddress != buffer.address || scanoutFrames - surface.drawnFrame > 2u) continue;
             id<MTLTexture> texture = (__bridge id<MTLTexture>)surface.texture.texture;
             std::uint32_t redLow = 0;
-            if (texture == nil || texture.textureType != MTLTextureType2D || texture.sampleCount != 1 || texture.width != buffer.width || texture.height != buffer.height || !DirectScanoutFormat(texture.pixelFormat, redLow)) continue;
+            if (texture == nil || (texture.textureType != MTLTextureType2D && texture.textureType != MTLTextureType2DArray) || texture.sampleCount != 1 || texture.width != buffer.width || texture.height != buffer.height || !DirectScanoutFormat(texture.pixelFormat, redLow)) continue;
             if (found != nullptr && found->drawnFrame > surface.drawnFrame) continue;
             found = &surface;
             textureRedLow = redLow;
@@ -1312,13 +1323,21 @@ struct VulkanDevice::State {
                 for (auto& [key, surface] : surfaces) {
                     if (surface.guestAddress == 0 || scanoutFrames - surface.drawnFrame > 2u || listed++ >= 6u) continue;
                     id<MTLTexture> texture = (__bridge id<MTLTexture>)surface.texture.texture;
-                    std::fprintf(stderr, " [%llx %lux%lu fmt %lu dirty %d]", static_cast<unsigned long long>(surface.guestAddress), static_cast<unsigned long>(texture.width), static_cast<unsigned long>(texture.height), static_cast<unsigned long>(texture.pixelFormat), surface.dirty ? 1 : 0);
+                    std::fprintf(stderr, " [%llx %lux%lu fmt %lu type %lu samples %lu dirty %d]", static_cast<unsigned long long>(surface.guestAddress), static_cast<unsigned long>(texture.width), static_cast<unsigned long>(texture.height), static_cast<unsigned long>(texture.pixelFormat), static_cast<unsigned long>(texture.textureType), static_cast<unsigned long>(texture.sampleCount), surface.dirty ? 1 : 0);
                 }
                 std::fprintf(stderr, "\n");
             }
             return false;
         }
         id<MTLTexture> texture = (__bridge id<MTLTexture>)found->texture.texture;
+        if (texture.textureType == MTLTextureType2DArray) {
+            Metal::ViewInfo view;
+            view.pixelFormat = found->texture.pixelFormat;
+            view.kind = Metal::TextureKind::Tex2D;
+            view.changeKind = true;
+            texture = (__bridge id<MTLTexture>)viewOf(*found, view).texture;
+        }
+        found->scanned = true;
         const std::uint32_t swap = textureRedLow != (DisplayRedLow(buffer.pixelFormat) ? 1u : 0u) ? 1u : 0u;
         const auto slot = presentTarget(buffer.width, buffer.height);
         auto compute = computeEncoder();
