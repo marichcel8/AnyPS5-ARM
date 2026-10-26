@@ -152,6 +152,9 @@ int ComputeVerticalLayout(FontHandle handle, const StyleStateBlock* style, std::
 int GetCharGlyphMetrics(FontHandle handle, std::uint32_t code, FontGlyphMetrics* metrics, bool useCachedStyle, float* usedScaleW = nullptr, float* usedScaleH = nullptr);
 int RenderFaceGlyphToSurface(FT_Face face, FT_UInt glyphIndex, FT_Vector shift, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result);
 int RenderCharGlyphImageCore(FontHandle handle, std::uint32_t code, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result);
+int ComputeFontMetrics(FontHandle handle, std::uint32_t form, FontMetrics* metrics);
+int ComputeFontStyleInformation(FontHandle handle, FontStyleInformation* information);
+int ComputeFontGlyphsOutlineProfile(FontHandle handle, FontOutlineProfile* profile);
 
 }
 

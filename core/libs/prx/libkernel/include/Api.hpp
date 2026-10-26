@@ -775,6 +775,7 @@ unsigned int APS5_VABI sceKernelSleep(unsigned int seconds);
 [[noreturn]] void APS5_VABI _exit_nid_postfix(int status);
 
 [[gnu::returns_twice]] int APS5_VABI getcontext_nid_postfix(UserUcontext* context);
+[[gnu::returns_twice]] int APS5_VABI swapcontext_nid_postfix(UserUcontext* oucp, const UserUcontext* ucp);
 
 [[gnu::returns_twice]] int APS5_VABI sigsetjmp_nid_postfix(std::uint64_t* buffer, int saveMask);
 [[noreturn]] void APS5_VABI siglongjmp_nid_postfix(std::uint64_t* buffer, int value);
