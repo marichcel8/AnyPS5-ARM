@@ -68,6 +68,8 @@ struct State {
     std::uint32_t waveLds = 0;
     bool stopAllowed = false;
     bool lds64 = false;
+    bool ldsDevice = false;
+    std::uint32_t ldsStride = 0;
     bool stopOnUnlinkedCall = false;
     std::uint32_t lanes = 1;
     std::unordered_set<const IrValue*> hoisted;
@@ -99,6 +101,7 @@ std::string Value(State& state, const IrValue* value);
 std::string Arg(State& state, const IrValue& inst, std::size_t index);
 std::string Typed(State& state, const IrValue& inst, std::size_t index);
 std::string U32(std::uint32_t value);
+std::string LdsBarrierFlags(const State& state);
 std::string Temp(State& state);
 void Line(State& state, std::string_view text);
 void Open(State& state, std::string_view text);
