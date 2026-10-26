@@ -378,6 +378,7 @@ std::int64_t APS5_VABI sceKernelWrite(int d, const void* buf, std::size_t nbytes
         const char empty = 0;
         return sceKernelWrite(d, &empty, 0);
     }
+    const File::WriteSync sync(d);
     GuestArena::GuestArenaPrepareHostRead_nid_no_patch(buf, nbytes);
 #ifndef _WIN32
     // Descriptors 1 and 2 are the game log until the title points them elsewhere.

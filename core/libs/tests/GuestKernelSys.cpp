@@ -692,7 +692,13 @@ int main() {
 #endif
     std::error_code error;
     const auto link = (root / "link").string();
+#ifdef _WIN32
+    if (!CreateSymbolicLinkW(std::filesystem::path(link).c_str(), L"sub\\target.txt", SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE)) {
+        error = std::error_code(GetLastError(), std::system_category());
+    }
+#else
     std::filesystem::create_symlink("sub/target.txt", link, error);
+#endif
     if (!error) {
         std::memset(buffer, '#', sizeof(buffer));
         Require(readlink_nid_postfix(link.c_str(), buffer, sizeof(buffer)) == 14);
@@ -1101,7 +1107,12 @@ int main() {
 #endif
     Require(fchown_nid_postfix(base, 0, 0) == 0);
     Require(fchown_nid_postfix(base, 0xFFFFFFFFu, 0xFFFFFFFFu) == 0);
+    Require(fchown_nid_postfix(base, 0, 0xFFFFFFFFu) == 0);
+    Require(fchown_nid_postfix(base, 0xFFFFFFFFu, 0) == 0);
     Require(fchown_nid_postfix(-1, 0, 0) == -1 && Error() == 9);
+    Require(fchown_nid_postfix(-1, 1, 0) == -1 && Error() == 9);
+    Require(fchown_nid_postfix(-1, 0, 1) == -1 && Error() == 9);
+    Require(fchown_nid_postfix(-1, 1, 1) == -1 && Error() == 9);
     bool fchownThrew = false;
     try { fchown_nid_postfix(base, 1, 0); } catch (const std::exception&) { fchownThrew = true; }
     Require(fchownThrew);
