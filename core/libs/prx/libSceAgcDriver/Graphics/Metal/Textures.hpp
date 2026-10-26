@@ -8,6 +8,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 
 namespace AgcDriver::Graphics::Metal {
@@ -76,7 +77,7 @@ public:
     void Release(TextureHandle& handle);
 
     void EncodeUpload(void* computeEncoder, const TextureHandle& texture, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, UploadPath path);
-    void EncodeWriteback(void* computeEncoder, const TextureHandle& texture, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress);
+    void EncodeWriteback(void* computeEncoder, const TextureHandle& texture, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::span<const std::uint32_t> skipLayers = {});
     void EncodeTiledToLinear(void* computeEncoder, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::uint64_t linearDeviceAddress, std::uint32_t linearPitchBytes);
     void EncodeLinearToTiled(void* computeEncoder, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::uint64_t linearDeviceAddress, std::uint32_t linearPitchBytes);
     void Seal(QueueKind queue, std::uint64_t serial);
