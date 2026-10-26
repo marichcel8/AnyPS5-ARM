@@ -438,6 +438,16 @@ void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& 
     s.writebacks.fetch_add(1, std::memory_order_relaxed);
 }
 
+void TextureManager::EncodeTiledToLinear(void* computeEncoder, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::uint64_t linearDeviceAddress, std::uint32_t linearPitchBytes) {
+    auto& s = *state;
+    const auto plan = PlanSurface(descriptor, surfaceDeviceAddress);
+    if (plan.volume || plan.jobs.empty()) throw std::runtime_error("AGC graphics: a single 2D surface is needed to detile into linear data on Metal");
+    auto job = plan.jobs.front();
+    job.params.linear = linearDeviceAddress;
+    job.params.linearPitchBytes = linearPitchBytes;
+    s.detiler->Encode(computeEncoder, DetileKernel::TiledToLinear, plan.elementBytes, TextureTransform::None, plan.texelBytes, job.params, nullptr, job.columns, job.rows);
+}
+
 void TextureManager::EncodeLinearToTiled(void* computeEncoder, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::uint64_t linearDeviceAddress, std::uint32_t linearPitchBytes) {
     auto& s = *state;
     const auto plan = PlanSurface(descriptor, surfaceDeviceAddress);
