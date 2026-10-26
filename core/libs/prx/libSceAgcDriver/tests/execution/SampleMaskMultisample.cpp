@@ -192,6 +192,7 @@ int main() {
         for (const auto& test : cases) {
             Pass pass;
             pass.quadSampleMask = test.mask;
+            std::fprintf(stderr, "sample mask case: %s\n", test.name);
             Draw(*device, pass);
             Check(test.mask, std::string("4x per-sample shading with ") + test.name);
         }
