@@ -20,6 +20,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -56,6 +57,18 @@ void Require(bool value, int line) {
 }
 #define Check(value) Require((value), __LINE__)
 
+#ifdef __APPLE__
+void OnMmapRefused() {
+    bool refused = false;
+    try {
+        std::rethrow_exception(std::current_exception());
+    } catch (const std::runtime_error& error) {
+        refused = std::strstr(error.what(), "mmap on a file read from app0.zar") != nullptr && std::strstr(error.what(), "not implemented") != nullptr;
+    } catch (...) {
+    }
+    std::_Exit(refused ? 0 : 1);
+}
+#else
 void OnMmapRefused() {
     const auto* type = __cxa_current_exception_type_nid_postfix();
     const auto* error = static_cast<const std::runtime_error*>(__cxa_current_primary_exception_nid_postfix());
@@ -63,6 +76,7 @@ void OnMmapRefused() {
         std::strstr(error->what(), "mmap on a file read from app0.zar") != nullptr && std::strstr(error->what(), "not implemented") != nullptr;
     std::_Exit(refused ? 0 : 1);
 }
+#endif
 
 template <typename TCall> bool NotImplemented(TCall call) {
     try {
@@ -504,7 +518,11 @@ int main(int argc, char** argv) {
         Archive(root);
         const int fd = sceKernelOpen("/app0/Data/Small.txt", SCE_KERNEL_O_RDONLY, 0);
         Check(fd >= 0);
+#ifdef __APPLE__
+        std::set_terminate(OnMmapRefused);
+#else
         _ZSt13set_terminatePFvvE_nid_postfix(OnMmapRefused);
+#endif
 
         (void)mmap_nid_postfix(nullptr, 16384, 1, 2, fd, 0);
         return 1;
