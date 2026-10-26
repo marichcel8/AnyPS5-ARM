@@ -187,6 +187,12 @@ void InvalidArgumentsAreRejected() {
 }
 
 int main() {
+#if defined(__APPLE__) && defined(__aarch64__)
+    {
+        std::fputs("skipped: macOS arm64 cannot make shared memory executable outside MAP_JIT, and a title's JIT output is x86 code the translator cannot run natively\n", stderr);
+        return 77;
+    }
+#endif
     WriteThroughAliasRunsThroughExecutableView();
     OneViewWritesAndRuns();
     Dup2KeepsTheDescriptorTableInStep();
