@@ -662,9 +662,8 @@ struct LastProvokingDraw {
     std::vector<std::uint32_t> list;
 };
 
-LastProvokingDraw RewriteLastProvokingVertex(const Graphics::State& graphics, const Pm4::DrawParameters& draw) {
+std::vector<std::uint32_t> SourceIndices(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::optional<std::uint32_t>& restart) {
     std::vector<std::uint32_t> source(draw.indexCount);
-    std::optional<std::uint32_t> restart;
     if (draw.indexed) {
         const auto bytes = static_cast<std::size_t>(draw.indexCount) * draw.indexSize;
         GuestMemory::CheckRange(reinterpret_cast<const void*>(draw.indexAddress), bytes, draw.indexSize);
@@ -684,9 +683,13 @@ LastProvokingDraw RewriteLastProvokingVertex(const Graphics::State& graphics, co
     } else {
         for (std::uint32_t i = 0; i < draw.indexCount; ++i) source[i] = i;
     }
-    LastProvokingDraw result{graphics, draw, Graphics::LastVertexFirstList(graphics.topology, source, restart)};
+    return source;
+}
+
+LastProvokingDraw ListDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::vector<std::uint32_t> list, VkPrimitiveTopology topology) {
+    LastProvokingDraw result{graphics, draw, std::move(list)};
     result.state.provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
-    result.state.topology = graphics.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || graphics.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    result.state.topology = topology;
     result.state.primitiveRestart = false;
     result.draw.indexed = true;
     result.draw.indexAddress = 0;
@@ -694,6 +697,34 @@ LastProvokingDraw RewriteLastProvokingVertex(const Graphics::State& graphics, co
     result.draw.indexCount = static_cast<std::uint32_t>(result.list.size());
     result.draw.flags = 0;
     return result;
+}
+
+LastProvokingDraw RewriteLastProvokingVertex(const Graphics::State& graphics, const Pm4::DrawParameters& draw) {
+    std::optional<std::uint32_t> restart;
+    const auto source = SourceIndices(graphics, draw, restart);
+    const bool line = graphics.topology == VK_PRIMITIVE_TOPOLOGY_LINE_LIST || graphics.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP;
+    return ListDraw(graphics, draw, Graphics::LastVertexFirstList(graphics.topology, source, restart), line ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
+}
+
+bool NeedsFanList(const Graphics::State& graphics) {
+    return graphics.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN && !graphics.rectList && !graphics.quadList && graphics.stages.path == Graphics::ShaderPath::Vertex && !graphics.stages.mesh && !graphics.stages.tessellation;
+}
+
+LastProvokingDraw RewriteFan(const Graphics::State& graphics, const Pm4::DrawParameters& draw) {
+    std::optional<std::uint32_t> restart;
+    const auto source = SourceIndices(graphics, draw, restart);
+    std::vector<std::uint32_t> list;
+    std::size_t begin = 0;
+    const auto emit = [&](std::size_t first, std::size_t last) {
+        for (std::size_t i = first + 1; i + 1 < last; ++i) list.insert(list.end(), {source[i], source[i + 1], source[first]});
+    };
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        if (!restart || source[i] != *restart) continue;
+        emit(begin, i);
+        begin = i + 1;
+    }
+    emit(begin, source.size());
+    return ListDraw(graphics, draw, std::move(list), VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST);
 }
 
 std::optional<std::string> MultisampleRejection(const Graphics::State& graphics) {
@@ -2729,6 +2760,9 @@ struct VulkanDevice::State {
         if (RewritesLastProvokingVertex(submitted, shaders)) {
             provoking = RewriteLastProvokingVertex(submitted, submittedParams);
             if (provoking->list.empty()) return;
+        } else if (NeedsFanList(submitted)) {
+            provoking = RewriteFan(submitted, submittedParams);
+            if (provoking->list.empty()) return;
         }
         const Graphics::State& graphics = provoking ? provoking->state : submitted;
         const Pm4::DrawParameters& params = provoking ? provoking->draw : submittedParams;
@@ -2741,7 +2775,7 @@ struct VulkanDevice::State {
         }
         if (vertex == nullptr) throw std::runtime_error("AGC graphics: Metal draw has no vertex stage");
         const auto translated = Metal::TranslateState(graphics, HasFlatInputs(shaders));
-        if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection);
+        if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection + " (topology " + std::to_string(static_cast<int>(graphics.topology)) + ")");
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) {
             if (const auto rejection = MultisampleRejection(graphics)) throw Graphics::UnrenderableDraw("AGC graphics: " + *rejection);
