@@ -140,11 +140,12 @@ std::string PixelAttribute(State& state, std::uint32_t attribute, std::uint32_t 
     if (pixel.InputIsCustom(attribute)) throw MslUnsupported("MSL backend: pixel input " + std::to_string(attribute) + " uses custom interpolation, which needs per-vertex values (section S7)");
     const auto slot = PixelSlot(state, attribute);
     const auto& metadata = state.program.Metadata();
-    std::string qualifier = "center_perspective";
+    const std::string where = pixel.psIteratesSamples ? "sample_" : "center_";
+    std::string qualifier = where + "perspective";
     if (pixel.InputIsFlat(attribute)) {
         qualifier = "flat";
     } else if (pixel.InputIsLinear(attribute, metadata.pixelLinearInputs, metadata.pixelPerspectiveInputs)) {
-        qualifier = "center_no_perspective";
+        qualifier = where + "no_perspective";
     }
     const auto name = "p" + std::to_string(slot);
     Input(state, name, "float4 " + name + " [[user(locn" + std::to_string(slot) + "), " + qualifier + "]]");
@@ -413,6 +414,7 @@ void PrepareStage(State& state) {
         if (state.program.Metadata().barycentricEmulation) throw MslUnsupported("MSL backend: barycentric emulation is section S7");
         DeclarePixelOutputs(state);
         if (pixel.QuadSampleMaskPartial()) DeclareCoverage(state);
+        if (pixel.psIteratesSamples) Argument(state, "aps5_sample", "uint aps5_sample [[sample_id]]");
         for (const auto* block : state.program.BlockOrder()) {
             for (const auto* inst : block->Instructions()) {
                 if (inst->Opcode() != IrOpcode::SetAttribute) continue;

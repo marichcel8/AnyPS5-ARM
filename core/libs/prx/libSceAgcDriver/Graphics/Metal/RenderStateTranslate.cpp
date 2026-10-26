@@ -245,7 +245,7 @@ TranslatedState TranslateState(const State& state, bool flatInputs) {
     }
     pipeline.sampleCount = static_cast<std::uint8_t>(std::max<std::uint32_t>(state.samples, 1u));
     pipeline.topology = TopologyClassOf(result.primitive);
-    pipeline.alphaToCoverage = state.alphaToCoverage || state.ditheredAlphaToCoverage;
+    pipeline.alphaToCoverage = false;
 
     auto& depthStencil = result.depthStencil;
     if (state.depth && state.depthTest) {

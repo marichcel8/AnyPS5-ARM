@@ -1,5 +1,6 @@
 #ifdef __APPLE__
 #include <crt_externs.h>
+#include <mach-o/dyld.h>
 #endif
 #include "prx/libc/include/Api.hpp"
 #include "prx/libSceLibcInternal/include/Api.hpp"
@@ -212,11 +213,31 @@ static std::filesystem::path OwnExecutablePath() {
     const DWORD length = GetModuleFileNameW(nullptr, own.data(), static_cast<DWORD>(own.size()));
     own.resize(length);
     return std::filesystem::path(own);
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> executable(size);
+    std::error_code error;
+    if (_NSGetExecutablePath(executable.data(), &size) != 0) return {};
+    return std::filesystem::canonical(executable.data(), error);
 #else
     std::error_code error;
     return std::filesystem::read_symlink("/proc/self/exe", error);
 #endif
 }
+
+#ifndef _WIN32
+static volatile std::sig_atomic_t spawnedChild = 0;
+
+static void KillSpawnedChild(int) {
+    if (spawnedChild > 0) {
+        kill(spawnedChild, SIGKILL);
+        kill(spawnedChild, SIGCONT);
+    }
+    std::signal(SIGABRT, SIG_DFL);
+    std::abort();
+}
+#endif
 
 static std::int32_t SpawnChild(const char* role) {
     const auto own = OwnExecutablePath();
@@ -224,6 +245,9 @@ static std::int32_t SpawnChild(const char* role) {
     std::error_code error;
     std::filesystem::copy_file(own, target, std::filesystem::copy_options::overwrite_existing, error);
     Check(!error);
+#ifdef __APPLE__
+    Check(std::system(("codesign --force --sign - '" + target.string() + "' >/dev/null 2>&1").c_str()) == 0);
+#endif
     const auto app0 = std::filesystem::current_path() / "app0";
     Check(std::filesystem::create_directories(app0) || std::filesystem::exists(app0));
     { std::ofstream file(app0 / "child.bin"); file << "child"; }
@@ -248,6 +272,10 @@ static std::int32_t SpawnChild(const char* role) {
     std::int32_t processId = 0;
     Check(posix_spawn_nid_postfix(&processId, program, nullptr, nullptr, arguments, environment.data()) == 0);
     Check(processId > 0);
+#ifndef _WIN32
+    spawnedChild = processId;
+    std::signal(SIGABRT, KillSpawnedChild);
+#endif
     return processId;
 }
 
@@ -263,6 +291,8 @@ static void CheckSpawnedChild(const char* role, int expectedCode) {
     if (std::strcmp(role, "child-sleep") == 0)
         Check(waitpid_nid_postfix(processId, &status, 1) == 0);
     Check(waitpid_nid_postfix(processId, &status, 0) == processId);
+    if ((status & 0x7f) != 0 || ((status >> 8) & 0xff) != expectedCode)
+        std::fprintf(stderr, "posix_spawn child %s: status 0x%x, expected exit code %d\n", role, static_cast<unsigned>(status), expectedCode);
     Check((status & 0x7f) == 0 && ((status >> 8) & 0xff) == expectedCode);
     status = -1;
     Check(waitpid_nid_postfix(processId, &status, 0) == -1 && *__error_nid_postfix() == 10);
