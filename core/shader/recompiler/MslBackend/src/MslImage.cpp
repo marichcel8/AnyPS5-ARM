@@ -848,7 +848,6 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     const auto shape = ShapeOf(image.dimension);
     const bool gather = access.inst.Opcode() == IrOpcode::ImageGatherRaw;
     if (shape.multisampled) throw MslUnsupported("MSL backend: multisampled images cannot be sampled");
-    if (image.numericClass != IrTextureNumericClass::Float && !image.depthCompare && !gather) throw MslUnsupported("MSL backend: sampling integer images has no Metal sample function");
     const auto conversion = ConversionFormat(image);
     if (conversion.format != IrBufferFormat::Invalid && !gather) throw MslUnsupported("MSL backend: sampling a converted image needs filtering in the shader and is not emitted");
     const auto layout = LayoutOf(mem);
