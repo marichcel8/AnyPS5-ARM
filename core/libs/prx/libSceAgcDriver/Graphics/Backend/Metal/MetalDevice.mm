@@ -2170,6 +2170,7 @@ struct VulkanDevice::State {
             attachment.loadAction = load;
             attachment.storeAction = MTLStoreActionStore;
             attachment.clearDepth = depth->fillDepth.value_or(target->clearDepth);
+            if (std::getenv("APS5_METAL_DEPTH_CLEAR_PROBE") != nullptr) attachment.clearDepth = 0.5;
             if (stencil) {
                 MTLRenderPassStencilAttachmentDescriptor* stencilAttachment = descriptor.stencilAttachment;
                 stencilAttachment.texture = depth->texture;
