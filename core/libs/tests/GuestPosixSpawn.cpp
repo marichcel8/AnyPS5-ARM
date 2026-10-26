@@ -226,6 +226,19 @@ static std::filesystem::path OwnExecutablePath() {
 #endif
 }
 
+#ifndef _WIN32
+static volatile std::sig_atomic_t spawnedChild = 0;
+
+static void KillSpawnedChild(int) {
+    if (spawnedChild > 0) {
+        kill(spawnedChild, SIGKILL);
+        kill(spawnedChild, SIGCONT);
+    }
+    std::signal(SIGABRT, SIG_DFL);
+    std::abort();
+}
+#endif
+
 static std::int32_t SpawnChild(const char* role) {
     const auto own = OwnExecutablePath();
     const auto target = own.parent_path() / std::filesystem::path(reinterpret_cast<const char8_t*>(("child.bin" + own.extension().string()).c_str()));
@@ -256,6 +269,10 @@ static std::int32_t SpawnChild(const char* role) {
     std::int32_t processId = 0;
     Check(posix_spawn_nid_postfix(&processId, program, nullptr, nullptr, arguments, environment.data()) == 0);
     Check(processId > 0);
+#ifndef _WIN32
+    spawnedChild = processId;
+    std::signal(SIGABRT, KillSpawnedChild);
+#endif
     return processId;
 }
 

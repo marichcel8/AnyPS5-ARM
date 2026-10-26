@@ -178,8 +178,8 @@ Handle Duplicate(HANDLE source, DWORD access) {
     mach_header_64 header{};
     const auto read = pread(descriptor, &header, sizeof(header), 0);
     ::close(descriptor);
-    if (read != static_cast<ssize_t>(sizeof(header)) || header.magic != MH_MAGIC_64 || header.cputype != CPU_TYPE_X86_64 || header.filetype != MH_EXECUTE || access(target.c_str(), X_OK) != 0)
-        throw std::runtime_error("LoadExec: target is not an executable x86-64 Mach-O");
+    if (read != static_cast<ssize_t>(sizeof(header)) || header.magic != MH_MAGIC_64 || (header.cputype != CPU_TYPE_X86_64 && header.cputype != CPU_TYPE_ARM64) || header.filetype != MH_EXECUTE || access(target.c_str(), X_OK) != 0)
+        throw std::runtime_error("LoadExec: target is not an executable x86-64 or arm64 Mach-O");
     std::vector<char*> pointers;
     for (const auto& argument : arguments) pointers.push_back(const_cast<char*>(argument.c_str()));
     pointers.push_back(nullptr);
