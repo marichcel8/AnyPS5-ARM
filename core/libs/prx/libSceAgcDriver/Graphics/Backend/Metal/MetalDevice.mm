@@ -672,6 +672,16 @@ struct VulkanDevice::State {
     static constexpr std::size_t DrawPhases = 7;
     std::array<std::uint64_t, DrawPhases> drawPhaseNs{};
     std::uint64_t drawPhaseDraws = 0;
+    // Inside bindStage (same switch): prelude, buffers, images, samplers, tables, epilogue, then surfaceFor, resolve and viewOf inside imageView.
+    static constexpr std::size_t BindPhases = 10;
+    std::array<std::uint64_t, BindPhases> bindPhaseNs{};
+    std::chrono::steady_clock::time_point bindPhaseAt;
+    void bindLap(std::size_t phase) {
+        if (!cpuProfileEnabled()) return;
+        const auto now = std::chrono::steady_clock::now();
+        bindPhaseNs[phase] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - bindPhaseAt).count());
+        bindPhaseAt = now;
+    }
     std::uint64_t lastSerial = 0;
     const char* resolvedBy = "";
     std::vector<PendingWrite> pendingWrites;
@@ -1459,7 +1469,10 @@ struct VulkanDevice::State {
         if (drawPhaseDraws != 0u) {
             const auto per = [&](std::size_t phase) { return static_cast<double>(drawPhaseNs[phase]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
             std::fprintf(stderr, "[metal] cpu per draw over %llu draws: lock wait %.2f us, pipeline %.2f us, stage binding %.2f us, surfaces %.2f us, uploads+pass %.2f us, encode %.2f us, bookkeeping %.2f us\n", static_cast<unsigned long long>(drawPhaseDraws), per(0), per(1), per(2), per(3), per(4), per(5), per(6));
+            const auto bind = [&](std::size_t phase) { return static_cast<double>(bindPhaseNs[phase]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
+            std::fprintf(stderr, "[metal] cpu per draw inside stage binding: prelude %.2f us, image decode+loop %.2f us, plus surfaceFor %.2f us, resolve %.2f us, view %.2f us, buffers %.2f us, samplers %.2f us, tables %.2f us, epilogue+bda %.2f us\n", bind(0), bind(2) + bind(6), bind(7), bind(8), bind(9), bind(1), bind(3), bind(4), bind(5));
             drawPhaseNs = {};
+            bindPhaseNs = {};
             drawPhaseDraws = 0;
         }
         const auto gpu = device->TakeGpuTime();
@@ -1543,11 +1556,14 @@ struct VulkanDevice::State {
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
         auto resource = Graphics::ArrayLayerWindow(Graphics::DecodeTextureResource(words), MaxTextureArrayLayers);
         if (const auto* format = Metal::FindFormat(resource.format); numeric && *numeric != Numeric::Float && format != nullptr && format->transform == Metal::TextureTransform::Repack101111) resource.format = RawPackedFormat;
+        bindLap(6);
         const auto [found, info, layers] = surfaceFor(resource);
+        bindLap(7);
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
         auto& surface = *found;
         const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
         const auto address = resolve(resource.baseAddress, bytes, written, snapshots, &surface);
+        bindLap(8);
         uses.push_back({&surface, resource, address, written});
         Metal::ViewInfo view;
         view.kind = viewKind;
@@ -1569,7 +1585,9 @@ struct VulkanDevice::State {
         if (!written && descriptorSwizzle) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
         else if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {4, 5, 6, 7});
         if (Trace()) std::fprintf(stderr, "[metal] image view: format %u surface pixel %u view pixel %u numeric %d kind %u slices %u\n", static_cast<unsigned>(resource.format), static_cast<unsigned>(surface.texture.pixelFormat), static_cast<unsigned>(view.pixelFormat), numeric ? static_cast<int>(*numeric) : -1, static_cast<unsigned>(view.kind), view.sliceCount);
-        return viewOf(surface, view).resourceId;
+        const auto viewed = viewOf(surface, view).resourceId;
+        bindLap(9);
+        return viewed;
     }
 
     SurfaceRef surfaceFor(const Graphics::GuestTextureResource& resource) {
@@ -1665,6 +1683,7 @@ struct VulkanDevice::State {
     }
 
     void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses) {
+        if (cpuProfileEnabled()) bindPhaseAt = std::chrono::steady_clock::now();
         slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
         slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
         std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
@@ -1684,13 +1703,16 @@ struct VulkanDevice::State {
             mipmappedSamplers |= use.mipmapped;
         }
         pointSamplers &= ~otherSamplers;
+        bindLap(0);
         for (const auto& binding : shader.bindings) {
             switch (binding.role) {
             case ShaderRecompiler::DescriptorRole::ShaderData:
                 slots[SlotIndex(BufferSlot::ShaderData)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
+                bindLap(1);
                 break;
             case ShaderRecompiler::DescriptorRole::FlattenedSrt:
                 slots[SlotIndex(BufferSlot::FlattenedSrt)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
+                bindLap(1);
                 break;
             case ShaderRecompiler::DescriptorRole::GuestBuffers: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest buffer descriptor must contain four DWORDs per element");
@@ -1705,6 +1727,7 @@ struct VulkanDevice::State {
                     if (Trace()) std::fprintf(stderr, "[metal] buffer %u.%u: 0x%llx+0x%llx %s through %s\n", binding.binding, element, static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), written ? "written" : "read", resolvedBy);
                 }
                 slots[SlotIndex(BufferSlot::GuestBuffers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(1);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::GuestImages: {
@@ -1714,6 +1737,7 @@ struct VulkanDevice::State {
                     if (Trace()) std::fprintf(stderr, "[metal] image binding %u element %u -> table index 0x%x\n", binding.binding, element, index);
                     imageEntries.emplace_back(index, image(binding, element, snapshots, uses));
                 }
+                bindLap(2);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::GuestSamplers: {
@@ -1727,6 +1751,7 @@ struct VulkanDevice::State {
                     if (Trace()) std::fprintf(stderr, "[metal] sampler %u.%u: point %u, words %08x %08x %08x %08x, integer mask %x, other mask %x\n", binding.binding, element, point ? 1u : 0u, binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u], integerSamplers, otherSamplers);
                 }
                 slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(3);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::ImageTable:
@@ -1738,6 +1763,7 @@ struct VulkanDevice::State {
                 for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = tableImage(binding, element, snapshots, uses);
                 const auto role = binding.role == ShaderRecompiler::DescriptorRole::ImageTable ? BufferSlot::ImageTable : BufferSlot::ImageStorageTable;
                 slots[SlotIndex(role)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(4);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::SamplerTable: {
@@ -1745,6 +1771,7 @@ struct VulkanDevice::State {
                 std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
                 for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, false);
                 slots[SlotIndex(BufferSlot::SamplerTable)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(4);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::ImageTableMap: {
@@ -1776,6 +1803,7 @@ struct VulkanDevice::State {
             slots[SlotIndex(BufferSlot::GuestImages)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0])) - static_cast<std::uint64_t>(first) * sizeof(entries[0]);
         }
         if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
+        bindLap(5);
     }
 
     void dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
