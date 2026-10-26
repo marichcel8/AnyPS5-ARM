@@ -807,7 +807,13 @@ struct VulkanDevice::State {
     std::uint32_t encodedDispatches = 0;
     std::uint64_t recordedSinceSubmit = 0;
     std::uint32_t cbDraws = 0;
-    static constexpr std::chrono::microseconds OpenLabelDeadline{1000};
+    static std::chrono::microseconds openLabelDeadline() {
+        static const std::chrono::microseconds value = [] {
+            const char* text = std::getenv("APS5_METAL_LABEL_MAX_US");
+            return std::chrono::microseconds(text != nullptr ? std::strtol(text, nullptr, 10) : 1000);
+        }();
+        return value;
+    }
     static std::chrono::microseconds openLabelQuiet() {
         static const std::chrono::microseconds value = [] {
             const char* text = std::getenv("APS5_METAL_LABEL_QUIET_US");
@@ -829,7 +835,7 @@ struct VulkanDevice::State {
                 labelTimerWake.wait(lock);
                 continue;
             }
-            const auto due = std::min(openLabelsSince + OpenLabelDeadline, openLabelsActive + openLabelQuiet());
+            const auto due = std::min(openLabelsSince + openLabelDeadline(), openLabelsActive + openLabelQuiet());
             if (std::chrono::steady_clock::now() < due) {
                 labelTimerWake.wait_until(lock, due);
                 continue;
@@ -2760,7 +2766,7 @@ struct VulkanDevice::State {
             std::lock_guard lock(mutex);
             if (!openLabels.empty()) {
                 const auto now = std::chrono::steady_clock::now();
-                if (now - openLabelsSince >= OpenLabelDeadline) flush(false);
+                if (now - openLabelsSince >= openLabelDeadline()) flush(false);
                 else openLabelsActive = now;
             }
             lap(0);
