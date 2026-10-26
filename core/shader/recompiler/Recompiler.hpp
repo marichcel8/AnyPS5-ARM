@@ -357,7 +357,13 @@ struct MslTarget {
     bool float32DenormPreserve = false;
     bool spannedWaves = false;
     std::uint32_t subgroupStages = 0xffffffffu;
+    std::uint32_t experiment = 0;
 };
+
+inline constexpr std::uint32_t MslExperimentNoDiscard = 1u;
+inline constexpr std::uint32_t MslExperimentNoPow = 2u;
+inline constexpr std::uint32_t MslExperimentNoUniformLoad = 4u;
+inline constexpr std::uint32_t MslExperimentConstantOutput = 8u;
 
 struct BindingLayout {
     std::uint32_t descriptorSet;

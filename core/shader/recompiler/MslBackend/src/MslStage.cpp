@@ -463,7 +463,7 @@ bool EmitStage(State& state, const IrValue& inst) {
     case IrOpcode::FPInterpolateF16:
         throw MslUnsupported("MSL backend: 16-bit interpolation reads per-vertex values, which Metal fragment functions cannot do (section S7)");
     case IrOpcode::Discard:
-        Line(state, "discard_fragment();");
+        if ((state.target.experiment & MslExperimentNoDiscard) == 0u) Line(state, "discard_fragment();");
         return true;
     case IrOpcode::EmitVertex:
         throw MslUnsupported("MSL backend: geometry emission is section S7");

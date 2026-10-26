@@ -81,6 +81,7 @@ std::string VSharp(State& state, const IrValue& inst, const MemoryInfo& mem) {
 }
 
 std::string BufferLoad(State& state, const IrValue& inst, const MemoryInfo& mem, const std::string& resource, const std::string& byte, std::uint32_t bytes) {
+    if ((state.target.experiment & MslExperimentNoUniformLoad) != 0u && state.program.Resources().stage == IrShaderStage::Pixel && bytes == 4u) return "0x3f800000u";
     if (mem.gpuDescriptor) return "aps5_vsharp_load(aps5_c, " + resource + ", " + byte + ", " + U32(bytes) + ", " + Pc(inst) + ")";
     return "aps5_buffer_load(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ", " + U32(bytes) + ")";
 }

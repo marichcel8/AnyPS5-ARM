@@ -273,6 +273,8 @@ TextureHandle TextureManager::Create(const TextureCreateInfo& requested, std::st
         MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
         if (info.shaderWrite) usage |= MTLTextureUsageShaderWrite;
         if (info.renderTarget) usage |= MTLTextureUsageRenderTarget;
+        static const bool compressedTargets = std::getenv("APS5_METAL_COMPRESSED_TARGETS") != nullptr;
+        if (compressedTargets && info.renderTarget) usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
         descriptor.usage = usage;
         const auto sizeAndAlign = [s.native heapTextureSizeAndAlignWithDescriptor:descriptor];
         const std::uint64_t bytes = sizeAndAlign.size;
