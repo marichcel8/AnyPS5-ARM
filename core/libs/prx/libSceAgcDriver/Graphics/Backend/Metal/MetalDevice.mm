@@ -264,6 +264,7 @@ struct DepthSurface {
     std::vector<std::uint32_t> htileWords;
     bool dirty = false;
     bool clearRequested = false;
+    bool stencilClearRequested = false;
     bool coherent = false;
     std::uint64_t stamp = 0;
     Graphics::GuestTextureResource resource{};
@@ -320,6 +321,7 @@ void ScanHtile(DepthSurface& surface, const Graphics::DepthTarget& target) {
     }
     if (stencilCleared) {
         surface.stencilInitialized = false;
+        surface.stencilClearRequested = true;
         surface.fillStencil.reset();
     }
 }
@@ -342,11 +344,12 @@ void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target)
             }
             if (stencilCleared) {
                 surface.stencilInitialized = false;
+                surface.stencilClearRequested = true;
                 surface.fillStencil.reset();
             }
             continue;
         }
-        if (DepthFillCovers(target.address, static_cast<std::uint64_t>(target.extent.width) * target.extent.height * (d16 ? 2u : 4u), fill.address, fill.bytes)) {
+        if (DepthFillCovers(target.address, Graphics::DepthSliceBytes(target.extent, d16 ? 2u : 4u), fill.address, fill.bytes)) {
             std::optional<float> value;
             if (d16) {
                 if ((fill.pattern >> 16u) == (fill.pattern & 0xffffu)) value = static_cast<float>(fill.pattern & 0xffffu) / 65535.0f;
@@ -359,10 +362,11 @@ void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target)
                 surface.fillDepth = value;
             }
         }
-        if (DepthFillCovers(target.stencilAddress, static_cast<std::uint64_t>(target.extent.width) * target.extent.height, fill.address, fill.bytes)) {
+        if (DepthFillCovers(target.stencilAddress, Graphics::DepthSliceBytes(target.extent, 1u), fill.address, fill.bytes)) {
             const auto byte = static_cast<std::uint8_t>(fill.pattern & 0xffu);
             if (fill.pattern == byte * 0x01010101u) {
                 surface.stencilInitialized = false;
+                surface.stencilClearRequested = true;
                 surface.fillStencil = byte;
             }
         }
@@ -2196,46 +2200,53 @@ struct VulkanDevice::State {
     }
 
     void importDepth(DepthSurface& depth, const Graphics::DepthTarget& target) {
-        if (depth.dirty || (!depth.initialized && (depth.clearRequested || target.htileAddress != 0u))) return;
-        if (depth.initialized && depth.hasStencilPlane && !depth.stencilInitialized) return;
+        if (depth.dirty) return;
         const auto plane = depthPlane(depth, target);
         if (!plane) return;
-        if (GuestMemory::Watched(target.address, plane->bytes)) {
+        bool depthImport = true;
+        if (!depth.initialized && (depth.clearRequested || target.htileAddress != 0u)) {
+            depthImport = false;
+        } else if (GuestMemory::Watched(target.address, plane->bytes)) {
             const bool depthChanged = depth.stamp != 0 && guestChangedSince(target.address, plane->bytes, depth.stamp);
             const bool stencilChanged = plane->stencil && depth.stamp != 0 && GuestMemory::Watched(target.stencilAddress, plane->stencilBytes) && guestChangedSince(target.stencilAddress, plane->stencilBytes, depth.stamp);
-            if (!depthChanged && !stencilChanged) return;
+            depthImport = depthChanged || stencilChanged;
         } else if (!depth.initialized || !depth.coherent) {
-            return;
+            depthImport = false;
         }
-        const auto source = resolve(target.address, plane->bytes, false, {});
-        if (source == 0) return;
+        const bool stencilImport = plane->stencil && !depth.stencilInitialized && !depth.stencilClearRequested && !depth.fillStencil;
+        if (!depthImport && !stencilImport) return;
         const auto width = static_cast<std::uint32_t>(depth.texture.width);
         const auto height = static_cast<std::uint32_t>(depth.texture.height);
         const bool combined = depth.texture.pixelFormat != MTLPixelFormatDepth32Float;
         const auto pitch = width * 4u;
         const auto bytes = static_cast<std::uint64_t>(pitch) * height;
-        const auto scratch = upload(bytes);
-        std::uint64_t stencilSource = 0;
-        if (plane->stencil) stencilSource = resolve(target.stencilAddress, plane->stencilBytes, false, {});
+        const auto source = depthImport ? resolve(target.address, plane->bytes, false, {}) : 0ull;
+        const auto stencilSource = stencilImport ? resolve(target.stencilAddress, plane->stencilBytes, false, {}) : 0ull;
+        if (source == 0 && stencilSource == 0) return;
+        Upload scratch;
+        if (source != 0) scratch = upload(bytes);
         Upload stencilScratch;
         if (stencilSource != 0) stencilScratch = upload(static_cast<std::uint64_t>(width) * height);
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-        textureManager().EncodeTiledToLinear((__bridge void*)compute, plane->resource, source, scratch.gpuAddress, pitch);
+        if (source != 0) textureManager().EncodeTiledToLinear((__bridge void*)compute, plane->resource, source, scratch.gpuAddress, pitch);
         if (stencilSource != 0) textureManager().EncodeTiledToLinear((__bridge void*)compute, plane->stencilResource, stencilSource, stencilScratch.gpuAddress, width);
         [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
-        [compute copyFromBuffer:(__bridge id<MTLBuffer>)scratch.buffer sourceOffset:scratch.offset sourceBytesPerRow:pitch sourceBytesPerImage:bytes sourceSize:MTLSizeMake(width, height, 1) toTexture:depth.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:combined ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
-        if (stencilSource != 0) {
-            [compute copyFromBuffer:(__bridge id<MTLBuffer>)stencilScratch.buffer sourceOffset:stencilScratch.offset sourceBytesPerRow:width sourceBytesPerImage:static_cast<std::uint64_t>(width) * height sourceSize:MTLSizeMake(width, height, 1) toTexture:depth.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:MTLBlitOptionStencilFromDepthStencil];
-            depth.stencilInitialized = true;
-        }
+        if (source != 0) [compute copyFromBuffer:(__bridge id<MTLBuffer>)scratch.buffer sourceOffset:scratch.offset sourceBytesPerRow:pitch sourceBytesPerImage:bytes sourceSize:MTLSizeMake(width, height, 1) toTexture:depth.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:combined ? MTLBlitOptionDepthFromDepthStencil : MTLBlitOptionNone];
+        if (stencilSource != 0) [compute copyFromBuffer:(__bridge id<MTLBuffer>)stencilScratch.buffer sourceOffset:stencilScratch.offset sourceBytesPerRow:width sourceBytesPerImage:static_cast<std::uint64_t>(width) * height sourceSize:MTLSizeMake(width, height, 1) toTexture:depth.texture destinationSlice:0 destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0) options:MTLBlitOptionStencilFromDepthStencil];
         [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
-        if (Trace()) std::fprintf(stderr, "[metal] depth import: guest %016llx, %ux%u, stencil %d\n", static_cast<unsigned long long>(target.address), width, height, stencilSource != 0 ? 1 : 0);
-        depth.initialized = true;
-        depth.clearRequested = false;
-        depth.coherent = true;
-        depth.stamp = GuestMemory::TrackerGeneration();
-        cbMovedBytes += plane->bytes;
+        if (Trace()) std::fprintf(stderr, "[metal] depth import: guest %016llx, %ux%u, depth %d stencil %d\n", static_cast<unsigned long long>(target.address), width, height, source != 0 ? 1 : 0, stencilSource != 0 ? 1 : 0);
+        if (source != 0) {
+            depth.initialized = true;
+            depth.clearRequested = false;
+            depth.coherent = true;
+            depth.stamp = GuestMemory::TrackerGeneration();
+            cbMovedBytes += plane->bytes;
+        }
+        if (stencilSource != 0) {
+            depth.stencilInitialized = true;
+            cbMovedBytes += plane->stencilBytes;
+        }
     }
 
     DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
@@ -2302,7 +2313,10 @@ struct VulkanDevice::State {
             }
             depth->initialized = true;
             depth->clearRequested = false;
-            if (stencil) depth->stencilInitialized = true;
+            if (stencil) {
+                depth->stencilInitialized = true;
+                depth->stencilClearRequested = false;
+            }
             depth->fillDepth.reset();
             depth->fillStencil.reset();
         }
