@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <bit>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -432,7 +433,11 @@ void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& 
         const auto samples = object->info.samples;
         const auto elementBytes = format.guestElementBytes;
         const auto* equation = FindMultisampleSwizzleEquation(descriptor.tileMode, elementBytes, samples);
-        if (equation == nullptr || (descriptor.pipeBankXor & ~0xcf00u) != 0u) throw std::runtime_error("AGC graphics: this multisampled surface layout cannot be written back to guest memory on Metal");
+        if (equation == nullptr || (descriptor.pipeBankXor & ~0xcf00u) != 0u) {
+            static std::atomic<bool> reported{false};
+            if (!reported.exchange(true)) std::fprintf(stderr, "[metal] multisampled surface at %llx (tile mode %u, element bytes %u, %u samples) has no guest layout that Metal can write; its samples stay on the GPU\n", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned>(descriptor.tileMode), elementBytes, samples);
+            return;
+        }
         const auto fragmentBits = static_cast<std::uint32_t>(std::countr_zero(samples));
         const auto elementBits = 16u - static_cast<std::uint32_t>(std::countr_zero(elementBytes)) - fragmentBits;
         const auto widthBits = (elementBits + ((fragmentBits & 1u) == 0u ? 1u : 0u)) / 2u;
