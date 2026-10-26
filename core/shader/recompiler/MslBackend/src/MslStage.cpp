@@ -422,6 +422,7 @@ void PrepareStage(State& state) {
         }
     }
     const bool quadMasked = stage == IrShaderStage::Pixel && PixelInfo(state).quadPixelMask != 0xfu;
+    state.quadMasked = quadMasked;
     if (state.validMask || quadMasked) {
         const std::string condition = std::string(quadMasked ? "aps5_quad_masked" : "") + (quadMasked && state.validMask ? " || " : "") + (state.validMask ? "!aps5_valid" : "");
         state.exit = "if (" + condition + ") discard_fragment(); return aps5_out;";

@@ -25,6 +25,12 @@ std::string Active(State& state, const IrValue& inst) {
     return Typed(state, inst, inst.ArgumentCount() - 1u);
 }
 
+std::string WriteActive(State& state, const IrValue& inst) {
+    const auto active = Active(state, inst);
+    if (!state.quadMasked) return active;
+    return active.empty() ? std::string("!aps5_quad_masked") : "(" + active + ") && !aps5_quad_masked";
+}
+
 void OpenActive(State& state, const std::string& active) {
     Open(state, active.empty() ? std::string("{") : "if (" + active + ") {");
 }
@@ -185,7 +191,7 @@ void LoadBuffer(State& state, const IrValue& inst, std::uint32_t components) {
 void StoreBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     const auto& mem = Memory(state, inst);
     if (mem.kind != ResourceKind::Buffer) Fail(inst, "must access a buffer resource");
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     if (mem.formatted) {
         StoreFormatted(state, inst, mem, components);
         Close(state);
@@ -275,7 +281,7 @@ void BufferAtomic(State& state, const IrValue& inst) {
     if (mem.kind != ResourceKind::Buffer) Fail(inst, "must access a buffer resource");
     const auto atomic = BufferAtomicOf(state, inst);
     const auto result = Result(state, inst);
-    auto active = Active(state, inst);
+    auto active = WriteActive(state, inst);
     if (!inst.HasUses() && ZeroIdentity(atomic.op)) active = (active.empty() ? std::string() : active + " && ") + atomic.a + " != 0u";
     OpenActive(state, active);
     const auto resource = VSharp(state, inst, mem);
@@ -416,7 +422,7 @@ void LoadAddress(State& state, const IrValue& inst, std::uint32_t components, st
 void StoreAddress(State& state, const IrValue& inst, std::uint32_t components, std::uint32_t bytes) {
     const auto& mem = Memory(state, inst);
     const auto data = Typed(state, inst, inst.ArgumentCount() - 2u);
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     if (mem.kind == ResourceKind::Scratch) {
         if (components != 1u) Fail(inst, "must write a physical address resource");
         const auto byte = ScratchByte(state, inst, mem);
@@ -484,7 +490,7 @@ void AddressAtomic(State& state, const IrValue& inst) {
     const auto atomic = AddressAtomicOf(state, inst);
     const auto result = Result(state, inst);
     state.features |= BdaWrites;
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     const auto guest = AddressOf(state, inst, mem);
     Open(state, "if (" + guest.ok + ") {");
     const auto global = [&] {
@@ -662,7 +668,7 @@ void BufferAtomic64(State& state, const IrValue& inst) {
     const auto op = RequireAtomic64(state, inst);
     const auto data = Typed(state, inst, inst.ArgumentCount() - 2u);
     const auto result = Result(state, inst);
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     const auto resource = VSharp(state, inst, mem);
     const auto byte = Temp(state);
     const auto pointer = Temp(state);
@@ -689,7 +695,7 @@ void AddressAtomic64(State& state, const IrValue& inst) {
     const auto wanted = std::string(inst.HasUses() ? "true" : "false");
     const auto result = Result(state, inst);
     state.features |= BdaWrites;
-    OpenActive(state, Active(state, inst));
+    OpenActive(state, WriteActive(state, inst));
     const auto guest = AddressOf(state, inst, mem);
     Open(state, "if (" + guest.ok + ") {");
     const auto global = [&] {

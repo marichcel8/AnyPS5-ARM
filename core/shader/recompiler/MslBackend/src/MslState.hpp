@@ -86,6 +86,7 @@ struct State {
     std::map<std::string, std::string> stageArguments;
     std::map<std::string, std::string> stageGlobals;
     bool validMask = false;
+    bool quadMasked = false;
     std::uint32_t zeroClip = 0xffffffffu;
     std::map<std::uint32_t, std::uint32_t> localFetches;
     std::vector<std::string> prologue;

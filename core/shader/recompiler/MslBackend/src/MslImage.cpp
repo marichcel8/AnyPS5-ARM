@@ -1125,7 +1125,9 @@ bool EmitImage(State& state, const IrValue& inst) {
         if (base.table != NoTable) tableSelector = "(" + access.valid + " ? ((" + access.flags + " >> " + U32(ImageTableAbi::ModeShift) + ") & " + U32(ImageTableAbi::ModeMask) + ") : 0xffffffffu)";
         else tableSelector = "(" + access.valid + " ? " + Constant(state, PipelineSpecialization::ImageBase + mem.resource * PipelineSpecialization::ImageWords, 0u) + " : 0xffffffffu)";
     }
-    Open(state, always ? std::string("{") : "if (" + Typed(state, inst, inst.ArgumentCount() - 1u) + ") {");
+    const bool writes = opcode == IrOpcode::ImageWrite || info.access == ImageAccess::Atomic;
+    if (state.quadMasked && writes) Open(state, "if (" + std::string(always ? "" : Typed(state, inst, inst.ArgumentCount() - 1u) + " && ") + "!aps5_quad_masked) {");
+    else Open(state, always ? std::string("{") : "if (" + Typed(state, inst, inst.ArgumentCount() - 1u) + ") {");
 
     const auto emitMode = [&](const ImageResource& mode, std::uint32_t element, const std::function<void(Access&, const std::string&)>& body) {
         Access access{state, inst, mem, mode, *address, element, tables ? &table : nullptr};
