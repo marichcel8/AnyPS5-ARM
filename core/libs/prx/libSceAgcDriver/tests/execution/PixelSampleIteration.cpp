@@ -584,7 +584,10 @@ int main() {
         ExpectOrderModules();
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
-        Require(TargetHasCapability(device->Target(), spv::CapabilityInterpolationFunction), "the test device lacks sampleRateShading");
+        if (!TargetHasCapability(device->Target(), spv::CapabilityInterpolationFunction)) {
+            std::puts("skipped, the test device lacks sampleRateShading");
+            return VulkanTestSkipped;
+        }
         std::uint32_t ran = 0;
         for (const std::uint32_t samples : {4u, 2u}) {
             const auto name = std::to_string(samples) + "x ";

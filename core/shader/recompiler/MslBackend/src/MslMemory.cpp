@@ -396,7 +396,8 @@ void LoadAddress(State& state, const IrValue& inst, std::uint32_t components, st
         for (std::uint32_t component = 0; component < components; ++component) {
             const auto target = Component(result, components, component);
             if (component == 0u) {
-                Line(state, target + " = aps5_bda_load(aps5_c, " + guest.address + ", " + U32(bytes) + ", " + Pc(inst) + ");");
+                if (mem.coherent && bytes == 4u) Line(state, target + " = aps5_bda_load_coherent(aps5_c, " + guest.address + ", " + Pc(inst) + ");");
+                else Line(state, target + " = aps5_bda_load(aps5_c, " + guest.address + ", " + U32(bytes) + ", " + Pc(inst) + ");");
             } else {
                 const auto next = Temp(state);
                 Line(state, "ulong " + next + " = 0ul;");
