@@ -2427,6 +2427,8 @@ struct VulkanDevice::State {
         if (const auto found = stageSources.find(identity); found != stageSources.end()) return found->second;
         StageSource entry;
         entry.source = std::make_shared<const std::string>(shader.msl.Source());
+        static const bool dump = std::getenv("APS5_METAL_DUMP_MSL") != nullptr;
+        if (dump) std::fprintf(stderr, "[metal] msl stage %016llx\n%s\n", static_cast<unsigned long long>(shader.msl.ContentHash().low), entry.source->c_str());
         const auto hash = shader.msl.ContentHash();
         entry.key = Metal::CompileKeyBuilder(0x4d534c47ull).Add(hash.low).Add(hash.high).Finish();
         const auto declared = DeclaredConstants(*entry.source);
