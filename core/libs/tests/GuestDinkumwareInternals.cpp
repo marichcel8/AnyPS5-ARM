@@ -166,6 +166,17 @@ void TestDispatch() {
     Require(_FLog_nid_postfix(8.0f, 0) == std::log(8.0f) && _FLog_nid_postfix(100.0f, 1) == 2.0f && _FLog_nid_postfix(8.0f, -3) == 3.0f, "_FLog");
 }
 
+void TestLongDoubleHelpers() {
+    Require(_LDivide_nid_postfix(3.0L, 2.0L) == 1.5L, "_LDivide quotient");
+    Require(std::isinf(_LDivide_nid_postfix(1.0L, 0.0L)), "_LDivide infinity");
+    Require(std::isnan(_LDivide_nid_postfix(0.0L, 0.0L)), "_LDivide invalid");
+    Require(_LRecip_nid_postfix(4.0L) == 0.25L, "_LRecip quotient");
+    Require(std::isinf(_LRecip_nid_postfix(-0.0L)) && std::signbit(_LRecip_nid_postfix(-0.0L)), "_LRecip signed infinity");
+    Require(_LLog_nid_postfix(8.0L, 0) == std::log(8.0L), "_LLog natural");
+    Require(std::fabs(_LLog_nid_postfix(1000.0L, 1) - 3.0L) <= 1e-17L && std::fabs(_LLog_nid_postfix(1000.0L, 5) - 3.0L) <= 1e-17L, "_LLog base 10");
+    Require(_LLog_nid_postfix(8.0L, -1) == 3.0L && _LLog_nid_postfix(8.0L, -3) == 3.0L, "_LLog base 2");
+}
+
 }
 
 int main() {
@@ -174,4 +185,5 @@ int main() {
     TestFloatErrors();
     TestIntegerErrors();
     TestDispatch();
+    TestLongDoubleHelpers();
 }
