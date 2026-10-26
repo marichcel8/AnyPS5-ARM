@@ -507,6 +507,8 @@ Runtime& State() {
     return *runtime;
 }
 
+const bool allocatorInstalled = (State(), true);
+
 Context& GetContext(int handle) {
     const auto found = State().contexts.find(handle);
     if (found == State().contexts.end()) throw std::invalid_argument("Invalid SSL context");
