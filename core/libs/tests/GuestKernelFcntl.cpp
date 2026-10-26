@@ -471,7 +471,8 @@ static void PipeFlagsRoundTrip() {
     char size[8] = {};
     RequireFailure(ioctl_nid_postfix(pipe[0], WindowSizeRequest, size), GuestEnotty);
     RequireMalformedRequestsFail(pipe[0]);
-    Require(ThrowsWith([&pipe] { fcntl_nid_postfix(pipe[0], SetFlags, NonBlocking | 0x40); }, "fcntl: O_ASYNC on a pipe is not implemented"));
+    Require(fcntl_nid_postfix(pipe[0], SetFlags, NonBlocking | 0x40) == 0);
+    Require((fcntl_nid_postfix(pipe[0], GetFlags) & 0x40) != 0);
     for (const int descriptor : pipe) Require(close_nid_postfix(descriptor) == 0);
 }
 
@@ -491,7 +492,8 @@ static void HostSocketFlags() {
     GuestLock lock{0, 0, 0, WriteLock, FromStart, 0};
     RequireFailure(fcntl_nid_postfix(sockets[0], SetLock, &lock), GuestEbadf);
     RequireFailure(fcntl_nid_postfix(sockets[0], DarwinReadAhead, 1), GuestEbadf);
-    Require(ThrowsWith([&sockets] { fcntl_nid_postfix(sockets[0], SetFlags, NonBlocking | 0x40); }, "fcntl: O_ASYNC on a socket is not implemented"));
+    Require(fcntl_nid_postfix(sockets[0], SetFlags, NonBlocking | 0x40) == 0);
+    Require((fcntl_nid_postfix(sockets[0], GetFlags) & 0x40) != 0);
     for (const int socket : sockets) Require(close_nid_postfix(socket) == 0);
 }
 #endif
