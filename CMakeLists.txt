@@ -125,7 +125,8 @@ if(BUILD_TESTING)
     add_test_executable(metal_abi_tests
         ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/tests/MetalAbiTests.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/src/RequestSerializer.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/RdnaDecoder/src/RdnaDescriptorFormat.cpp)
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/RdnaDecoder/src/RdnaDescriptorFormat.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ShaderBackendDefaults.cpp)
     target_include_directories(metal_abi_tests PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler
         ${CMAKE_CURRENT_SOURCE_DIR}/core/shader/recompiler/ControlFlow/include

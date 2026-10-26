@@ -160,7 +160,8 @@ if(BUILD_TESTING)
             TextureJobs.cpp
             ${ANYPS5_METAL_GRAPHICS_DIR}/src/TextureFormat.cpp
             ${ANYPS5_METAL_GRAPHICS_DIR}/src/GuestTextureResource.cpp
-            ${ANYPS5_METAL_GRAPHICS_DIR}/src/TextureTiling.cpp)
+            ${ANYPS5_METAL_GRAPHICS_DIR}/src/TextureTiling.cpp
+            ${ANYPS5_METAL_RECOMPILER_DIR}/RdnaDecoder/src/RdnaDescriptorFormat.cpp)
         target_include_directories(agc_metal_texture_tests PRIVATE ${ANYPS5_METAL_LAYOUT_INCLUDES} ${CMAKE_CURRENT_SOURCE_DIR})
         target_compile_features(agc_metal_texture_tests PRIVATE cxx_std_20)
         target_compile_definitions(agc_metal_texture_tests PRIVATE VK_NO_PROTOTYPES)
