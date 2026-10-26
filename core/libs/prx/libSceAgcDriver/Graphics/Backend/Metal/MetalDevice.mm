@@ -895,9 +895,20 @@ struct VulkanDevice::State {
         return buffer.gpuAddress;
     }
 
+    // The table only depends on the window snapshot and the host imports, and the upload stays valid until the
+    // command buffer completes, so every stage of the same submit shares one copy.
+    struct BdaCache {
+        std::shared_ptr<const Metal::WindowSnapshot> windows;
+        std::size_t imports = 0;
+        std::uint64_t epoch = 0;
+        std::uint64_t address = 0;
+    } bdaCache;
+
     std::uint64_t bdaTable(std::span<const Graphics::GuestMemorySnapshot>) {
         std::vector<ShaderRecompiler::BdaAbi::Range> ranges;
-        if (const auto windows = device->Guest().Snapshot(); windows != nullptr) ranges = windows->table;
+        const auto windows = device->Guest().Snapshot();
+        if (bdaCache.address != 0 && bdaCache.windows == windows && bdaCache.imports == imports.size() && bdaCache.epoch == epoch) return bdaCache.address;
+        if (windows != nullptr) ranges = windows->table;
         for (const auto& import : imports) {
             ranges.push_back({import.span.base, import.span.End(), import.buffer.gpuAddress, ShaderRecompiler::BdaAbi::Read | ShaderRecompiler::BdaAbi::Write, 0});
         }
@@ -905,6 +916,7 @@ struct VulkanDevice::State {
         const auto bytes = Metal::BdaTableBytes(ranges.size());
         const auto allocation = upload(bytes);
         Metal::WriteBdaTable(std::span<std::byte>(allocation.data, bytes), ranges);
+        bdaCache = {windows, imports.size(), epoch, allocation.gpuAddress};
         return allocation.gpuAddress;
     }
 
