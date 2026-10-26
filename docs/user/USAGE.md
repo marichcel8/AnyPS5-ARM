@@ -283,6 +283,47 @@ A 24-byte press datagram (`APRP`) holds buttons on the first player's pad for a 
 
 The buttons are added to the first player's for the hold, starting when the press arrives; presses that overlap are held together. A press with the same id as the channel's last one is a copy and is dropped, so a sender repeats a press two or three times in case one is lost and gives the next press another id. A press of no known button, or one that is malformed, is dropped, and a press does not change the order of the channel's inputs or its phone's player. Only digital buttons are pressed: an L2 or R2 bit does not move the analog trigger. Byte 8 of the hello is the channel's player counting from 1 (0 while its phone is none), and bit 0 of byte 9 says the engine takes presses; an engine without it drops them unread, so a launcher sends a press only to a game whose hello sets that bit.
 
+When the game asks for text, with its text dialog (`sceImeDialogInit`) or its keyboard (`sceImeOpen`), the engine says so on every remote pad channel at once and again every second while it stays open, so a phone can type it: a prompt datagram (`APRK`) of a 24-byte header followed by the title, the placeholder and the text the game starts with, in UTF-8. The title and placeholder are the dialog's own (the keyboard has none) and are cut to 255 bytes each, the text to what fits in 8192 bytes. When the game no longer asks, one prompt with id 0 says so. Bit 1 of the hello's byte 9 says the engine sends prompts and takes typed text.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | magic `0x4B525041` (`APRK`) |
+| 4 | 2 | version, 1 |
+| 6 | 2 | size: 24 and the three strings |
+| 8 | 4 | prompt id, a new one for each dialog or keyboard opened; 0 when none is open |
+| 12 | 1 | kind: 0 none, 1 keyboard, 2 dialog |
+| 13 | 1 | bit 0: multiline |
+| 14 | 1 | keyboard type: 0 default, 1 basic Latin, 2 URL, 3 mail, 4 number |
+| 15 | 1 | Enter label: 0 default, 1 send, 2 search, 3 go |
+| 16 | 2 | the most characters the game takes, in UTF-16 units |
+| 18 | 2 | title bytes |
+| 20 | 2 | placeholder bytes |
+| 22 | 2 | text bytes |
+
+The launcher answers with a text datagram (`APRT`) on any channel: the whole text typed, which replaces the game's, and what to do then. A text for a prompt that is not the one open, a copy with the channel's last text id, or a malformed one is dropped; malformed UTF-8 and control characters other than a line feed are left out of the text.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | magic `0x54525041` (`APRT`) |
+| 4 | 2 | version, 1 |
+| 6 | 2 | size: 20 and the text |
+| 8 | 4 | prompt id |
+| 12 | 4 | text id |
+| 16 | 1 | action: 0 only replace the text, 1 then Enter, 2 then Escape (cancel) |
+| 17 | 1 | zero |
+| 18 | 2 | text bytes |
+| 20 | n | the text, UTF-8 |
+
+Assist lets another device play the first player together with whoever holds it, as the console's second controller for assistance does. An input whose byte 13 is 1 helps the first player: it takes no player of its own, gives up one it held, and its buttons, sticks, triggers and touch join the first player's (the stick furthest from the centre and the stronger trigger win, and the first player's own motion stays). Its channel's hello then names player 1, and the first player's vibration and light bar answer it. The launcher marks a phone's, a browser pad's or a share play guest's packets so. A 16-byte assist datagram (`APRA`) on any channel says whether the Mac's game controllers after the first player's help too: with bit 0 of its flags set, a controller that would become another player helps the first one instead, and one already player 2 to 4 gives that player up to help. Bit 2 of the hello's byte 9 says the engine takes both; the launcher answers each such hello with the assist datagram, so a game started later learns it within a second.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | magic `0x41525041` (`APRA`) |
+| 4 | 2 | version, 1 |
+| 6 | 2 | size, 16 |
+| 8 | 4 | flags: bit 0, the other controllers help the first player |
+| 12 | 4 | zero |
+
 ### Video-out and pad telemetry
 
 Set `APS5_VIDEOOUT_TELEMETRY_DIR` to a directory before launching the application to write the run's presents and pad changes to `<directory>/videoout.jsonl`, one JSON object per line, appended when the file already exists. Every line starts with `"v":1`, the host's steady-clock nanoseconds in `t_ns` and the event name in `ev`. A run starts with a `contract` line, `{"v":1,"t_ns":<ns>,"ev":"contract","contract":"v1-pad","commit":"<12 hex>","pid":<pid>,"prx":"libSceVideoOut"}`: `commit` is the source commit the libraries were built from (`unknown` when Git was not found at configuration) and `pid` tells apart the runs that appended to the same file. A `pad` line is written when the pad state the title reads changes in its buttons, sticks or triggers, `{"v":1,"t_ns":<ns>,"ev":"pad","n":<present>,"buttons":<bits>,"sticks":[<left x>,<left y>,<right x>,<right y>],"triggers":[<L2>,<R2>]}`, where `n` is the number of presents completed when the change was published, the count the window title shows. `buttons` is the button bit field in decimal, stick axes run 0-255 with 128 at the centre, and both triggers run 0-255. Motion, touch and the device kind are not compared, so a run that only moves the controller writes no `pad` line. The state a `pad` line reports is the controller and keyboard/mouse input read through SDL; input fed by `APS5_PAD_INPUT_FILE` is applied later, in `libScePad`, so a scripted run writes no `pad` line. A `present` line is written after the first present and every 30 presents after that, `{"v":1,"t_ns":<ns>,"ev":"present","n":<present>,"fps":<rate>}`, with the count and rate the window title shows. A background thread writes the lines and the title is not waited for: when it falls behind, the line is dropped and a `drops` line with the number dropped so far, `{"v":1,"t_ns":<ns>,"ev":"drops","dropped":<count>}`, is written every ten seconds while the count grows, and once at a normal exit, only when lines were dropped; an exit that skips static destructors writes no last line. A pad line the full queue refused counts as dropped even though a later publish writes the change. Without the variable no file is opened and no thread is started; an empty value is the same as an unset one, and a directory that cannot be written stops the title when video output starts, with an error naming the file.
@@ -294,6 +335,26 @@ Games that open the console's system font sets (`sceFontOpenFontSet`) need font 
 ### Console language
 
 Games ask for the console's language with `sceSystemServiceParamGetInt` and show their text in it when they have it. It is English (United States) unless `ANYPS5_LANGUAGE` is set to another console language number: 0 Japanese, 1 English (United States), 2 French, 3 Spanish, 4 German, 5 Italian, 6 Dutch, 7 Portuguese (Portugal), 8 Russian, 9 Korean, 10 Chinese (Traditional), 11 Chinese (Simplified), 12 Finnish, 13 Swedish, 14 Danish, 15 Norwegian, 16 Polish, 17 Portuguese (Brazil), 18 English (United Kingdom), 19 Turkish, 20 Spanish (Latin America), 21 Arabic, 22 French (Canada), 23 Czech, 24 Hungarian, 25 Greek, 26 Romanian, 27 Thai, 28 Vietnamese, 29 Indonesian, 30 Ukrainian. For example, `ANYPS5_LANGUAGE=21` selects Arabic. An empty value is the same as an unset one; any other value stops the game at its first language query with an error that names the variable.
+
+### Add-on content and game updates
+
+`ANYPS5_ADDCONT_DIRS` lists the folders of the add-ons (DLC) the player dumped, separated like `PATH` (`:`, or `;` on Windows). Each folder is one add-on. Its entitlement label is the last part of the content ID in its `sce_sys/param.json` (`UP0000-PPSA01234_00-EXPANSION0000001` is `EXPANSION0000001`), else its folder name when that is a content ID or a label of up to 16 letters and digits. A folder that is missing or has no label is left out. `sceAppContentGetAddcontInfoList`, `sceAppContentGetAddcontInfo` and `sceNpEntitlementAccessGetAddcontEntitlementInfoList` report these add-ons and nothing else: one with files besides `sce_sys` as installed (status 4), one with only `sce_sys` as a license without extra data (status 0). `sceAppContentAddcontMount` maps the next free `/addcont0`, `/addcont1`, ... onto an installed add-on's folder, and mounting it again returns the same mount point; `sceAppContentAddcontUnmount` closes it. An add-on that is not listed answers as before: no entitlement, not found. Nothing contacts a server.
+
+`ANYPS5_UPDATE_DIR` names the folder of a game update dumped beside the game (a patch package's files). A file under `/app0` that the update has is read from the update, the rest from the game. A folder both have is listed with the game's files, so a file only the update has is found by its path but not in a listing of that folder. Modules (`.prx`, `.sprx`) are always the relinked ones in `app0`: relink the update's `eboot.bin` and modules, as the launchers do when they unlock a game that has an update.
+
+### Game presets
+
+`sceUserServiceGetGamePresets` answers with the console's Game Presets. Without `ANYPS5_GAME_PRESETS` every field is 0, "not set", and the game uses its own defaults. The variable holds comma-separated `key=value` parts, as the launchers' **Settings → Game Presets** write it, for every signed-in user:
+
+| Key | Values (field value) |
+|-----|----------------------|
+| `difficulty` | `default` (0), `easiest` (1), `easy` (2), `normal` (3), `hard` (4), `hardest` (5) |
+| `priority` | `default` (0), `performance` (1), `resolution` (2) |
+| `invert_1st_v`, `invert_1st_h`, `invert_3rd_v`, `invert_3rd_h` | `0` normal, `1` inverted: the vertical and horizontal view in first-person and third-person games |
+| `subtitles` | `default` (0), `on` (1), `off` (2) |
+| `audio_language` | `default` (0), or a console language number as for `ANYPS5_LANGUAGE` (the number + 1) |
+
+For example `ANYPS5_GAME_PRESETS=difficulty=hard,priority=performance,invert_3rd_v=1`. A key left out is not set, and an unknown key is passed over; a known key with another value stops the game at its first presets query with an error that names the variable. Titles have been seen to honour `priority=performance` (1); the other field values follow the order of the console's menus and have not been checked against a console.
 
 ### Trophies
 
