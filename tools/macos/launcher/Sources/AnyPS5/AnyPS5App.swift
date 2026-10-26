@@ -12,6 +12,33 @@ enum Entry {
             MainActor.assumeIsolated { PreviewRenderer.run(output: URL(fileURLWithPath: arguments[index + 1]), games: URL(fileURLWithPath: arguments[index + 2])) }
             return
         }
+        // `AnyPS5 --glass-selftest` checks how the window is made in every theme, offscreen.
+        if arguments.contains("--glass-selftest") {
+            exit(MainActor.assumeIsolated { GlassSelfTest.run() })
+        }
+        // `AnyPS5 --steam-art <output folder> [<a dump's sce_sys>]` draws the Steam pictures.
+        if let index = arguments.firstIndex(of: "--steam-art"), arguments.count > index + 1 {
+            MainActor.assumeIsolated { SteamArtPreview.run(output: URL(fileURLWithPath: arguments[index + 1]), sceSys: arguments.count > index + 2 ? URL(fileURLWithPath: arguments[index + 2]) : nil) }
+            return
+        }
+        // Started by one of AnyPS5's Steam shortcuts (--steam, --play <title ID>, --fullscreen).
+        let launch = SteamLaunch(arguments: arguments, environment: ProcessInfo.processInfo.environment)
+        if launch.fromSteam || launch.play != nil {
+            // Steam starts the executable itself: a launcher already open takes the request.
+            if let identifier = Bundle.main.bundleIdentifier,
+               let other = NSRunningApplication.runningApplications(withBundleIdentifier: identifier).first(where: { $0 != NSRunningApplication.current }) {
+                if let play = launch.play, let url = DeepLink.play(play).url as URL? {
+                    NSWorkspace.shared.open(url)
+                } else {
+                    other.activate()
+                }
+                return
+            }
+            MainActor.assumeIsolated {
+                AppModel.steamLaunch = launch
+                if let play = launch.play { AppModel.received([DeepLink.play(play).url]) }
+            }
+        }
         AnyPS5App.main()
     }
 }
@@ -41,12 +68,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         DispatchQueue.main.async {
             guard let window = NSApp.windows.first else { return }
-            window.backgroundColor = .black
+            // Its background color and opacity follow the theme (GlassWindowHook): black, or clear
+            // for Glass's see-through window.
             window.titlebarAppearsTransparent = true
             window.isMovableByWindowBackground = true
             window.collectionBehavior.insert(.fullScreenPrimary)
+            // The pointer's moves tell the screens the mouse is in use (InputModeState).
+            window.acceptsMouseMovedEvents = true
             if let screen = window.screen ?? NSScreen.main {
                 window.setFrame(screen.visibleFrame, display: true)
+            }
+            // Full screen the first time and then as it was left (WindowStart); a Steam shortcut's
+            // --fullscreen (Big Picture) always.
+            let fullScreen = WindowStart.fullScreen(saved: Preferences.load().fullScreen, steamFullScreen: MainActor.assumeIsolated { AppModel.steamLaunch.fullscreen })
+            if fullScreen, !window.styleMask.contains(.fullScreen) {
+                window.toggleFullScreen(nil)
             }
         }
     }
@@ -74,19 +110,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    @Environment(\.stillBackground) private var stillBackground
+    @Environment(\.mockDesktop) private var mockDesktop
+
+    private var look: Look {
+        // On battery or hot, Settings → Battery & Heat can turn the blur and the motion down.
+        Look.make(style: model.lookStyle, reduceTransparency: reduceTransparency || model.powerDimmed, offscreen: stillBackground != nil,
+                  reduceMotion: model.preferences.reducedMotion || systemReduceMotion || model.powerDimmed,
+                  transparency: model.preferences.glassTransparency, seeThrough: stillBackground == nil || mockDesktop != nil)
+    }
 
     var body: some View {
+        let look = look
         GeometryReader { proxy in
             let scale = min(1.45, max(0.68, min(proxy.size.width / 1600, proxy.size.height / 900)))
             ZStack {
-                Backdrop()
-                if model.preferences.onboarded {
-                    HomeView()
-                        .transition(.opacity)
-                } else {
-                    OnboardingView()
-                        .transition(.opacity)
+                Group {
+                    Backdrop()
+                    if model.preferences.onboarded {
+                        HomeView()
+                            .transition(.opacity)
+                    } else {
+                        OnboardingView()
+                            .transition(.opacity)
+                    }
                 }
+                // Offscreen there is no material to frost what a full-screen panel covers: the
+                // Glass look's renders blur it here instead, as the window's material does live.
+                .blur(radius: stillBackground != nil && look.glass && (model.overlay?.coversScreen == true || model.starting != nil) ? 30 * scale : 0)
                 overlays
                 if model.share.watching != nil {
                     ShareWatchView().transition(.opacity)
@@ -111,12 +164,28 @@ struct RootView: View {
                 .padding(.top, 26 * scale)
             }
             .environment(\.scale, scale)
+            .environment(\.look, look)
+            .environment(\.circleConfirms, model.preferences.confirmCircle == true)
+            .animation(Motion.fade, value: look)
             .preferredColorScheme(.dark)
         }
-        .background(Color.black)
+        // Glass: the window is see-through and this is the blurred, tinted desktop behind it.
+        .background {
+            if look.seeThrough {
+                GlassWindowBackdrop(recipe: look.window).transition(.opacity)
+            } else {
+                Color.black
+            }
+        }
+        .background(GlassWindowHook(recipe: look.window))
         .ignoresSafeArea()
+        .onChange(of: look, initial: true) { _, now in Look.current = now }
         .onAppear {
             Input.shared.handler = { [weak model] command in model?.handle(command) ?? false }
+            Input.shared.shortcutHandler = { [weak model] action, hold in model?.shortcut(action, hold: hold) }
+            Input.shared.activity = { [weak model] in (model?.changeCount ?? 0) &+ Sounds.shared.requests }
+            Input.shared.rightClickHandler = { [weak model] in model?.homeRightClick() ?? false }
+            Input.shared.menuHandler = { [weak model] in model?.homeRightClick() ?? false }
             Input.shared.scrollHandler = { [weak model] command in
                 guard let model, model.preferences.onboarded, model.overlay == nil else { return false }
                 model.moveSelection(command == .left ? -1 : 1)
@@ -142,11 +211,19 @@ struct RootView: View {
             SettingsPanel().transition(.opacity)
         case .library:
             LibraryGrid().transition(.opacity.combined(with: .scale(scale: 1.03)))
+        case .noSpace:
+            if let (game, _) = model.spaceShortage {
+                SidePanel(title: TPrep.text(.noSpaceTitle), subtitle: game.name + " · " + TPrep.text(.noSpaceSubtitle))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
+            }
         case .gameSettings, .confirmUninstall, .controls, .advanced, .updateChoice:
             if let game = model.selectedGame {
                 SidePanel(title: model.overlay == .confirmUninstall ? T.text(.uninstall) : game.name, subtitle: T.text(subtitleKey))
                     .transition(.move(edge: .trailing).combined(with: .opacity))
             }
+        case .updateRequired:
+            SidePanel(title: TK.text(.updateRequiredTitle), subtitle: model.updateRequired.map { TK.format(.updateRequiredSubtitle, $0.minimum) })
+                .transition(.move(edge: .trailing).combined(with: .opacity))
         case .friends:
             SidePanel(title: T.text(.friendsTitle), subtitle: model.togetherUser.map { "@\($0.handle) · \(T.format(.friendsOnlineCount, model.friendsOnline))" })
                 .transition(.move(edge: .trailing).combined(with: .opacity))
@@ -160,6 +237,8 @@ struct RootView: View {
             MessagesView().transition(.opacity.combined(with: .scale(scale: 1.03)))
         case .profile:
             ProfileView().transition(.opacity.combined(with: .scale(scale: 1.03)))
+        case .compare:
+            CompareView().transition(.opacity.combined(with: .scale(scale: 1.03)))
         case .feed:
             FeedView().transition(.opacity.combined(with: .scale(scale: 1.03)))
         case .leaderboard:
@@ -183,6 +262,10 @@ struct RootView: View {
             LogView().transition(.opacity)
         case .crashReport:
             CrashReportView().transition(.opacity.combined(with: .scale(scale: 1.03)))
+        case .controllerTest:
+            ControllerTestView().transition(.opacity.combined(with: .scale(scale: 1.03)))
+        case .browserPlay:
+            BrowserPlayCard(play: model.browserPlay).transition(.opacity.combined(with: .scale(scale: 1.03)))
         case .cropPicture:
             PictureCropView().transition(.opacity.combined(with: .scale(scale: 1.02)))
         case .trophies:
@@ -193,6 +276,14 @@ struct RootView: View {
             if let game = model.selectedGame {
                 Gallery(game: game, shots: model.galleryShots).transition(.opacity.combined(with: .scale(scale: 1.03)))
             }
+        case .quickMenu, .closeGame, .homeMenu, .profileMenu:
+            GameMenuCard().id(model.overlay == .homeMenu ? "home" : model.overlay == .profileMenu ? "options" : "game").transition(.opacity)
+        case .profilePicker:
+            ProfilePickerView().transition(.opacity.combined(with: .scale(scale: 1.02)))
+        case .addProfile:
+            AddProfileView().transition(.opacity)
+        case .signIn:
+            ProfileSignInView().transition(.opacity.combined(with: .scale(scale: 1.02)))
         case nil:
             EmptyView()
         }
@@ -210,7 +301,7 @@ struct LaunchSplash: View {
     var body: some View {
         let size = 200 * scale
         ZStack {
-            Rectangle().fill(.ultraThinMaterial).overlay(Color.black.opacity(0.55))
+            FrostFill(opacity: 0.55)
             VStack(spacing: 26 * scale) {
                 ZStack {
                     RoundedRectangle(cornerRadius: size * 0.12, style: .continuous).fill(Color.white.opacity(0.08))
@@ -280,7 +371,13 @@ struct ToastView: View {
 
     var body: some View {
         HStack(spacing: 12 * scale) {
-            Image(systemName: toast.symbol).font(.system(size: 17 * scale, weight: .semibold))
+            if let image = toast.icon.flatMap({ NSImage(contentsOf: $0) }) {
+                Image(nsImage: image).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
+                    .frame(width: 30 * scale, height: 30 * scale)
+                    .clipShape(RoundedRectangle(cornerRadius: 7 * scale, style: .continuous))
+            } else {
+                Image(systemName: toast.symbol).font(.system(size: 17 * scale, weight: .semibold))
+            }
             Text(toast.text).font(.display(16 * scale, .medium)).lineLimit(2)
         }
         .foregroundStyle(.white)

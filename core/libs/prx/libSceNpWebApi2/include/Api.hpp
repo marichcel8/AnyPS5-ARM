@@ -31,7 +31,7 @@ int APS5_VABI sceNpWebApi2PushEventCreateFilter(int libCtxId, int handleId, cons
 int APS5_VABI sceNpWebApi2PushEventCreateHandle(int libraryContextId);
 int APS5_VABI sceNpWebApi2PushEventAbortHandle(int libraryContextId, int handleId);
 int APS5_VABI sceNpWebApi2PushEventDeleteHandle(int libraryContextId, int handleId);
-int APS5_VABI sceNpWebApi2PushEventDeletePushContext(int userContextId, const void* pushContextId);
+int APS5_VABI sceNpWebApi2PushEventDeletePushContext(int user_context_id, const NpWebApi2PushContextId* push_context_id);
 int APS5_VABI sceNpWebApi2PushEventRegisterCallback(int userContextId, int filterId, void* callback, void* userArg);
 int APS5_VABI sceNpWebApi2ReadData(int64_t requestId, void* data, size_t size);
 int APS5_VABI sceNpWebApi2SendRequest(int64_t requestId, const void* data, size_t dataSize, NpWebApi2ResponseInformationOption* responseInfoOption);
@@ -39,7 +39,7 @@ int APS5_VABI sceNpWebApi2Terminate(int libCtxId);
 int APS5_VABI sceNpWebApi2PushEventCreatePushContext(std::int32_t userContextId, NpWebApi2PushContextId* pushContextId);
 int APS5_VABI sceNpWebApi2PushEventDeleteFilter(std::int32_t libraryContextId, std::int32_t filterId);
 int APS5_VABI sceNpWebApi2PushEventSetHandleTimeout(int libraryContextId, int handleId, std::uint32_t timeout);
-int APS5_VABI sceNpWebApi2PushEventRegisterPushContextCallback();
+int APS5_VABI sceNpWebApi2PushEventRegisterPushContextCallback(std::int32_t userContextId, std::int32_t filterId, void* callback, void* userArg);
 int APS5_VABI sceNpWebApi2PushEventStartPushContextCallback(std::int32_t userContextId, const NpWebApi2PushContextId* pushContextId);
 int APS5_VABI sceNpWebApi2PushEventUnregisterCallback(std::int32_t userContextId, std::int32_t callbackId);
 int APS5_VABI sceNpWebApi2PushEventUnregisterPushContextCallback(std::int32_t userContextId, std::int32_t callbackId);

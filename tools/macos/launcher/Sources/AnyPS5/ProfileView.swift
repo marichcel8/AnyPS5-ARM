@@ -35,6 +35,7 @@ extension AppModel {
         profileTask?.cancel()
         loadProfileActivity(handle)
         loadProfileGallery(handle)
+        loadProfileShowcase(handle)
         profileTask = Task {
             do {
                 let page = try await together.profilePage(handle, card: card)
@@ -97,18 +98,33 @@ extension AppModel {
                 profileIndex = min(profileIndex, counts[column] - 1)
             }
             Sounds.shared.play(.move)
-        case .back, .options:
+        case .options:
+            // A friend's profile: their trophies beside the user's.
+            if let profile = profilePage?.profile, !profile.isMe { openCompare() } else { closeProfile() }
+        case .select:
+            // A game of someone else's: that game's trophies side by side.
+            guard let profile = profilePage?.profile, !profile.isMe, profileColumn == 0, profileGames.indices.contains(profileIndex) else { return }
+            openCompare(profileGames[profileIndex].titleId)
+        case .back:
             closeProfile()
-        case .select, .previousGame, .nextGame, .home, .capture:
+        case .previousGame, .nextGame, .home, .capture:
             break
         }
+    }
+
+    /// The level the profile on screen shows: the user's own as last heard (a level up moves it).
+    var profileLevel: TogetherTrophyLevel? {
+        guard let profile = profilePage?.profile else { return nil }
+        return profile.isMe ? togetherProfile?.trophyLevel ?? profile.trophyLevel : profile.trophyLevel
     }
 
     /// The icon of a game in someone's library: this Mac's own copy when it has the game.
     func localIcon(_ titleID: String) -> URL? { games.first { $0.titleID == titleID }?.icon }
 
-    func previewProfile(_ page: TogetherProfilePage?, column: Int = 0, index: Int = 0) {
-        profileCard = page.map { TogetherPerson(userId: $0.profile.userId, handle: $0.profile.handle, displayName: $0.profile.displayName, avatar: $0.profile.avatar) }
+    func previewProfile(_ page: TogetherProfilePage?, column: Int = 0, index: Int = 0, showcase: TogetherShowcase? = nil) {
+        social.profileShowcase = showcase
+        profileCard = page.map { TogetherPerson(userId: $0.profile.userId, handle: $0.profile.handle, displayName: $0.profile.displayName, avatar: $0.profile.avatar,
+                                                privateName: $0.profile.privateName, privateAvatar: $0.profile.privateAvatar) }
         profilePage = page
         profileColumn = column
         profileIndex = index
@@ -124,6 +140,9 @@ struct ProfileView: View {
         let page = model.profilePage
         VStack(alignment: .leading, spacing: 30 * scale) {
             header(page)
+            if let page, let showcase = model.social.profileShowcase, !showcase.isEmpty || (showcase.isPrivate && !page.profile.isMe && (page.library != .private || page.trophies != .private)) {
+                ProfileShowcaseStrip(showcase: showcase, owner: page.profile.displayName).transition(.opacity)
+            }
             if page != nil, let gallery = model.cloud.profileGallery {
                 ProfileGalleryStrip(gallery: gallery, mine: page?.profile.isMe == true).transition(.opacity)
             }
@@ -152,7 +171,7 @@ struct ProfileView: View {
         .padding(.horizontal, 80 * scale)
         .padding(.vertical, 56 * scale)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .background(Color.black.opacity(0.74).background(.ultraThinMaterial))
+        .screenFrost(0.74)
         .overlay {
             if let media = model.cloud.viewing { MediaViewer(media: media).transition(.opacity) }
         }
@@ -165,10 +184,15 @@ struct ProfileView: View {
     private func header(_ page: TogetherProfilePage?) -> some View {
         let card = model.profileCard
         let profile = page?.profile
-        let name = profile?.displayName ?? card?.displayName ?? ""
+        // A friend's friends-only name and picture (the user's own too), the handle under it.
+        let identity = (profile.map { model.shown($0) } ?? card.map { model.shown($0) })
+        let name = identity?.name ?? ""
         let handle = profile?.handle ?? card?.handle ?? ""
         return HStack(alignment: .center, spacing: 30 * scale) {
-            ProfileAvatar(url: profile?.avatar ?? card?.avatar, name: name, size: 128 * scale)
+            ProfileAvatar(url: identity?.avatar, name: name, size: 128 * scale)
+                .overlay(alignment: .bottomTrailing) {
+                    if profile?.isMe == true, model.appearingOffline { AppearingOfflineDot(size: 34 * scale).offset(x: -4 * scale, y: -4 * scale) }
+                }
             VStack(alignment: .leading, spacing: 10 * scale) {
                 Text(profile?.isMe == true ? T.text(.profileMine) : T.text(.profileTitle))
                     .font(.display(13 * scale, .semibold))
@@ -181,6 +205,12 @@ struct ProfileView: View {
                     .lineLimit(1)
                 HStack(spacing: 12 * scale) {
                     Text("@\(handle)").font(.display(17 * scale, .medium)).foregroundStyle(.white.opacity(0.75))
+                    if let identity, identity.isPrivate {
+                        // Whose real name it is stays clear: the public name and who sees this.
+                        Label(identity.publicName == identity.name ? TPro.text(.friendsOnlyBadge) : "\(identity.publicName) · \(TPro.text(.friendsOnlyBadge))", systemImage: "lock.fill")
+                            .font(.display(12 * scale, .semibold))
+                            .foregroundStyle(.white.opacity(0.7))
+                    }
                     if let country = profile?.country, let flag = Self.flag(country) { Text(flag).font(.system(size: 17 * scale)) }
                     if let tag = profile.flatMap(Self.relation) {
                         Text(tag)
@@ -191,6 +221,10 @@ struct ProfileView: View {
                             .background(Capsule().fill(model.accent.opacity(0.35)))
                             .overlay(Capsule().strokeBorder(model.accent.opacity(0.6), lineWidth: 1))
                     }
+                    if profile?.isMe == true, model.appearingOffline { AppearingOfflineTag() }
+                }
+                if let level = model.profileLevel {
+                    LevelCard(level: level).padding(.vertical, 2 * scale)
                 }
                 if page?.detailsPrivate == true {
                     Label(T.text(.profileDetailsPrivate), systemImage: "lock.fill")
@@ -208,6 +242,7 @@ struct ProfileView: View {
             VStack(alignment: .trailing, spacing: 26 * scale) {
                 HStack(spacing: 22 * scale) {
                     Hint(keys: "← → ↑ ↓", label: T.text(.hintMove))
+                    if let profile, !profile.isMe { Hint(keys: "O / △", label: TL.text(.compareTrophies)) }
                     Hint(keys: "esc / ○", label: T.text(.hintBack))
                 }
                 if let page { totals(page.totals) }
@@ -540,11 +575,13 @@ struct ProfileAvatar: View {
     /// A picture on this Mac, before the avatar's address and the initial.
     var picture: NSImage? = nil
     @EnvironmentObject private var model: AppModel
+    @Environment(\.look) private var look
 
     var body: some View {
         ZStack {
-            Circle().fill(LinearGradient(colors: [model.accent, model.accent.opacity(0.5)], startPoint: .topLeading, endPoint: .bottomTrailing))
-            Text(String(name.prefix(1)).uppercased()).font(.display(size * 0.42, .semibold)).foregroundStyle(.white)
+            // The Glass theme's light Ice accent takes dark ink, on a fill that stays light enough for it.
+            Circle().fill(LinearGradient(colors: [model.accent, model.accent.opacity(look.glass ? 0.8 : 0.5)], startPoint: .topLeading, endPoint: .bottomTrailing))
+            Text(String(name.prefix(1)).uppercased()).font(.display(size * 0.42, .semibold)).foregroundStyle(look.glass ? model.accent.onFill : .white)
             if let picture {
                 Image(nsImage: picture).resizable().interpolation(.high).aspectRatio(contentMode: .fill)
             } else if let remote = url.flatMap(URL.init(string:)) {

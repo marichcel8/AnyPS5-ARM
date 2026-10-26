@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 
 import '../discover_strings.dart';
+import '../safety_strings.dart';
 import '../social_strings.dart';
 import '../strings.dart';
 import '../together/people.dart';
 import '../together/together_hub.dart';
+import 'ask_first.dart';
 import 'share_watch_screen.dart';
 import 'together_widgets.dart';
 
@@ -40,6 +42,22 @@ class _FriendsPaneState extends State<FriendsPane> {
   final _handle = TextEditingController();
   bool _adding = false;
   (String, bool)? _notice;
+  Object? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    if (!widget.hub.friends.loaded) _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loadError = null);
+    try {
+      await widget.hub.friends.refresh();
+    } on Object catch (error) {
+      if (mounted) setState(() => _loadError = error);
+    }
+  }
 
   @override
   void dispose() {
@@ -90,50 +108,74 @@ class _FriendsPaneState extends State<FriendsPane> {
         return ListView(
           padding: const EdgeInsets.fromLTRB(22, 16, 18, 18),
           children: [
-            Row(
-              children: [
-                Text(
+            LayoutBuilder(
+              builder: (context, box) {
+                final title = Text(
                   texts.friends,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 20,
                     fontWeight: FontWeight.w600,
                   ),
-                ),
-                const Spacer(),
-                SizedBox(
-                  width: 220,
-                  child: TextField(
-                    controller: _handle,
-                    autocorrect: false,
-                    textInputAction: TextInputAction.send,
-                    style: const TextStyle(color: Colors.white, fontSize: 14.5),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      prefixText: '@',
-                      prefixStyle: const TextStyle(color: Colors.white38),
-                      hintText: texts.friendsHandle,
-                      hintStyle: const TextStyle(color: Colors.white30),
-                      filled: true,
-                      fillColor: const Color(0x14FFFFFF),
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 11,
-                      ),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(12),
-                        borderSide: BorderSide.none,
-                      ),
+                );
+                final field = TextField(
+                  controller: _handle,
+                  autocorrect: false,
+                  textInputAction: TextInputAction.send,
+                  style: const TextStyle(color: Colors.white, fontSize: 14.5),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    prefixText: '@',
+                    prefixStyle: const TextStyle(color: Colors.white38),
+                    hintText: texts.friendsHandle,
+                    hintStyle: const TextStyle(color: Colors.white30),
+                    filled: true,
+                    fillColor: const Color(0x14FFFFFF),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 11,
                     ),
-                    onSubmitted: (_) => _add(),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                FilledButton.tonal(
+                  onSubmitted: (_) => _add(),
+                );
+                final add = FilledButton.tonal(
                   onPressed: _adding ? null : _add,
                   child: Text(texts.friendsAdd),
-                ),
-              ],
+                );
+                // A small phone puts adding by handle under the title, the field taking the row.
+                if (box.maxWidth < 420) {
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      title,
+                      const SizedBox(height: 10),
+                      Row(
+                        children: [
+                          Expanded(child: field),
+                          const SizedBox(width: 8),
+                          add,
+                        ],
+                      ),
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Flexible(child: title),
+                    const SizedBox(width: 12),
+                    const Spacer(),
+                    SizedBox(width: 220, child: field),
+                    const SizedBox(width: 8),
+                    add,
+                  ],
+                );
+              },
             ),
             if (_notice case (final text, final error))
               Padding(
@@ -155,7 +197,7 @@ class _FriendsPaneState extends State<FriendsPane> {
                       invite.from ??
                       const Person(id: '', handle: '?', displayName: '?'),
                   subtitle: texts.shareInvited(
-                    invite.from?.displayName ?? '',
+                    invite.from?.shownName ?? '',
                     widget.gameName?.call(invite.titleId) ?? invite.name,
                   ),
                   subtitleColor: togetherPlaying,
@@ -188,7 +230,7 @@ class _FriendsPaneState extends State<FriendsPane> {
               for (final person in friends.incoming)
                 _PersonRow(
                   person: person,
-                  subtitle: '@${person.handle}',
+                  subtitle: person.handleLine,
                   onTap: widget.onProfile == null
                       ? null
                       : () => widget.onProfile!(person.handle),
@@ -215,6 +257,8 @@ class _FriendsPaneState extends State<FriendsPane> {
                 ),
             ],
             SectionLabel(texts.friends),
+            if (!friends.loaded)
+              LoadingOrFailed(error: _loadError, retry: _load),
             if (friends.loaded && friends.friends.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10),
@@ -230,8 +274,13 @@ class _FriendsPaneState extends State<FriendsPane> {
                     ? null
                     : () => widget.onProfile!(friend.person.handle),
                 presence: friend.presence.state,
+                // A friends-only name keeps the handle (and the public name) beside it.
                 subtitle: friend.presence.share == null
-                    ? presenceText(texts, friend.presence, widget.gameName)
+                    ? [
+                        if (ShownIdentity.of(friend.person).isPrivate)
+                          friend.person.handleLine,
+                        presenceText(texts, friend.presence, widget.gameName),
+                      ].join(' · ')
                     : '${texts.shareSharing(widget.gameName?.call(friend.presence.share!.titleId) ?? friend.presence.share!.title ?? friend.presence.share!.titleId)}'
                           ' · ${texts.shareViewers(friend.presence.share!.viewers, friend.presence.share!.maxViewers)}',
                 subtitleColor: friend.presence.state == PresenceState.offline
@@ -245,7 +294,7 @@ class _FriendsPaneState extends State<FriendsPane> {
                       JoinablePill(game: game),
                     if (widget.onCall case final call?)
                       IconButton(
-                        tooltip: texts.callFriend(friend.person.displayName),
+                        tooltip: texts.callFriend(friend.person.shownName),
                         onPressed: widget.hub.calls.inCall
                             ? null
                             : () => call(friend.person),
@@ -279,16 +328,28 @@ class _FriendsPaneState extends State<FriendsPane> {
                           color: togetherAccent,
                         ),
                       ),
-                    PopupMenuButton<void>(
+                    PopupMenuButton<bool>(
                       icon: const Icon(
                         Icons.more_horiz_rounded,
                         color: Colors.white38,
                       ),
                       color: const Color(0xFF1A1D27),
+                      // Asked once the menu is gone: removing a friend cannot be taken back.
+                      onSelected: (_) async {
+                        final sure = await askFirst(
+                          context,
+                          question: texts.askRemoveFriend(
+                            friend.person.shownName,
+                          ),
+                          action: texts.friendsRemove,
+                        );
+                        if (sure && mounted) {
+                          await _try(() => friends.remove(friend.person.id));
+                        }
+                      },
                       itemBuilder: (context) => [
                         PopupMenuItem(
-                          onTap: () =>
-                              _try(() => friends.remove(friend.person.id)),
+                          value: true,
                           child: Text(texts.friendsRemove),
                         ),
                       ],
@@ -301,7 +362,7 @@ class _FriendsPaneState extends State<FriendsPane> {
               for (final person in friends.outgoing)
                 _PersonRow(
                   person: person,
-                  subtitle: '@${person.handle}',
+                  subtitle: person.handleLine,
                   trailing: Text(
                     texts.friendsWaiting,
                     style: const TextStyle(color: Colors.white38, fontSize: 13),
@@ -333,46 +394,78 @@ class _PersonRow extends StatelessWidget {
   final Widget? trailing;
 
   @override
-  Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 6),
-    child: Row(
-      children: [
-        Expanded(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: onTap,
-            child: Row(
-              children: [
-                Avatar(person: person, presence: presence),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        person.displayName,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w500,
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) {
+      final who = Row(
+        children: [
+          Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onTap,
+              child: Row(
+                children: [
+                  Avatar(person: person, presence: presence),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          person.shownName,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                          ),
                         ),
-                      ),
-                      Text(
-                        subtitle,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(color: subtitleColor, fontSize: 12.5),
-                      ),
-                    ],
+                        Text(
+                          subtitle,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: subtitleColor,
+                            fontSize: 12.5,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
-        ),
-        ?trailing,
-      ],
-    ),
+        ],
+      );
+      final buttons = trailing;
+      // On a small phone the buttons go under the name instead of pushing it off the row.
+      final narrow = box.maxWidth < 440;
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: buttons == null
+            ? who
+            : narrow
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  who,
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: buttons,
+                    ),
+                  ),
+                ],
+              )
+            : Row(
+                children: [
+                  Expanded(child: who),
+                  buttons,
+                ],
+              ),
+      );
+    },
   );
 }
 

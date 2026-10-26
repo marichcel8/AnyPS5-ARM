@@ -1,5 +1,6 @@
 import AnyPS5Core
 import AppKit
+import CoreImage
 import SwiftUI
 
 /// Draws the launcher's screens into PNG files offscreen: no window opens, nothing is saved.
@@ -19,6 +20,27 @@ enum PreviewRenderer {
         ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_SELECT"]?.split(separator: ",").first.map(String.init)
     }
 
+    /// ANYPS5_PREVIEW_THEME=<number> (3 for Glass) draws the screens in another theme than Cosmic.
+    static let theme: Theme = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_THEME"].flatMap(Int.init).flatMap(Theme.init(rawValue:)) ?? .cosmic
+
+    /// The desktop the Glass previews put behind the see-through window: ANYPS5_PREVIEW_WALLPAPER
+    /// or the system's default desktop picture, blurred, a little dimmed and more saturated, roughly
+    /// as the window server's dark sidebar material does. A mock: an offscreen render has no window, so nothing is behind it.
+    static let mockDesktop: NSImage? = {
+        let path = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_WALLPAPER"] ?? "/System/Library/CoreServices/DefaultDesktop.heic"
+        guard let small = Artwork.decode(URL(fileURLWithPath: path), maxPixels: 640), let cgImage = small.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let input = CIImage(cgImage: cgImage)
+        let dim = CIVector(x: 0.86, y: 0, z: 0, w: 0)
+        let output = input.clampedToExtent()
+            .applyingGaussianBlur(sigma: 14)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.35])
+            .applyingFilter("CIColorMatrix", parameters: ["inputRVector": dim, "inputGVector": CIVector(x: 0, y: 0.86, z: 0, w: 0),
+                                                          "inputBVector": CIVector(x: 0, y: 0, z: 0.86, w: 0), "inputBiasVector": CIVector(x: 0.04, y: 0.04, z: 0.05, w: 0)])
+            .cropped(to: input.extent)
+        guard let mock = CIContext(options: [.cacheIntermediates: false]).createCGImage(output, from: input.extent) else { return nil }
+        return NSImage(cgImage: mock, size: NSSize(width: mock.width, height: mock.height))
+    }()
+
     static func run(output: URL, games root: URL) {
         try? FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         // ANYPS5_PREVIEW_SELECT=<title ID>[,<title ID>…] puts those games first, in that order: the
@@ -29,8 +51,16 @@ enum PreviewRenderer {
         for game in found {
             Artwork.shared.prepare(game.icon, maxPixels: 400)
             Artwork.shared.prepare(game.background, maxPixels: Int(max(size.width, size.height) * 1.6))
+            if theme.isGlass { Artwork.shared.prepareFrosted(game.background) }
         }
+        Look.forceSolid = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_REDUCE_TRANSPARENCY"] == "1"
+        // Cards drawn outside the window (the trophy banner) read the look from here.
+        Look.current = Look.make(style: theme, reduceTransparency: false, offscreen: true, reduceMotion: false, seeThrough: mockDesktop != nil)
         var preferences = Preferences()
+        // ANYPS5_PREVIEW_GLASS_TRANSPARENCY=<percent> and ANYPS5_PREVIEW_GLASS_ARTWORK=1: Glass's
+        // window settings.
+        preferences.glassTransparency = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_GLASS_TRANSPARENCY"].flatMap(Int.init)
+        if ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_GLASS_ARTWORK"] == "1" { preferences.glassArtwork = true }
         preferences.onboarded = true
         preferences.gamesFolder = root.path
         preferences.sounds = false
@@ -40,6 +70,11 @@ enum PreviewRenderer {
         // ANYPS5_PREVIEW_SCREENSHOTS=<folder> is where the gallery looks.
         if let shots = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_SCREENSHOTS"] { preferences.screenshotsFolder = shots }
 
+        // ANYPS5_PREVIEW_BENCH=<count> times the home screen's frame in every theme instead: the
+        // background shader at a Retina window's drawable size and the interface over it.
+        if let count = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_BENCH"].flatMap(Int.init) {
+            return bench(count, preferences, found, root)
+        }
         for theme in Theme.allCases {
             stills[theme] = BackgroundView.still(theme: theme, width: 660, height: 372, time: 200)
         }
@@ -49,9 +84,9 @@ enum PreviewRenderer {
             preferences.gameArtwork = false
             render(preferences, found, root, still, output.appendingPathComponent("home-theme\(theme.rawValue).png"))
         }
-        preferences.theme = .cosmic
+        preferences.theme = theme
         preferences.gameArtwork = true
-        let still = BackgroundView.still(theme: .cosmic, width: Int(size.width), height: Int(size.height), time: 260)
+        let still = BackgroundView.still(theme: theme, width: Int(size.width), height: Int(size.height), time: 260)
         render(preferences, found, root, still, output.appendingPathComponent("home-artwork.png")) { model in signedIn(model) }
         render(preferences, found, root, still, output.appendingPathComponent("home-actions.png")) { model in signedIn(model); model.focus = .actions(0) }
         // The pointer over a whole pill (Select) and over one glyph of another (→ of Move).
@@ -76,7 +111,7 @@ enum PreviewRenderer {
         }
         let neon = ThemeDesign(id: "neon", name: "Neon Nights", author: "Ada", style: 0, deep: "#0A0014", middle: "#4A0E6B", bright: "#FF5EDB", accent: "#FF4FD8")
         let forest = ThemeDesign(id: "forest", name: "Forest", author: "Robin", style: 1, deep: "#02100A", middle: "#0E4A2C", bright: "#9BFFC4", accent: "#5CEB9F")
-        for (name, overlay, row) in [("themes", Overlay.themes, 4), ("studio", Overlay.studio, 3)] {
+        for (name, overlay, row) in [("themes", Overlay.themes, 5), ("studio", Overlay.studio, 3)] {
             let palette = overlay == .studio ? neon.palette : forest.palette
             let tinted = BackgroundView.still(theme: overlay == .studio ? .cosmic : .aurora, palette: palette, width: Int(size.width), height: Int(size.height), time: 260)
             var plain = preferences
@@ -97,7 +132,7 @@ enum PreviewRenderer {
             let tinted = BackgroundView.still(theme: .cosmic, palette: neon.palette, width: Int(size.width), height: Int(size.height), time: 260)
             render(plain, found, root, tinted, output.appendingPathComponent("themes-hub.png")) { model in
                 model.previewThemes([neon], active: neon, hub: hub)
-                model.overlay = .themes; model.panelInRows = true; model.panelRow = 10
+                model.overlay = .themes; model.panelInRows = true; model.panelRow = 11
             }
         }
         render(preferences, found, root, still, output.appendingPathComponent("together.png")) { model in
@@ -226,6 +261,46 @@ enum PreviewRenderer {
             model.previewVoice(call: "call1", speaking: ["f1"])
             model.overlay = .party; model.panelInRows = true; model.panelRow = 0
         }
+        // Play Together: Mira started a game for the party (Join), and playing it with her.
+        let lanTitle = found.first?.titleID ?? "PPSA17221"
+        let lanVersion = found.first.map { TogetherGameSession.gameVersion($0.version) } ?? "01.044.000"
+        let lan = TogetherPartyTogether(sessionId: "gs1", hostId: "f1", titleId: lanTitle, gameVersion: lanVersion, engineBuild: "0.2.21-4194", players: ["f1"], capacity: 8)
+        render(preferences, found, root, still, output.appendingPathComponent("party-together.png")) { model in
+            model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: nil)
+            model.togetherFriends = partyFriends
+            model.previewParty(TogetherParty(id: "p1", leaderId: "f1", privacy: "invite", members: [people[0], robin, people[1]], invited: [], call: nil, together: lan))
+            model.overlay = .party; model.panelInRows = true; model.panelRow = 0
+        }
+        render(preferences, found, root, still, output.appendingPathComponent("party-together-playing.png")) { model in
+            model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: nil)
+            model.togetherFriends = partyFriends
+            let playing = TogetherPartyTogether(sessionId: "gs1", hostId: "f1", titleId: lanTitle, gameVersion: lanVersion, engineBuild: "0.2.21-4194",
+                                                players: ["f1", "u1", "f2"], capacity: 8)
+            model.previewParty(TogetherParty(id: "p1", leaderId: "f1", privacy: "invite", members: [people[0], robin, people[1]], invited: [], call: nil, together: playing))
+            model.previewGameSession(TogetherGameSession(id: "gs1", kind: .lan, partyId: "p1", host: people[0], titleId: lanTitle, gameVersion: lanVersion,
+                                                         engineBuild: "0.2.21-4194", capacity: 8, joinable: true, players: [people[0], robin, people[1]]), invites: [])
+            model.peerLinks = ["f1": OnlinePeerLinkInfo(userId: "f1", route: .direct, rttMs: 23), "f2": OnlinePeerLinkInfo(userId: "f2", route: .relay, rttMs: 81)]
+            model.overlay = .party; model.panelInRows = true; model.panelRow = 0
+        }
+        // Leaving the party asks first, Cancel focused; Bora tried anyway with another game version.
+        render(preferences, found, root, still, output.appendingPathComponent("party-leave-ask.png")) { model in
+            model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: nil)
+            model.togetherFriends = partyFriends
+            let anyway = TogetherPartyTogether(sessionId: "gs1", hostId: "f1", titleId: lanTitle, gameVersion: lanVersion, engineBuild: "0.2.21-4194",
+                                               players: ["f1", "f2"], versionOverrides: ["f2"], capacity: 8)
+            model.previewParty(TogetherParty(id: "p1", leaderId: "f1", privacy: "invite", members: [people[0], robin, people[1]], invited: [], call: nil, together: anyway))
+            model.overlay = .party; model.panelInRows = true
+            model.ask("party-leave")
+        }
+        render(preferences, found, root, still, output.appendingPathComponent("party-together-anyway.png")) { model in
+            model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: nil)
+            model.togetherFriends = partyFriends
+            let other = TogetherPartyTogether(sessionId: "gs1", hostId: "f1", titleId: lanTitle, gameVersion: "09.000.000", engineBuild: model.previewEngineBuild(lanTitle) ?? "0.2.21-4194",
+                                              players: ["f1"], capacity: 8)
+            model.previewParty(TogetherParty(id: "p1", leaderId: "f1", privacy: "invite", members: [people[0], robin, people[1]], invited: [], call: nil, together: other))
+            model.togetherVersionRefused = ["gs1"]
+            model.overlay = .party; model.panelInRows = true; model.panelRow = 0
+        }
         render(preferences, found, root, still, output.appendingPathComponent("call-ringing.png")) { model in
             model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: nil)
             model.previewRinging(TogetherRinging(callId: "call2", from: people[0], device: "sess-f1"))
@@ -342,6 +417,21 @@ enum PreviewRenderer {
         }
         render(preferences, found, root, still, output.appendingPathComponent("game-settings-r1.png")) { model in model.overlay = .gameSettings; model.panelInRows = true; model.panelRow = 1; model.switchGame(1) }
         render(preferences, found, root, still, output.appendingPathComponent("settings.png")) { model in model.overlay = .settings; model.panelInRows = true; model.panelRow = 0 }
+        if theme.isGlass {
+            // Appearance's Glass Transparency row.
+            render(preferences, found, root, still, output.appendingPathComponent("settings-glass.png")) { model in model.overlay = .settings; model.panelInRows = true; model.panelRow = 5 }
+        }
+        // Settings → Steam over a made-up Steam folder (the Mac's own is never read here): AnyPS5
+        // added, the Add row focused.
+        render(preferences, found, root, still, output.appendingPathComponent("settings-steam.png")) { model in
+            let install = SteamInstall(root: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Steam"))
+            model.steam = SteamState(installs: [install], accounts: [(install, SteamUser(id: "52079950", persona: "Utku", mostRecent: true)),
+                                                                     (install, SteamUser(id: "22202", persona: "Siler"))], inSteam: 1)
+            model.overlay = .settings
+            model.panelCategory = model.panelCategories().firstIndex { $0.id == "steam" } ?? 0
+            model.panelInRows = true
+            model.panelRow = 5
+        }
         for category in 1..<6 {
             render(preferences, found, root, still, output.appendingPathComponent("settings\(category).png")) { model in model.overlay = .settings; model.panelCategory = category }
         }
@@ -376,9 +466,10 @@ enum PreviewRenderer {
                 model.togetherUser = TogetherUser(id: "u1", handle: "robin", displayName: "Robin", avatar: "https://anytogether.test/api/v1/avatars/0.jpg")
                 model.profilePicture = picture
                 model.overlay = .settings
-                model.panelCategory = model.panelCategories().firstIndex { $0.id == "behaviour" } ?? 0
+                // The picture is the profile's: Settings → Profiles.
+                model.panelCategory = model.panelCategories().firstIndex { $0.id == "profiles" } ?? 0
                 model.panelInRows = true
-                model.panelRow = 1
+                model.panelRow = model.panelCategories()[model.panelCategory].rows.firstIndex { $0.id == "picture" } ?? 1
             }
             render(preferences, found, root, still, output.appendingPathComponent("profile-crop.png")) { model in
                 signedIn(model)
@@ -392,6 +483,8 @@ enum PreviewRenderer {
         render(preferences, found, root, still, output.appendingPathComponent("library.png")) { model in model.overlay = .library; model.libraryIndex = 1 }
         renderBanner(preferences, found, root, output.appendingPathComponent("trophy-banner.png"))
         renderRingBanner(TogetherRinging(callId: "call2", from: people[0], device: "sess-f1"), output.appendingPathComponent("call-banner.png"))
+        renderNewGame(preferences, found, root, still, output)
+        renderPrepare(preferences, found, root, still, output)
         var fresh = preferences
         fresh.onboarded = false
         fresh.gamesFolder = nil
@@ -403,6 +496,14 @@ enum PreviewRenderer {
         DiscoverPreviews.run(preferences, found, root, still, output)
         BroadcastPreviews.run(preferences, found, root, still, output)
         CloudPreviews.run(preferences, found, root, still, output)
+        LevelPreviews.run(preferences, found, root, still, output)
+        ChatPreviews.run(preferences, found, root, still, output)
+        UpdatePreviews.run(preferences, found, root, still, output)
+        ControllerPreviews.run(preferences, found, root, still, output)
+        BrowserPlayPreviews.run(preferences, found, root, still, output)
+        HomeMenuPreviews.run(preferences, found, root, still, output)
+        ProfilePreviews.run(preferences, found, root, still, output)
+        PowerPreviews.run(preferences, found, root, still, output)
         print("rendered into \(output.path)")
     }
 
@@ -428,6 +529,98 @@ enum PreviewRenderer {
         renderer.scale = 1
         guard let image = renderer.cgImage else { return }
         try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file)
+    }
+
+    /// A game just copied into the games folder: the toast in the launcher, and the banner over
+    /// everything when the launcher is in the background (one game, then three).
+    static func renderNewGame(_ preferences: Preferences, _ games: [Game], _ root: URL, _ still: NSImage?, _ output: URL) {
+        let pick = selectedTitle.flatMap { id in games.first { $0.titleID == id } } ?? games.first
+        guard let game = pick else { return }
+        render(preferences, games, root, still, output.appendingPathComponent("new-game-toast.png")) { model in
+            model.selected = model.games.firstIndex(of: game) ?? 0
+            model.show(T.format(.newGame, game.name), symbol: "gamecontroller.fill", icon: game.icon)
+        }
+        let cards: [(String, NoticeToast)] = [
+            ("new-game-banner.png", NoticeToast(title: T.format(.newGame, game.name), detail: T.text(.newGameDetail), symbol: "gamecontroller.fill", icon: game.icon, still: true) {}),
+            ("new-games-banner.png", NoticeToast(title: T.format(.newGames, 3), detail: ListFormatter.localizedString(byJoining: games.prefix(3).map(\.name)), symbol: "gamecontroller.fill", still: true) {}),
+        ]
+        for (name, card) in cards {
+            let file = output.appendingPathComponent(name)
+            if let only = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_ONLY"]?.split(separator: ","), !only.contains(where: { file.lastPathComponent.hasPrefix($0) }) { continue }
+            let view = ZStack(alignment: .top) {
+                Color(white: 0.15)
+                card
+            }
+            .frame(width: TrophyBanner.size.width, height: TrophyBanner.size.height)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            guard let image = renderer.cgImage else { continue }
+            try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file)
+        }
+    }
+
+    /// The free-space check and new games prepared in the background: the no-space panel, the
+    /// notices, a game being prepared and paused on the home screen, the setting.
+    static func renderPrepare(_ preferences: Preferences, _ games: [Game], _ root: URL, _ still: NSImage?, _ output: URL) {
+        let pick = selectedTitle.flatMap { id in games.first { $0.titleID == id } } ?? games.first
+        guard let game = pick else { return }
+        let others = games.filter { $0 != game }
+        func select(_ model: AppModel) { model.selected = model.games.firstIndex(of: game) ?? 0 }
+        let shortage = SpaceShortage(needed: 14_200_000_000, free: 3_100_000_000, volume: "Macintosh HD", copying: false)
+        render(preferences, games, root, still, output.appendingPathComponent("prepare-no-space.png")) { model in
+            select(model)
+            model.spaceShortage = (game, shortage)
+            model.open(.noSpace)
+            model.panelRow = 1
+        }
+        let toasts: [(String, String, String)] = [
+            ("prepare-toast-new.png", AppModel.newGameText([game.name], preparing: true, waiting: false, skipped: nil), "gamecontroller.fill"),
+            ("prepare-toast-waiting.png", AppModel.newGameText([game.name], preparing: false, waiting: true, skipped: nil), "gamecontroller.fill"),
+            ("prepare-toast-ready.png", TPrep.format(.readyToPlay, game.name), "checkmark.circle.fill"),
+            ("prepare-toast-battery.png", AppModel.newGameText([game.name], preparing: false, waiting: false, skipped: .battery(18)), "gamecontroller.fill"),
+            ("prepare-toast-space.png", TPrep.format(.notPreparedSpace, game.name, shortage.needed.byteText, shortage.free.byteText), "externaldrive.badge.exclamationmark"),
+            ("prepare-toast-play-when-ready.png", TPrep.format(.startsWhenReady, game.name), "play.circle.fill"),
+        ]
+        for (name, text, symbol) in toasts {
+            render(preferences, games, root, still, output.appendingPathComponent(name)) { model in
+                select(model)
+                model.show(text, symbol: symbol, icon: game.icon)
+            }
+        }
+        render(preferences, games, root, still, output.appendingPathComponent("prepare-home.png")) { model in
+            select(model)
+            model.previewProgress(game, step: .relink, fraction: 0.42)
+            model.previewPreparing(game, waiting: Array(others.prefix(1)))
+        }
+        render(preferences, games, root, still, output.appendingPathComponent("prepare-home-paused.png")) { model in
+            select(model)
+            model.previewProgress(game, step: .relink, fraction: 0.42)
+            model.previewPreparing(game, paused: true)
+        }
+        if let next = others.first {
+            render(preferences, games, root, still, output.appendingPathComponent("prepare-home-waiting.png")) { model in
+                model.selected = model.games.firstIndex(of: next) ?? 0
+                model.previewProgress(game, step: .relink, fraction: 0.42)
+                model.previewPreparing(game, waiting: [next])
+            }
+        }
+        render(preferences, games, root, still, output.appendingPathComponent("prepare-settings.png")) { model in
+            model.overlay = .settings
+            model.panelCategory = model.panelCategories().firstIndex { $0.id == "library" } ?? 0
+            model.panelInRows = true
+            model.panelRow = model.panelCategories()[model.panelCategory].rows.firstIndex { $0.id == "prepare" } ?? 0
+        }
+        let file = output.appendingPathComponent("prepare-banner-ready.png")
+        if ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_ONLY"]?.split(separator: ",").contains(where: { file.lastPathComponent.hasPrefix($0) }) ?? true {
+            let view = ZStack(alignment: .top) {
+                Color(white: 0.15)
+                NoticeToast(title: TPrep.format(.readyToPlay, game.name), detail: TPrep.text(.readyToPlayDetail), symbol: "checkmark.circle.fill", icon: game.icon, still: true) {}
+            }
+            .frame(width: TrophyBanner.size.width, height: TrophyBanner.size.height)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            if let image = renderer.cgImage { try? NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])?.write(to: file) }
+        }
     }
 
     /// The ringing card over a game, on a picture of one (ANYPS5_PREVIEW_BANNER_BACKDROP) or black.
@@ -569,6 +762,35 @@ enum PreviewRenderer {
         model.social.notifications.load(TogetherNotificationPage(notifications: [], unread: 3, more: false))
     }
 
+    static func bench(_ count: Int, _ preferences: Preferences, _ games: [Game], _ root: URL) {
+        func milliseconds(_ work: () -> Void) -> Double {
+            let start = CACurrentMediaTime()
+            for _ in 0..<count { work() }
+            return (CACurrentMediaTime() - start) * 1000 / Double(count)
+        }
+        for theme in Theme.allCases {
+            var preferences = preferences
+            preferences.theme = theme
+            preferences.gameArtwork = true
+            Look.current = Look.make(style: theme, reduceTransparency: false, offscreen: true, reduceMotion: false)
+            if theme.isGlass { for game in games { Artwork.shared.prepareFrosted(game.background) } }
+            // The live view draws at half the window's pixels: 1600x900 for a 1600x900 window at 2x.
+            let shader = BackgroundView.gpuMilliseconds(theme: theme, width: 1600, height: 900, frames: count) ?? -1
+            let still = BackgroundView.still(theme: theme, width: Int(size.width), height: Int(size.height), time: 260)
+            let model = AppModel(preferences: preferences)
+            model.preview(games: games, root: root)
+            model.selected = selectedTitle.flatMap { id in games.firstIndex { $0.titleID == id } } ?? 0
+            model.focus = .actions(0)
+            let view = RootView().environmentObject(model).environment(\.stillBackground, still).frame(width: size.width, height: size.height)
+            let interface = milliseconds {
+                let renderer = ImageRenderer(content: view)
+                renderer.scale = 2
+                _ = renderer.cgImage
+            }
+            print(String(format: "%@: background shader %.3f ms GPU a frame at 1600x900, home screen offscreen at 2x %.1f ms CPU", theme.title, shader, interface))
+        }
+    }
+
     static func render(_ preferences: Preferences, _ games: [Game], _ root: URL, _ still: NSImage?, _ file: URL, configure: (AppModel) -> Void = { _ in }) {
         // ANYPS5_PREVIEW_ONLY=party,messages draws only the screens whose file names start so.
         if let only = ProcessInfo.processInfo.environment["ANYPS5_PREVIEW_ONLY"]?.split(separator: ","), !only.contains(where: { file.lastPathComponent.hasPrefix($0) }) { return }
@@ -578,12 +800,26 @@ enum PreviewRenderer {
         let pick = selectedTitle.flatMap { id in games.firstIndex { $0.titleID == id } }
         model.selected = pick ?? min(1, max(0, games.count - 1))
         configure(model)
+        // Glass's see-through window over the mock desktop, labelled as the mock it is.
+        let look = Look.make(style: model.lookStyle, reduceTransparency: false, offscreen: true, reduceMotion: false,
+                             transparency: preferences.glassTransparency, seeThrough: mockDesktop != nil)
         let view = RootView()
             .environmentObject(model)
             .environment(\.stillBackground, still)
             .environment(\.themeStills, stills)
             .environment(\.hintHover, hintHover)
+            .environment(\.mockDesktop, mockDesktop)
             .frame(width: size.width, height: size.height)
+            .overlay(alignment: .bottomLeading) {
+                if look.seeThrough {
+                    Text("MOCK · desktop composited offscreen, blurred by Core Image, not the live window server blur")
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.black)
+                        .padding(.horizontal, 10).padding(.vertical, 5)
+                        .background(Color.yellow, in: Capsule())
+                        .padding(14)
+                }
+            }
         let renderer = ImageRenderer(content: view)
         renderer.scale = 1
         guard let image = renderer.cgImage else { print("could not render \(file.lastPathComponent)"); return }

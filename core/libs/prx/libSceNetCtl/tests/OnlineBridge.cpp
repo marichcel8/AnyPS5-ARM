@@ -2,6 +2,7 @@
 #include "prx/libSceNetCtl/include/OnlineBridge.hpp"
 #include "prx/libSceNetCtl/include/OnlineEnvironment.hpp"
 #include "prx/libSceNetCtl/include/OnlineObserver.hpp"
+#include "prx/libSceNetCtl/include/OnlineSocket.hpp"
 #include "prx/libSceNetCtl/include/OnlineWire.hpp"
 #include <algorithm>
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -16,7 +18,6 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
-#include <unistd.h>
 #include <vector>
 
 using namespace Online;
@@ -210,7 +211,7 @@ void handshakeAndAccount() {
     require(state.generation == 1, "the first account is generation 1");
     require(launcher.ProvenSessions() == 1, "the launcher accepted the engine's proof");
     const auto hello = launcher.LastHello();
-    require(hello && hello->protocol == Wire::Protocol && hello->build == "test-build" && hello->pid == static_cast<std::uint32_t>(::getpid()),
+    require(hello && hello->protocol == Wire::Protocol && hello->build == "test-build" && hello->pid == Online::Net::ProcessId(),
         "hello carries protocol, build and process");
 
     auto changed = signedInAccount();
@@ -409,6 +410,77 @@ void datagrams() {
         "while the launcher is gone datagrams are dropped");
 }
 
+void streams() {
+    Wire::Stream open;
+    open.type = Wire::Type::StreamOpen;
+    open.stream = 5;
+    open.peer = 0xC6120002u;
+    open.peerPort = 3659;
+    open.peerVport = 1;
+    open.localPort = 3660;
+    open.localVport = 5;
+    require(hex(Wire::Frame(Wire::Type::StreamOpen, 0, 0, Wire::Encode(open))) == "10000000" "1103" "0000" "00000000" "05000000" "020012c6" "4b0e" "0100" "4c0e" "0500",
+        "stream open layout");
+    Wire::Stream data;
+    data.type = Wire::Type::StreamData;
+    data.stream = 0x80000001u;
+    data.data = {1, 2, 3};
+    require(hex(Wire::Encode(data)) == "01000080" "03000000" "010203", "stream data layout");
+    Wire::Stream close;
+    close.type = Wire::Type::StreamClose;
+    close.stream = 5;
+    close.reason = Wire::StreamCloseReason::Refused;
+    require(hex(Wire::Encode(close)) == "05000000" "01", "stream close layout");
+    Wire::Stream accept;
+    accept.type = Wire::Type::StreamAccept;
+    accept.stream = 0x80000001u;
+    require(hex(Wire::Encode(accept)) == "01000080", "stream accept layout");
+
+    const auto openBack = Wire::DecodeStream(Wire::Type::StreamOpen, Wire::Encode(open));
+    require(openBack && openBack->stream == 5 && openBack->peer == 0xC6120002u && openBack->peerPort == 3659 && openBack->peerVport == 1 && openBack->localPort == 3660 &&
+            openBack->localVport == 5,
+        "stream open round trip");
+    const auto dataBack = Wire::DecodeStream(Wire::Type::StreamData, Wire::Encode(data));
+    require(dataBack && dataBack->stream == 0x80000001u && dataBack->data == data.data, "stream data round trip");
+    const auto closeBack = Wire::DecodeStream(Wire::Type::StreamClose, Wire::Encode(close));
+    require(closeBack && closeBack->reason == Wire::StreamCloseReason::Refused, "stream close round trip");
+    require(Wire::DecodeStream(Wire::Type::StreamClose, std::vector<std::uint8_t>{5, 0, 0, 0, 9})->reason == Wire::StreamCloseReason::Reset, "an unknown reason is a break");
+    require(!Wire::DecodeStream(Wire::Type::StreamAccept, std::vector<std::uint8_t>{0, 0, 0, 0}), "stream 0 is never one");
+    require(!Wire::DecodeStream(Wire::Type::StreamClose, std::vector<std::uint8_t>{5, 0, 0}), "a short stream frame is dropped");
+    open.peer = 0x0A000001u;
+    require(!Wire::DecodeStream(Wire::Type::StreamOpen, Wire::Encode(open)), "a stream from outside the virtual network is dropped");
+    require(!Wire::DecodeStream(Wire::Type::Datagram, Wire::Encode(accept)), "only stream types decode as streams");
+
+    Testing::FakeLauncher launcher(testSecret());
+    launcher.SetAccount(signedInAccount());
+    Bridge bridge(launcher.Port(), testSecret(), fastOptions());
+    require(bridge.Account().connected, "connected");
+    std::mutex receivedMutex;
+    std::vector<Wire::Stream> received;
+    bridge.SetStreamReceiver([&](const Wire::Stream& in) {
+        std::lock_guard lock(receivedMutex);
+        received.push_back(in);
+    });
+    open.peer = 0xC6120002u;
+    require(bridge.SendStream(open) && bridge.SendStream(accept) && bridge.SendStream(close), "stream frames are queued");
+    require(launcher.WaitForStreams(3, 3000ms), "stream frames reach the launcher");
+    const auto sent = launcher.Streams();
+    require(sent[0].type == Wire::Type::StreamOpen && sent[1].type == Wire::Type::StreamAccept && sent[2].type == Wire::Type::StreamClose, "in order");
+    Wire::Stream big = data;
+    big.data.assign(Wire::MaxStreamData + 1, 0);
+    require(!bridge.SendStream(big), "stream data over 64 KiB is refused");
+    launcher.Send(Wire::Type::StreamData, 0, 0, Wire::Encode(data));
+    require(eventually([&] {
+        std::lock_guard lock(receivedMutex);
+        return received.size() == 1 && received[0].type == Wire::Type::StreamData && received[0].data == data.data;
+    }), "the launcher's stream data reaches the receiver");
+    launcher.DropClient();
+    require(eventually([&] {
+        std::lock_guard lock(receivedMutex);
+        return received.size() >= 2 && received[1].type == Wire::Type::StreamClose && received[1].stream == 0 && received[1].reason == Wire::StreamCloseReason::Reset;
+    }), "a dropped connection ends every stream");
+}
+
 std::vector<std::string> readLines(const std::string& path) {
     std::ifstream file(path);
     std::vector<std::string> lines;
@@ -417,11 +489,10 @@ std::vector<std::string> readLines(const std::string& path) {
 }
 
 void observerFile() {
-    char pattern[] = "/tmp/online-observer-XXXXXX";
-    const int descriptor = ::mkstemp(pattern);
-    require(descriptor >= 0, "temporary file");
-    ::close(descriptor);
-    const std::string path = pattern;
+    const auto path = (std::filesystem::temp_directory_path() /
+        ("online-observer-" + std::to_string(Online::Net::ProcessId()) + "-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()))).string();
+    { std::ofstream create(path); require(create.good(), "temporary file"); }
     {
         Observer observer(path, 1000ms);
         std::vector<std::string> forwarded;
@@ -456,6 +527,47 @@ void observerFile() {
     for (const auto& line : lines) require(line.starts_with("{\"v\":1,\"t_ms\":") && line.ends_with("}"), "every line is a v1 JSON object");
 }
 
+void pushEvents() {
+    Wire::PushEvent event{"sm", 1, "c", "t:x", {'{', '}'}, {{"k", "v"}}, 2, 3, "b"};
+    const auto bytes = Wire::Encode(event);
+    require(hex(bytes) == "0200736d" "01000000" "010063" "0300743a78" "020000007b7d" "0100" "01006b" "010076" "0200000000000000" "0300000000000000" "010062",
+        "push event layout");
+    const auto back = Wire::DecodePushEvent(bytes);
+    require(back && back->service == "sm" && back->label == 1 && back->pushContextId == "c" && back->dataType == "t:x" && back->data == event.data &&
+            back->extended == event.extended && back->to == 2 && back->from == 3 && back->fromOnlineId == "b",
+        "push event round trip");
+    auto bad = event;
+    bad.dataType.clear();
+    require(!Wire::DecodePushEvent(Wire::Encode(bad)), "a push event without a data type is dropped");
+    bad.dataType = std::string(Wire::MaxPushDataType + 1, 'x');
+    require(!Wire::DecodePushEvent(Wire::Encode(bad)), "a data type longer than the platform holds is dropped");
+    bad = event;
+    bad.extended = {{std::string(Wire::MaxPushExtendedKey + 1, 'k'), "v"}};
+    require(!Wire::DecodePushEvent(Wire::Encode(bad)), "an extended data key longer than the platform holds is dropped");
+    bad = event;
+    bad.pushContextId = std::string(Wire::MaxPushContextId + 1, 'c');
+    require(!Wire::DecodePushEvent(Wire::Encode(bad)), "a push context longer than a UUID is dropped");
+
+    Testing::FakeLauncher launcher(testSecret());
+    launcher.SetAccount(signedInAccount());
+    Bridge bridge(launcher.Port(), testSecret(), fastOptions());
+    require(bridge.Account().connected, "connected");
+    std::mutex receivedMutex;
+    std::vector<Wire::PushEvent> received;
+    bridge.SetPushReceiver([&](const Wire::PushEvent& in) {
+        std::lock_guard lock(receivedMutex);
+        received.push_back(in);
+    });
+    launcher.Send(Wire::Type::PushEvent, 0, 0, Wire::Encode(bad));
+    launcher.Send(Wire::Type::PushEvent, 0, 0, Wire::Encode(event));
+    require(eventually([&] {
+        std::lock_guard lock(receivedMutex);
+        return received.size() == 1;
+    }), "a push event from the launcher reaches the receiver");
+    std::lock_guard lock(receivedMutex);
+    require(received[0].dataType == "t:x" && received[0].pushContextId == "c", "only the well-formed event arrives");
+}
+
 }
 
 int main() {
@@ -477,6 +589,8 @@ int main() {
         {"no launcher", noLauncher},
         {"observer file", observerFile},
         {"datagrams", datagrams},
+        {"streams", streams},
+        {"push events", pushEvents},
     };
     int failed = 0;
     for (const auto& [name, test] : tests) {

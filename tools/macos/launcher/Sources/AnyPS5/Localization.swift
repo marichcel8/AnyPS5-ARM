@@ -44,13 +44,14 @@ enum T {
         case titleID, version, size, status, folder
         case gameSettings, resolution, resolutionDefault, outputResolution, outputResolutionDetail, outputGame, outputDisplay, display, windowed, fullscreen, windowSize, vsync, on, off
         case overlay, overlayOff, overlayTopLeft, overlayTopRight, overlayBottomLeft, overlayBottomRight, overlayStyle, overlayMinimal, overlayDetailed, frameGeneration, frameGenerationDetail, frameGenerationLowPower, linkNoGame, folderNoGames, useGamesFolder, useGamesFolderDetail, useGamesFolderConfirm, copyLink, linkCopied, saveSync, saveSyncDetail, saveSyncNoFolder, syncFolder, syncFolderICloud, syncFolderNone, savesSyncedFrom, saveSyncFailed, clips, clipsDetail, clipLength, seconds, clipsNeedPermission, clipsNeedPermissionDetail, clipsOff, clipsOffDetail, clipSaved, clipSavedDetail, clipFailed, lowPowerTitle, lowPowerFrameGeneration, lowPowerRefresh, gameLanguage, followLauncher
+        case newGame, newGames, newGameDetail
         case reinstall, showInFinder, openLog, uninstall, clearShaderCache, uninstallConfirm, uninstallDone, cacheCleared
         case appearance, theme, accent, background, backgroundTheme, backgroundImage, backgroundVideo, chooseFile, gameArtwork
         case motion, motionFull, motionReduced, sounds, language, storage, rescan, installedSize, about, aboutText, toolkitVersion
         case profileName, behaviour, hideWhilePlaying, rosettaMissing, rosettaInstall, rosettaInstalled
         case moveToApplications, moveToApplicationsText, moveNow, later, noToolkit
         case emptyLibraryTitle, emptyLibraryText, scanning, allGames, sortName, playTime
-        case themeCosmic, themeAurora, themeSunset, hintMove, hintGame, hintSelect, hintBack, hintOptions
+        case themeCosmic, themeAurora, themeSunset, themeGlass, hintMove, hintGame, hintSelect, hintBack, hintOptions
         case unlockFailed, startFailed, gameEnded, logTitle, close, quit, confirm
         case unreadableDump
         case togetherIntro, togetherIntroDetail, togetherEmail, togetherSendCode, togetherWithWebsite, togetherWithWebsiteDetail, togetherCodeSent, togetherCode, togetherSignIn, togetherOtherEmail, togetherTypeCode, togetherOpenWebsite, togetherWelcome, togetherSignOut, togetherOnline, togetherConnected, togetherConnecting, togetherSignedOutElsewhere, togetherEmailInvalid, togetherCodeWrong, togetherCodeExpired, togetherCodeLocked, togetherTooMany, togetherUnreachable
@@ -145,7 +146,7 @@ enum T {
         .messagesStart: "Konuşma başlat",
         .messagesSayHello: "Merhaba de",
         .messagesYou: "Sen: %@",
-        .messagesDeleted: "Mesaj silindi",
+        .messagesDeleted: "Mesaj kaldırıldı",
         .messagesWrite: "Bir mesaj yaz…",
         .messagesFrom: "%@: %@",
         .messagesPick: "Bir konuşma seç",
@@ -406,6 +407,9 @@ enum T {
         .frameGenerationLowPower: "Düşük Güç Modu açık: ekran 60 Hz'de kalıyor, ara kare çalışmaz",
         .linkNoGame: "%@ kütüphanende yok",
         .folderNoGames: "Bu klasörde PS5 oyunu yok",
+        .newGame: "Yeni oyun: %@",
+        .newGames: "%d yeni oyun",
+        .newGameDetail: "Oyunlar klasörüne eklendi",
         .useGamesFolder: "Oyun klasörü “%@” olsun mu?",
         .useGamesFolderDetail: "İçinde %d oyun var: %@. Launcher oyunlarını bundan sonra burada arar.",
         .useGamesFolderConfirm: "Oyun Klasörü Yap",
@@ -540,6 +544,7 @@ enum T {
         .themeCosmic: "Kozmik",
         .themeAurora: "Aurora",
         .themeSunset: "Gün Batımı",
+        .themeGlass: "Cam",
         .hintMove: "Gezin",
         .hintGame: "Oyun",
         .hintSelect: "Seç",
@@ -733,7 +738,7 @@ enum T {
         .messagesStart: "Start a conversation",
         .messagesSayHello: "Say hello",
         .messagesYou: "You: %@",
-        .messagesDeleted: "Message deleted",
+        .messagesDeleted: "Message removed",
         .messagesWrite: "Write a message…",
         .messagesFrom: "%@: %@",
         .messagesPick: "Pick a conversation",
@@ -994,6 +999,9 @@ enum T {
         .frameGenerationLowPower: "Low Power Mode is on: the display stays at 60 Hz, so frame generation cannot work",
         .linkNoGame: "%@ is not in your library",
         .folderNoGames: "There is no PS5 game in that folder",
+        .newGame: "New game: %@",
+        .newGames: "%d new games",
+        .newGameDetail: "Added to your games folder",
         .useGamesFolder: "Use “%@” as the games folder?",
         .useGamesFolderDetail: "It holds %d games: %@. The launcher looks for games there from now on.",
         .useGamesFolderConfirm: "Use as Games Folder",
@@ -1128,6 +1136,7 @@ enum T {
         .themeCosmic: "Cosmic",
         .themeAurora: "Aurora",
         .themeSunset: "Sunset",
+        .themeGlass: "Glass",
         .hintMove: "Move",
         .hintGame: "Game",
         .hintSelect: "Select",

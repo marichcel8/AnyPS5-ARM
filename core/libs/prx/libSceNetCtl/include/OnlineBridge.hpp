@@ -2,6 +2,7 @@
 #define CORE_LIBS_PRX_LIBSCENETCTL_ONLINEBRIDGE_HPP
 
 #include "prx/libSceNetCtl/include/OnlineWire.hpp"
+#include "prx/libSceNetCtl/include/OnlineSocketHandle.hpp"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -43,6 +44,14 @@ public:
     std::optional<Wire::Refuse> Refusal();
     bool SendDatagram(const Wire::Datagram& datagram);
     void SetDatagramReceiver(std::function<void(const Wire::Datagram&)> receiver);
+    void SetPushReceiver(std::function<void(const Wire::PushEvent&)> receiver);
+    // Stream frames keep their order with each other and with datagrams. StreamData waits while half
+    // the queue to the launcher is full (the game's socket then fills up, as TCP would); the
+    // other stream frames never wait. False while no launcher is connected.
+    bool SendStream(const Wire::Stream& stream);
+    // Gets the launcher's stream frames on the reader thread, and a StreamClose (Reset) for
+    // stream 0 when the connection drops: every open stream ended with it.
+    void SetStreamReceiver(std::function<void(const Wire::Stream&)> receiver);
 
 private:
     struct Pending {
@@ -51,12 +60,12 @@ private:
     };
 
     void run();
-    int connectToLauncher();
-    bool handshake(int socket);
-    void readLoop(int socket);
-    void dispatch(const Wire::Header& header, std::span<const std::uint8_t> payload, int socket);
-    void disconnect(int socket);
-    bool send(int socket, Wire::Type type, std::uint16_t flags, std::uint32_t call, std::span<const std::uint8_t> payload);
+    Net::Handle connectToLauncher();
+    bool handshake(Net::Handle socket);
+    void readLoop(Net::Handle socket);
+    void dispatch(const Wire::Header& header, std::span<const std::uint8_t> payload, Net::Handle socket);
+    void disconnect(Net::Handle socket);
+    bool send(Net::Handle socket, Wire::Type type, std::uint16_t flags, std::uint32_t call, std::span<const std::uint8_t> payload);
     void waitForFirstAccount(std::unique_lock<std::mutex>& lock);
     void writeLoop();
 
@@ -72,7 +81,7 @@ private:
     bool stopping = false;
     bool gaveUp = false;
     bool warnedImpostor = false;
-    int liveSocket = -1;
+    Net::Handle liveSocket = Net::None;
     std::optional<Wire::Refuse> refusal;
     std::uint32_t lastCall = 0;
     std::map<std::uint32_t, Pending*> pending;
@@ -81,6 +90,8 @@ private:
     std::size_t outgoingBytes = 0;
     std::condition_variable outgoingChanged;
     std::function<void(const Wire::Datagram&)> datagramReceiver;
+    std::function<void(const Wire::PushEvent&)> pushReceiver;
+    std::function<void(const Wire::Stream&)> streamReceiver;
 
     std::mutex writeMutex;
     std::thread worker;

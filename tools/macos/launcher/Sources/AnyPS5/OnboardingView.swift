@@ -1,7 +1,8 @@
 import AnyPS5Core
 import SwiftUI
 
-/// First start: language, one of the three themes, then the games folder.
+/// First start: language, one of the three themes, the games folder, then offline or online
+/// (the first profile; online signs in or makes the account).
 struct OnboardingView: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
@@ -9,7 +10,7 @@ struct OnboardingView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10 * scale) {
-                ForEach(0..<3) { step in
+                ForEach(0..<4) { step in
                     Capsule()
                         .fill(Color.white.opacity(step <= model.onboardingStep ? 0.95 : 0.22))
                         .frame(width: step == model.onboardingStep ? 46 * scale : 18 * scale, height: 5 * scale)
@@ -21,7 +22,8 @@ struct OnboardingView: View {
                 switch model.onboardingStep {
                 case 0: LanguageStep()
                 case 1: ThemeStep()
-                default: FolderStep()
+                case 2: FolderStep()
+                default: ModeStep()
                 }
             }
             .id(model.onboardingStep)
@@ -75,7 +77,7 @@ private struct LanguageStep: View {
                         .foregroundStyle(focused ? Color.black : .white)
                         .padding(26 * scale)
                         .frame(width: 280 * scale, height: 150 * scale, alignment: .bottomLeading)
-                        .background(RoundedRectangle(cornerRadius: 20 * scale, style: .continuous).fill(focused ? Color.white : Color.white.opacity(0.1)))
+                        .background(FocusFill(RoundedRectangle(cornerRadius: 20 * scale, style: .continuous), focused: focused, idle: Color.white.opacity(0.1)))
                         .overlay(RoundedRectangle(cornerRadius: 20 * scale, style: .continuous).strokeBorder(Color.white.opacity(focused ? 0 : 0.14)))
                         .scaleEffect(focused ? 1.04 : 1)
                         .shadow(color: .white.opacity(focused ? 0.3 : 0), radius: 20 * scale)
@@ -92,6 +94,8 @@ private struct ThemeStep: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
     @Environment(\.themeStills) private var stills
+    /// Four themes fit where three did.
+    private var cardWidth: CGFloat { Theme.allCases.count > 3 ? 300 : 330 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 46 * scale) {
@@ -107,7 +111,7 @@ private struct ThemeStep: View {
                                 ThemeBackground(theme: theme, paused: !focused)
                             }
                         }
-                            .frame(width: 330 * scale, height: 186 * scale)
+                            .frame(width: cardWidth * scale, height: cardWidth * 0.5636 * scale)
                             .clipShape(RoundedRectangle(cornerRadius: 18 * scale, style: .continuous))
                             .focusRing(focused, radius: 18 * scale)
                         HStack {
@@ -116,7 +120,7 @@ private struct ThemeStep: View {
                             Circle().fill(theme.defaultAccent.color).frame(width: 12 * scale, height: 12 * scale)
                         }
                     }
-                    .frame(width: 330 * scale)
+                    .frame(width: cardWidth * scale)
                     .scaleEffect(focused ? 1.04 : 0.97)
                     .opacity(focused ? 1 : 0.72)
                     .onTapGesture {
@@ -145,8 +149,9 @@ private struct FolderStep: View {
                         model.pickGamesFolder()
                     }
                     if model.preferences.gamesFolder != nil {
-                        ConsoleButton(title: T.text(.start), symbol: "arrow.right", focused: model.onboardingChoice == 1, prominent: true, minWidth: 180) {
-                            model.finishOnboarding()
+                        ConsoleButton(title: TPro.text(.continueStep), symbol: "arrow.right", focused: model.onboardingChoice == 1, prominent: true, minWidth: 180) {
+                            model.onboardingChoice = 1
+                            model.onboardingConfirm()
                         }
                     }
                 }
@@ -194,6 +199,8 @@ extension AppModel {
     }
 
     func onboardingCommand(_ command: Command) -> Bool {
+        // The last step: the welcome cards, or the sign-in they lead to.
+        if onboardingStep == 3 { return overlay == .signIn ? signInCommand(command) : modeChoiceCommand(command) }
         let count = onboardingStep == 0 ? Language.allCases.count : onboardingStep == 1 ? Theme.allCases.count : (preferences.gamesFolder == nil ? 1 : 2)
         switch command {
         case .left:
@@ -224,8 +231,16 @@ extension AppModel {
         case 1:
             preferences.theme = Theme(rawValue: onboardingChoice) ?? .cosmic
             advance()
+        case 2:
+            if onboardingChoice == 1 && preferences.gamesFolder != nil {
+                profileFlow.modeChoice = 0
+                advance()
+            } else {
+                pickGamesFolder()
+                onboardingChoice = 1
+            }
         default:
-            if onboardingChoice == 1 && preferences.gamesFolder != nil { finishOnboarding() } else { pickGamesFolder(); onboardingChoice = 1 }
+            confirmModeChoice()
         }
     }
 
@@ -245,5 +260,19 @@ extension AppModel {
         withAnimation(.easeInOut(duration: 0.7)) { preferences.onboarded = true }
         focus = .tiles
         if games.isEmpty { rescan() }
+    }
+}
+
+/// The first start's last step: offline or online.
+private struct ModeStep: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.scale) private var scale
+
+    var body: some View {
+        // Online's sign-in comes up over it (the overlays are drawn on the first start too).
+        VStack(alignment: .leading, spacing: 40 * scale) {
+            StepTitle(title: TPro.text(.howToPlay), subtitle: TPro.text(.howToPlaySubtitle))
+            ProfileModeCards()
+        }
     }
 }

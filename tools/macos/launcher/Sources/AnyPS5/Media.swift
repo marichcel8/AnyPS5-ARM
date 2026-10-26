@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import CoreImage
 import ImageIO
 import SwiftUI
 
@@ -35,6 +36,44 @@ final class Artwork: ObservableObject {
             }
         }
         return nil
+    }
+
+    /// The Glass theme's frosted key art: decoded small, blurred and a little richer in color, once.
+    func frosted(_ url: URL?) -> NSImage? {
+        guard let url else { return nil }
+        let key = url.path + "@frost"
+        if let image = cache[key] { return image }
+        guard !loading.contains(key) else { return nil }
+        loading.insert(key)
+        Task.detached(priority: .userInitiated) {
+            let image = Artwork.frost(url)
+            await MainActor.run {
+                self.loading.remove(key)
+                if let image {
+                    self.cache[key] = image
+                    self.generation += 1
+                }
+            }
+        }
+        return nil
+    }
+
+    func prepareFrosted(_ url: URL?) {
+        guard let url, let image = Artwork.frost(url) else { return }
+        cache[url.path + "@frost"] = image
+    }
+
+    /// A blurred image needs few pixels: 480 across, blurred there, is as soft as a 30 point blur
+    /// over the whole window, and costs nothing to draw or to drift.
+    nonisolated static func frost(_ url: URL) -> NSImage? {
+        guard let small = decode(url, maxPixels: 480), let cgImage = small.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+        let input = CIImage(cgImage: cgImage)
+        let output = input.clampedToExtent()
+            .applyingGaussianBlur(sigma: 6.5)
+            .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 1.3, kCIInputContrastKey: 1.04])
+            .cropped(to: input.extent)
+        guard let frosted = CIContext(options: [.cacheIntermediates: false]).createCGImage(output, from: input.extent) else { return nil }
+        return NSImage(cgImage: frosted, size: NSSize(width: frosted.width, height: frosted.height))
     }
 
     nonisolated static func decode(_ url: URL, maxPixels: Int) -> NSImage? {
@@ -131,9 +170,25 @@ struct DriftingImage: View {
                 .offset(x: drift ? -proxy.size.width * 0.015 : proxy.size.width * 0.015)
                 .clipped()
         }
-        .onAppear {
+        .drifting($drift, animated: animated, period: 28)
+    }
+}
+
+extension View {
+    /// The slow drift of a background picture: running while `animated`, settling back when not (a
+    /// game playing, the launcher behind other windows), as a forever-repeating animation keeps the
+    /// window drawing frames, and the GPU busy, the whole time.
+    func drifting(_ drift: Binding<Bool>, animated: Bool, period: Double) -> some View {
+        onAppear {
             guard animated else { return }
-            withAnimation(.easeInOut(duration: 28).repeatForever(autoreverses: true)) { drift = true }
+            withAnimation(.easeInOut(duration: period).repeatForever(autoreverses: true)) { drift.wrappedValue = true }
+        }
+        .onChange(of: animated) { _, on in
+            if on {
+                withAnimation(.easeInOut(duration: period).repeatForever(autoreverses: true)) { drift.wrappedValue = true }
+            } else {
+                withAnimation(.easeOut(duration: 0.6)) { drift.wrappedValue = false }
+            }
         }
     }
 }

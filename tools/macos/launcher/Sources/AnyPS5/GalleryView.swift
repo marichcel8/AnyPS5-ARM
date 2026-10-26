@@ -18,7 +18,7 @@ struct Gallery: View {
 
     var body: some View {
         ZStack {
-            Color.black.opacity(0.78).background(.ultraThinMaterial).ignoresSafeArea()
+            FrostFill(opacity: 0.78).ignoresSafeArea()
             if model.galleryViewing, shots.indices.contains(model.galleryIndex) {
                 viewer(shots[model.galleryIndex])
             } else {
@@ -77,6 +77,7 @@ struct Gallery: View {
                     ForEach(Array(shots.enumerated()), id: \.element) { index, shot in
                         Thumbnail(url: shot, focused: index == model.galleryIndex, accent: model.accent)
                             .id(shot)
+                            .hoverTick("shot-\(index)")
                             .onTapGesture {
                                 if model.galleryIndex == index { model.galleryViewing = true } else { model.galleryIndex = index }
                             }

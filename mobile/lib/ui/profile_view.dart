@@ -270,68 +270,95 @@ class _ProfileViewState extends State<ProfileView> {
     final person = profile.person;
     final presence = profile.presence;
     final where = [
-      '@${person.handle}',
+      person.handleLine,
       if (profile.country case final code?) '${flagOf(code)} $code',
     ].join('  ·  ');
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Avatar(
-          person: person,
-          size: 68,
-          presence: presence == null || presence.state == PresenceState.offline
-              ? null
-              : presence.state,
-        ),
-        const SizedBox(width: 16),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                person.displayName,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 21,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: -0.2,
-                ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                where,
-                style: const TextStyle(color: Colors.white54, fontSize: 13),
-              ),
-              if (presence != null &&
-                  presence.state != PresenceState.offline) ...[
-                const SizedBox(height: 4),
-                Text(
-                  presenceText(texts, presence, widget.gameName),
-                  style: TextStyle(
-                    color: presenceColor(presence.state),
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
+    // On a small phone the buttons go under the bio, not beside a squeezed name.
+    return LayoutBuilder(
+      builder: (context, box) {
+        final narrow = box.maxWidth < 460;
+        final details = Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Avatar(
+              person: person,
+              size: 68,
+              presence:
+                  presence == null || presence.state == PresenceState.offline
+                  ? null
+                  : presence.state,
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    person.shownName,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 21,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.2,
+                    ),
                   ),
-                ),
-              ],
-              const SizedBox(height: 6),
-              Text(
-                profile.bio?.isNotEmpty == true ? profile.bio! : texts.noBio,
-                style: TextStyle(
-                  color: profile.bio?.isNotEmpty == true
-                      ? Colors.white70
-                      : Colors.white30,
-                  fontSize: 13.5,
-                  height: 1.35,
-                ),
+                  const SizedBox(height: 2),
+                  Text(
+                    where,
+                    style: const TextStyle(color: Colors.white54, fontSize: 13),
+                  ),
+                  if (profile.trophyLevel case final level?) ...[
+                    const SizedBox(height: 8),
+                    LevelLine(level: level),
+                  ],
+                  if (presence != null &&
+                      presence.state != PresenceState.offline) ...[
+                    const SizedBox(height: 4),
+                    Text(
+                      presenceText(texts, presence, widget.gameName),
+                      style: TextStyle(
+                        color: presenceColor(presence.state),
+                        fontSize: 13,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  Text(
+                    profile.bio?.isNotEmpty == true
+                        ? profile.bio!
+                        : texts.noBio,
+                    style: TextStyle(
+                      color: profile.bio?.isNotEmpty == true
+                          ? Colors.white70
+                          : Colors.white30,
+                      fontSize: 13.5,
+                      height: 1.35,
+                    ),
+                  ),
+                ],
               ),
+            ),
+            if (!narrow) ...[
+              const SizedBox(width: 10),
+              _actions(texts, profile),
             ],
-          ),
-        ),
-        const SizedBox(width: 10),
-        _actions(texts, profile),
-      ],
+          ],
+        );
+        if (!narrow) return details;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            details,
+            const SizedBox(height: 10),
+            Padding(
+              padding: const EdgeInsets.only(left: 84),
+              child: _actions(texts, profile),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -423,7 +450,7 @@ class _ProfileViewState extends State<ProfileView> {
   );
 
   Widget _partBody(Strings texts, ProfilePage page) {
-    final name = page.profile.person.displayName;
+    final name = page.profile.person.shownName;
     Widget empty(String text) => Padding(
       padding: const EdgeInsets.symmetric(vertical: 18),
       child: Text(
@@ -538,13 +565,18 @@ class _Totals extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 2),
-                  Text(
-                    label.toUpperCase(),
-                    style: const TextStyle(
-                      color: Colors.white38,
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.9,
+                  // One line, shrunk to fit: a long label never breaks inside a word.
+                  FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      texts.upper(label),
+                      maxLines: 1,
+                      style: const TextStyle(
+                        color: Colors.white38,
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.9,
+                      ),
                     ),
                   ),
                 ],
@@ -816,7 +848,7 @@ class _PersonChip extends StatelessWidget {
             Avatar(person: person, size: 26),
             const SizedBox(width: 8),
             Text(
-              person.displayName,
+              person.shownName,
               style: const TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ],
@@ -824,4 +856,96 @@ class _PersonChip extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// The colours a tier is drawn in: the ring's light and dark ends.
+const levelTierColors = <LevelTier, (Color, Color)>{
+  LevelTier.bronze: (Color(0xFFE2A271), Color(0xFF8A4E2B)),
+  LevelTier.silver: (Color(0xFFE8EDF5), Color(0xFF8C96A8)),
+  LevelTier.gold: (Color(0xFFFFDC7A), Color(0xFFB7862C)),
+  LevelTier.platinum: (Color(0xFFDDE9FF), Color(0xFF7FA2D9)),
+};
+
+/// The trophy level as a badge in its tier's ring (one more notch for each hundred levels), with
+/// the way to the next one.
+class LevelLine extends StatelessWidget {
+  const LevelLine({super.key, required this.level});
+
+  final TrophyLevel level;
+
+  @override
+  Widget build(BuildContext context) {
+    final texts = Texts.of(context);
+    final (light, dark) = levelTierColors[level.tier]!;
+    final top = level.nextLevelPoints == null;
+    return Row(
+      children: [
+        Container(
+          key: ValueKey('level-badge-${level.tier.name}'),
+          width: 30,
+          height: 30,
+          padding: EdgeInsets.all(level.frame >= 5 ? 2.5 : 2),
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [light, dark],
+            ),
+            boxShadow: [
+              BoxShadow(color: dark.withValues(alpha: 0.45), blurRadius: 8),
+            ],
+          ),
+          child: Container(
+            alignment: Alignment.center,
+            decoration: const BoxDecoration(
+              shape: BoxShape.circle,
+              color: Color(0xFF0B0D12),
+            ),
+            child: Text(
+              '${level.level}',
+              style: TextStyle(
+                color: light,
+                fontSize: level.level >= 100 ? 10.5 : 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                texts.trophyLevel(level.level),
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 4),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(2),
+                child: LinearProgressIndicator(
+                  value: level.progress / 100,
+                  minHeight: 3,
+                  backgroundColor: const Color(0x1FFFFFFF),
+                  valueColor: AlwaysStoppedAnimation(light),
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                top
+                    ? texts.levelTop
+                    : texts.levelProgress(level.progress, level.level + 1),
+                style: const TextStyle(color: Colors.white38, fontSize: 11.5),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 }

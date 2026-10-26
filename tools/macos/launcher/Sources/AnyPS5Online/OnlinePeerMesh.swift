@@ -12,10 +12,12 @@ import WebRTC
 ///
 /// One unordered channel without resends (`game`) carries datagrams: a 9-byte header (source
 /// port, source virtual port, destination port, destination virtual port, kind; little-endian)
-/// and the game's bytes. The sender's virtual address is not in the packet: it is the address of
+/// and the game's bytes. A second, reliable and ordered channel (`stream`) carries the game's
+/// streams as `OnlineStreamRelay` messages. The sender's virtual address is not in the packet: it is the address of
 /// whoever the connection is with, so nobody can speak for another player.
 public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sendable {
     public static let label = "game"
+    public static let streamLabel = "stream"
     static let headerSize = 9
 
     /// Its own factory, apart from share play's and the party voice's; its audio device is never
@@ -39,6 +41,7 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
         /// the mesh holds the peer).
         var connection: RTCPeerConnection!
         var channel: RTCDataChannel?
+        var streamChannel: RTCDataChannel?
         /// Candidates wait until the other side's description is set.
         var queued: [RTCIceCandidate] = []
         var haveRemote = false
@@ -69,7 +72,7 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
         }
 
         func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {
-            guard dataChannel.label == OnlinePeerMesh.label else { return }
+            guard dataChannel.label == OnlinePeerMesh.label || dataChannel.label == OnlinePeerMesh.streamLabel else { return }
             dataChannel.delegate = self
             mesh?.opened(self, dataChannel)
         }
@@ -81,7 +84,11 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
 
         func dataChannel(_ dataChannel: RTCDataChannel, didReceiveMessageWith buffer: RTCDataBuffer) {
             guard buffer.isBinary else { return }
-            mesh?.received(buffer.data, from: self)
+            if dataChannel.label == OnlinePeerMesh.streamLabel {
+                mesh?.receivedStream(buffer.data, from: self)
+            } else {
+                mesh?.received(buffer.data, from: self)
+            }
         }
     }
 
@@ -94,6 +101,7 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
     private var iceServers: (session: String, servers: [TogetherIceServer])?
     private var stopped = false
     private var counters = (sent: 0, received: 0, dropped: 0)
+    private var tooLarge = 0
 
     /// `iceServers` replaces asking AnyTogether for them (tests pass [] for host candidates only).
     public init(context: OnlinePeerContext, iceServers: [TogetherIceServer]? = nil) {
@@ -106,8 +114,12 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
     /// Each player's connection, by user ID.
     public var states: [String: PeerState] { lock.withLock { peers.mapValues(\.state) } }
 
-    /// Datagrams sent, received and dropped (no open channel to their player) so far.
+    /// Datagrams sent, received and dropped (no open channel to their player, or too large) so
+    /// far. A broadcast counts once for each player it goes to.
     public var traffic: (sent: Int, received: Int, dropped: Int) { lock.withLock { counters } }
+
+    /// Datagrams dropped because they were larger than a UDP datagram can be.
+    public var droppedTooLarge: Int { lock.withLock { tooLarge } }
 
     // MARK: OnlinePeerTransport
 
@@ -153,18 +165,46 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
         }
     }
 
+    /// Sends a datagram to its player, or a broadcast or multicast one to every other player; true
+    /// when it went to at least one.
     @discardableResult
     public func send(_ datagram: OnlineWire.Datagram) -> Bool {
-        let channel = lock.withLock { byAddress[datagram.peer]?.channel }
-        guard let channel, channel.readyState == .open else {
-            lock.withLock { counters.dropped += 1 }
+        guard datagram.data.count <= OnlineWire.maxGameDatagram else {
+            lock.withLock {
+                tooLarge += 1
+                counters.dropped += 1
+            }
             return false
+        }
+        let channels: [RTCDataChannel?] = lock.withLock {
+            OnlineWire.isGroup(datagram.peer) ? byAddress.values.map(\.channel) : [byAddress[datagram.peer]?.channel]
         }
         let writer = OnlineWire.Writer()
         writer.u16(datagram.localPort).u16(datagram.localVport).u16(datagram.peerPort).u16(datagram.peerVport).u8(datagram.kind.rawValue).raw(datagram.data)
-        let sent = channel.sendData(RTCDataBuffer(data: writer.data, isBinary: true))
-        lock.withLock { if sent { counters.sent += 1 } else { counters.dropped += 1 } }
-        return sent
+        let buffer = RTCDataBuffer(data: writer.data, isBinary: true)
+        var sent = 0
+        var dropped = channels.isEmpty ? 1 : 0
+        for channel in channels {
+            if let channel, channel.readyState == .open, channel.sendData(buffer) { sent += 1 } else { dropped += 1 }
+        }
+        lock.withLock {
+            counters.sent += sent
+            counters.dropped += dropped
+        }
+        return sent > 0
+    }
+
+    /// Sends a stream message to its player over the reliable channel; false when that channel is
+    /// not open (or its buffer is full).
+    @discardableResult
+    public func sendStream(_ message: Data, to peer: UInt32) -> Bool {
+        guard let channel = lock.withLock({ byAddress[peer]?.streamChannel }), channel.readyState == .open else { return false }
+        return channel.sendData(RTCDataBuffer(data: message, isBinary: true))
+    }
+
+    /// Whether the reliable channel to the player at a virtual address is open.
+    public func canStream(to peer: UInt32) -> Bool {
+        lock.withLock { byAddress[peer]?.streamChannel }?.readyState == .open
     }
 
     public func receive(_ signal: OnlinePeerSignal) {
@@ -226,6 +266,27 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
         }
     }
 
+    /// How each other player is reached: a failed connection says so; the others from their
+    /// statistics (direct or relayed, and the round trip).
+    public func links(_ done: @escaping @Sendable ([OnlinePeerLinkInfo]) -> Void) {
+        let all = lock.withLock { Array(peers.values).map { ($0.userId, $0.state, $0.connection) } }
+        guard !all.isEmpty else { return done([]) }
+        let gathered = LinkGathering(count: all.count, done: done)
+        for (userId, state, connection) in all {
+            guard state != .failed && state != .closed, let connection else {
+                gathered.add(OnlinePeerLinkInfo(userId: userId, route: .failed, rttMs: nil))
+                continue
+            }
+            connection.statistics { report in
+                let entries = report.statistics.values.map { stat in
+                    OnlineStatsEntry(id: stat.id, type: stat.type, values: stat.values.mapValues { ($0 as? NSNumber)?.stringValue ?? "\($0)" })
+                }
+                let path = state == .connected ? OnlinePeerLinkInfo.route(entries) : .init(route: .connecting, rttMs: nil)
+                gathered.add(OnlinePeerLinkInfo(userId: userId, route: path.route, rttMs: path.rttMs))
+            }
+        }
+    }
+
     public func stop() {
         let all = lock.withLock { () -> [Peer] in
             stopped = true
@@ -283,7 +344,12 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
         options.maxRetransmits = 0
         let channel = peer.connection.dataChannel(forLabel: OnlinePeerMesh.label, configuration: options)
         channel?.delegate = peer
-        lock.withLock { peer.channel = channel }
+        let streamChannel = peer.connection.dataChannel(forLabel: OnlinePeerMesh.streamLabel, configuration: RTCDataChannelConfiguration())
+        streamChannel?.delegate = peer
+        lock.withLock {
+            peer.channel = channel
+            peer.streamChannel = streamChannel
+        }
         Task {
             do {
                 let made = try await peer.connection.offer(for: OnlinePeerMesh.noConstraints)
@@ -333,18 +399,22 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
     }
 
     fileprivate func opened(_ peer: Peer, _ channel: RTCDataChannel) {
-        lock.withLock { peer.channel = channel }
+        lock.withLock {
+            if channel.label == OnlinePeerMesh.streamLabel { peer.streamChannel = channel } else { peer.channel = channel }
+        }
     }
 
     fileprivate func connectionChanged(_ peer: Peer, _ state: RTCPeerConnectionState) {
-        lock.withLock {
+        let broke = lock.withLock { () -> Bool in
             switch state {
             case .connected: peer.state = .connected
             case .failed: peer.state = .failed
             case .closed: peer.state = .closed
             default: break
             }
+            return (state == .failed || state == .closed) && byAddress[peer.address] === peer
         }
+        if broke { context.peerGone(peer.address) }
     }
 
     private func failed(_ peer: Peer) {
@@ -366,10 +436,39 @@ public final class OnlinePeerMesh: NSObject, OnlinePeerTransport, @unchecked Sen
                                             kind: kind, data: Data(data.dropFirst(OnlinePeerMesh.headerSize))))
     }
 
+    fileprivate func receivedStream(_ data: Data, from peer: Peer) {
+        guard lock.withLock({ byAddress[peer.address] === peer }) else { return }
+        context.deliverStream(peer.address, data)
+    }
+
     private func close(_ peer: Peer, sayBye: Bool, in sessionId: String? = nil) {
         if sayBye, let sessionId = sessionId ?? lock.withLock({ session?.id }) { context.signal(peer.userId, peer.device, sessionId, "bye", Data("null".utf8)) }
         lock.withLock { peer.state = .closed }
         peer.mesh = nil
         peer.connection.close()
+        // The game's streams with this player end with the connection.
+        context.peerGone(peer.address)
+    }
+}
+
+/// Collects one answer per peer and hands them all over once the last arrives.
+private final class LinkGathering: @unchecked Sendable {
+    private let lock = NSLock()
+    private var left: Int
+    private var found: [OnlinePeerLinkInfo] = []
+    private let done: @Sendable ([OnlinePeerLinkInfo]) -> Void
+
+    init(count: Int, done: @escaping @Sendable ([OnlinePeerLinkInfo]) -> Void) {
+        left = count
+        self.done = done
+    }
+
+    func add(_ link: OnlinePeerLinkInfo) {
+        let finished = lock.withLock { () -> [OnlinePeerLinkInfo]? in
+            found.append(link)
+            left -= 1
+            return left == 0 ? found.sorted { $0.userId < $1.userId } : nil
+        }
+        if let finished { done(finished) }
     }
 }
