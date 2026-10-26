@@ -1105,6 +1105,7 @@ struct VulkanDevice::State {
     }
 
     void encodeDepthExports(const std::vector<DepthSurface*>& surfaces) {
+        if (Trace()) std::fprintf(stderr, "[metal] depth export of %zu surfaces\n", surfaces.size());
         auto compute = computeEncoder();
         for (auto* surface : surfaces) {
             const auto width = static_cast<std::uint32_t>(surface->texture.width);
@@ -2103,6 +2104,7 @@ struct VulkanDevice::State {
     }
 
     void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target) {
+        if (Trace()) std::fprintf(stderr, "[metal] depth mark: address %016llx, %ux%u, format %lu, samples %u\n", static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
         if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0) return;
         try {
             const auto resource = Graphics::DecodeTextureResource(Graphics::DepthCopySourceWords(target));
@@ -2110,6 +2112,7 @@ struct VulkanDevice::State {
             if (format == nullptr || !format->uploadable || format->guestElementBytes != 4u) return;
             const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
             const auto address = resolve(target.address, bytes, true, {}, nullptr, false);
+            if (Trace()) std::fprintf(stderr, "[metal] depth mark: %llu bytes resolved to %016llx\n", static_cast<unsigned long long>(bytes), static_cast<unsigned long long>(address));
             if (address == 0) return;
             depth.resource = resource;
             depth.address = address;
@@ -2118,7 +2121,7 @@ struct VulkanDevice::State {
             depth.dirty = true;
             dirtyDepths.push_back(&depth);
         } catch (const std::exception& error) {
-            if (Verbose()) std::fprintf(stderr, "[metal] depth export skipped: %s\n", error.what());
+            if (Trace() || Verbose()) std::fprintf(stderr, "[metal] depth export skipped: %s\n", error.what());
         }
     }
 
