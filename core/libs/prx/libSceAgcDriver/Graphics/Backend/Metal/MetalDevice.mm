@@ -112,6 +112,11 @@ bool GpuScanout(const DisplayBuffer& buffer) {
     return !disabled && buffer.dccAddress == 0 && !DisplayHalfFloat(buffer.pixelFormat) && !DisplayPq(buffer.pixelFormat) && DisplayTexelBytes(buffer.pixelFormat) == 4u && buffer.tilingMode <= 1u;
 }
 
+bool gpuTimeEnabled() {
+    static const bool enabled = std::getenv("APS5_METAL_GPU_TIME") != nullptr;
+    return enabled;
+}
+
 thread_local bool encodingNow = false;
 
 struct EncodingScope {
@@ -539,6 +544,7 @@ struct VulkanDevice::State {
     std::uint32_t cbDispatches = 0;
     std::uint32_t cbWritebacks = 0;
     std::uint32_t cbScanouts = 0;
+    std::string cbLastDraw;
     std::uint64_t lastSerial = 0;
     const char* resolvedBy = "";
     std::vector<PendingWrite> pendingWrites;
@@ -840,11 +846,11 @@ struct VulkanDevice::State {
             endRender();
             endCompute();
             sync->EncodeLabels(open);
-            static const bool gpuTime = std::getenv("APS5_METAL_GPU_TIME") != nullptr;
-            if (gpuTime) {
+            if (gpuTimeEnabled()) {
                 char tag[96];
                 std::snprintf(tag, sizeof(tag), "draws %u, passes %u, dispatches %u, writebacks %u, scanouts %u", cbDraws, cbPasses, cbDispatches, cbWritebacks, cbScanouts);
-                device->TagNextSubmit(tag);
+                device->TagNextSubmit(std::string(tag) + ", " + cbLastDraw);
+                cbLastDraw.clear();
             }
             cbDraws = cbPasses = cbDispatches = cbWritebacks = cbScanouts = 0;
             const auto serial = sync->Submit(&open, 1);
@@ -1918,6 +1924,12 @@ struct VulkanDevice::State {
             }
             ++recordedSinceSubmit;
             ++cbDraws;
+            if (gpuTimeEnabled()) {
+                char text[320];
+                int used = std::snprintf(text, sizeof(text), "last draw: pass %ux%u, %u colors, depth %d, prim %u, %u indices x %u, viewport %.0fx%.0f, scissor %ux%u, vs %08llx ps %08llx, images", passWidth, passHeight, static_cast<unsigned>(targets.size()), depth != nullptr ? 1 : 0, static_cast<unsigned>(translated.primitive), params.indexCount, params.instanceCount, dynamic.viewport.width, dynamic.viewport.height, dynamic.scissor.width, dynamic.scissor.height, static_cast<unsigned long long>(vertex->program->msl.ContentHash().low & 0xffffffffull), static_cast<unsigned long long>(fragment != nullptr ? fragment->program->msl.ContentHash().low & 0xffffffffull : 0ull));
+                for (std::size_t index = 0; index < uses.size() && index < 6 && used > 0 && used < static_cast<int>(sizeof(text)); ++index) used += std::snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used), " %ux%u", uses[index].resource.width, uses[index].resource.height);
+                cbLastDraw = text;
+            }
             draws.fetch_add(1, std::memory_order_relaxed);
         }
     }
