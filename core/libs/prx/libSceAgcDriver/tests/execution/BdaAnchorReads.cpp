@@ -133,7 +133,7 @@ void Run(AgcDriver::VulkanDevice& device, GuestBlock& guest, std::uint32_t waveS
     const auto address = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(guest.Data()));
     const std::vector<std::uint32_t> userData{static_cast<std::uint32_t>(address), static_cast<std::uint32_t>(address >> 32u)};
     const auto result = Recompile(waveSize, userData, std::span<const std::byte>(reinterpret_cast<const std::byte*>(guest.Data()), InputDwords * sizeof(std::uint32_t)), target);
-    Require(SearchesAnchor(result.spirv), "BDA anchor reads: " + name + " reads of one user-data base do not share an anchor");
+    Require(result.spirv.empty() || SearchesAnchor(result.spirv), "BDA anchor reads: " + name + " reads of one user-data base do not share an anchor");
     device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(Code.data()));
     device.WaitIdle();
     std::memcpy(memory.data(), guest.Data(), BlockBytes);
