@@ -980,7 +980,6 @@ void EmitAppendConsume(State& state, const IrValue& inst) {
     const auto& mem = Memory(state, inst);
     const bool gds = mem.kind == ResourceKind::Gds;
     if (!gds && mem.kind != ResourceKind::Lds) Fail(inst, "must access LDS or GDS");
-    if (!gds && state.ldsFunction) throw MslUnsupported("MSL backend: LDS append and consume in a vertex or pixel program are not emitted");
     const auto opcode = inst.Opcode();
     const bool ordered = opcode == IrOpcode::DataOrderedCount || opcode == IrOpcode::DataOrderedSwap;
     const bool swap = opcode == IrOpcode::DataOrderedSwap;
@@ -1028,6 +1027,9 @@ void EmitAppendConsume(State& state, const IrValue& inst) {
     if (gds) {
         const char* function = swap ? "atomic_exchange_explicit" : append ? "atomic_fetch_add_explicit" : "atomic_fetch_sub_explicit";
         Line(state, old + " = " + function + "(&aps5_gds[" + index + "], " + amount + ", memory_order_relaxed);");
+    } else if (state.ldsFunction) {
+        Line(state, old + " = aps5_lds[" + index + "];");
+        Line(state, "aps5_lds[" + index + "] = " + (swap ? amount : old + (append ? " + " : " - ") + count) + ";");
     } else {
         Line(state, old + " = aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), " + U32(swap ? 0u : append ? 2u : 3u) + ", " + amount + ", 0u);");
     }
