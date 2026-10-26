@@ -810,6 +810,35 @@ struct VulkanDevice::State {
     static constexpr std::chrono::microseconds OpenLabelDeadline{1000};
     std::vector<LabelStore> openLabels;
     std::chrono::steady_clock::time_point openLabelsSince;
+    std::condition_variable labelTimerWake;
+    std::thread labelTimer;
+    bool labelTimerStop = false;
+
+    void runLabelTimer() {
+        std::unique_lock lock(mutex);
+        while (!labelTimerStop) {
+            if (openLabels.empty() || !open) {
+                labelTimerWake.wait(lock);
+                continue;
+            }
+            const auto due = openLabelsSince + OpenLabelDeadline;
+            if (std::chrono::steady_clock::now() < due) {
+                labelTimerWake.wait_until(lock, due);
+                continue;
+            }
+            try {
+                flush(false);
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "[gpu] label timer flush failed: %s\n", error.what());
+                openLabelsSince = std::chrono::steady_clock::now();
+            }
+        }
+    }
+
+    void armLabelTimer() {
+        if (!labelTimer.joinable()) labelTimer = std::thread([this] { runLabelTimer(); });
+        labelTimerWake.notify_one();
+    }
     std::uint32_t cbPasses = 0;
     std::uint32_t cbDispatches = 0;
     std::uint32_t cbWritebacks = 0;
@@ -914,6 +943,14 @@ struct VulkanDevice::State {
     std::atomic<std::uint64_t> draws{0};
 
     ~State() {
+        if (labelTimer.joinable()) {
+            {
+                std::lock_guard lock(mutex);
+                labelTimerStop = true;
+            }
+            labelTimerWake.notify_one();
+            labelTimer.join();
+        }
         if (waker != nullptr) {
             {
                 std::lock_guard lock(waker->mutex);
@@ -3107,10 +3144,12 @@ auto VulkanDevice::WriteLabelOnGpu(std::uint64_t address, std::span<const std::b
     if (GuestMemory::CurrentPacket().opcode != ReleaseMemOpcode || !GuestMemory::Accessible(reinterpret_cast<const void*>(address), bytes.size(), true)) return 3;
     s.reap();
     if (s.open) {
-        if (s.openLabels.empty()) s.openLabelsSince = std::chrono::steady_clock::now();
+        const bool first = s.openLabels.empty();
+        if (first) s.openLabelsSince = std::chrono::steady_clock::now();
         s.openLabels.push_back({address, std::vector<std::byte>(bytes.begin(), bytes.end())});
         s.noteWrite(address, bytes.size());
         s.labelsOnCompletion.fetch_add(1, std::memory_order_relaxed);
+        if (first) s.armLabelTimer();
         return 0;
     }
     auto* completion = s.afterRecorded();
