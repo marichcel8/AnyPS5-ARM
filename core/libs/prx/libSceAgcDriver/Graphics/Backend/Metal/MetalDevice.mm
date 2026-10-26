@@ -246,6 +246,7 @@ struct StageSource {
 struct DepthSurface {
     id<MTLTexture> texture = nil;
     bool initialized = false;
+    bool stencilInitialized = false;
     std::uint64_t seenFills = 0;
     std::optional<float> fillDepth;
     std::optional<std::uint8_t> fillStencil;
@@ -267,9 +268,12 @@ void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target)
         if (target.htileAddress != 0u && target.htileAddress >= fill.address && target.htileAddress < fill.address + fill.bytes && fill.address + fill.bytes - target.htileAddress >= HtileBytes(target.extent)) {
             const bool depthCleared = (fill.pattern & 0xfu) == 0u;
             const bool stencilCleared = target.htileStencil && ((fill.pattern >> 8u) & 0x3u) == 0u;
-            if (depthCleared || stencilCleared) {
+            if (depthCleared) {
                 surface.initialized = false;
                 surface.fillDepth.reset();
+            }
+            if (stencilCleared) {
+                surface.stencilInitialized = false;
                 surface.fillStencil.reset();
             }
             continue;
@@ -289,7 +293,7 @@ void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target)
         if (DepthFillCovers(target.stencilAddress, static_cast<std::uint64_t>(target.extent.width) * target.extent.height, fill.address, fill.bytes)) {
             const auto byte = static_cast<std::uint8_t>(fill.pattern & 0xffu);
             if (fill.pattern == byte * 0x01010101u) {
-                surface.initialized = false;
+                surface.stencilInitialized = false;
                 surface.fillStencil = byte;
             }
         }
@@ -1746,7 +1750,7 @@ struct VulkanDevice::State {
         if (texture == nil) throw std::runtime_error("AGC graphics: Metal depth target could not be created");
         texture.label = @"AnyPS5 depth target";
         device->AddResidentAllocation((__bridge void*)texture);
-        return depthSurfaces.emplace(key, DepthSurface{texture, false, Graphics::DepthMetadataFillGeneration(), {}, {}}).first->second;
+        return depthSurfaces.emplace(key, DepthSurface{texture, false, false, Graphics::DepthMetadataFillGeneration(), {}, {}}).first->second;
     }
 
     void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key) {
@@ -1766,6 +1770,7 @@ struct VulkanDevice::State {
         }
         if (depth != nullptr) {
             const auto load = depth->initialized ? MTLLoadActionLoad : MTLLoadActionClear;
+            const auto stencilLoad = depth->stencilInitialized ? MTLLoadActionLoad : MTLLoadActionClear;
             MTLRenderPassDepthAttachmentDescriptor* attachment = descriptor.depthAttachment;
             attachment.texture = depth->texture;
             attachment.loadAction = load;
@@ -1774,11 +1779,12 @@ struct VulkanDevice::State {
             if (stencil) {
                 MTLRenderPassStencilAttachmentDescriptor* stencilAttachment = descriptor.stencilAttachment;
                 stencilAttachment.texture = depth->texture;
-                stencilAttachment.loadAction = load;
+                stencilAttachment.loadAction = stencilLoad;
                 stencilAttachment.storeAction = MTLStoreActionStore;
                 stencilAttachment.clearStencil = depth->fillStencil.value_or(target->clearStencil);
             }
             depth->initialized = true;
+            if (stencil) depth->stencilInitialized = true;
             depth->fillDepth.reset();
             depth->fillStencil.reset();
         }
@@ -1928,7 +1934,7 @@ struct VulkanDevice::State {
             if (width == 0 || height == 0) return;
             key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
 
-            const bool reuse = render != nil && key == passKey && (depth == nullptr || depth->initialized);
+            const bool reuse = render != nil && key == passKey && (depth == nullptr || (depth->initialized && (!stencil || depth->stencilInitialized)));
             std::vector<ImageUse> loads = uses;
             if (!reuse) {
                 for (auto& [surface, resource] : targets) {
