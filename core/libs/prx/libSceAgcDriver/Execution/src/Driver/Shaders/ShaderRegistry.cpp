@@ -1879,6 +1879,25 @@ void BindTitleThread() {
     if (PerformanceTrace::Configured()) PerformanceTrace::BindThread("title", TraceThread::DefaultCapacity / 8);
 }
 
+constexpr std::size_t GraphicsLinkMemoStages = 4;
+
+struct GraphicsLinkMemo {
+    std::array<const Shader*, GraphicsLinkMemoStages> headers{};
+    std::array<const void*, GraphicsLinkMemoStages> codes{};
+    std::vector<ShaderRegister> context;
+    std::vector<ShaderRegister> primitive;
+    std::weak_ptr<const ShaderRegistry> registry;
+    const void* device = nullptr;
+    std::vector<std::shared_ptr<const ShaderSnapshot>> selected;
+    std::vector<std::uint64_t> key;
+    std::uint32_t primitiveType = 0;
+    bool valid = false;
+};
+
+bool SameRegisters(const std::vector<ShaderRegister>& memo, std::span<const ShaderRegister> current) {
+    return memo.size() == current.size() && std::ranges::equal(memo, current, [](const ShaderRegister& a, const ShaderRegister& b) { return a.offset == b.offset && a.value == b.value; });
+}
+
 }
 
 void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std::span<const ShaderRegister> context, std::span<const ShaderRegister> primitive) {
@@ -1892,6 +1911,40 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
     std::shared_ptr<const ShaderRegistry> registry;
     std::shared_ptr<const ShaderSnapshot> owner;
     std::vector<std::shared_ptr<const ShaderSnapshot>> selectedStages;
+    struct GraphicsLinkMemoStorage {};
+    auto& memo = HostThreadLocal<GraphicsLinkMemo, GraphicsLinkMemoStorage>();
+    bool memoizable = stages.size() <= GraphicsLinkMemoStages;
+    {
+        std::lock_guard lock(mutex);
+        registry = shaders;
+    }
+    if (memo.valid && registry != nullptr && memo.registry.lock() == registry && memo.device == device.Load().get() &&
+        memo.selected.size() == stages.size() && SameRegisters(memo.context, context) && SameRegisters(memo.primitive, primitive)) {
+        bool same = true;
+        for (std::size_t index = 0; index < stages.size() && same; ++index) same = stages[index] == memo.headers[index] && GuestShaderFields(stages[index]).code == memo.codes[index];
+        if (same) {
+            std::shared_ptr<const ShaderSnapshot> memoOwner;
+            for (const auto& selected : memo.selected) {
+                if (!DeferFailedRegistration(*selected) && memoOwner == nullptr) memoOwner = selected;
+            }
+            if (memoOwner == nullptr) {
+                transaction.Commit();
+                return;
+            }
+            if (!transaction.Tracks(*memoOwner)) {
+                if (const auto committed = CommittedGraphicsAbi(*memoOwner, memo.key, registry)) {
+                    const auto localDevice = device.Load();
+                    for (const auto& stage : *committed) {
+                        const auto snapshot = stage.lock();
+                        require(snapshot != nullptr, "prepared graphics ABI lost a registered stage");
+                        if (snapshot->type != 1) ResolvePreparedGraphics(*snapshot, {}, memo.primitiveType, localDevice->Target(), true);
+                    }
+                    transaction.Commit();
+                    return;
+                }
+            }
+        }
+    }
     {
         std::lock_guard lock(mutex);
         registry = shaders;
@@ -1908,7 +1961,9 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
             registered.shader.ForEach([&](std::uint32_t offset, std::uint32_t value) { state.shader.insert_or_assign(offset, value); });
             registered.context.ForEach([&](std::uint32_t offset, std::uint32_t value) { state.context.insert_or_assign(offset, value); });
             registered.userConfig.ForEach([&](std::uint32_t offset, std::uint32_t value) { state.userConfig.insert_or_assign(offset, value); });
+            if (snapshot.headerAddress != reinterpret_cast<std::uintptr_t>(shader)) memoizable = false;
             if (fields.type != snapshot.type) {
+                memoizable = false;
                 const std::size_t count = fields.num_sh_registers;
                 GuestMemory::CheckRange(fields.sh_registers, count * sizeof(ShaderRegister), alignof(ShaderRegister));
                 for (std::size_t index = 0; index < count; ++index) state.shader.insert_or_assign(fields.sh_registers[index].offset, fields.sh_registers[index].value);
@@ -1930,6 +1985,22 @@ void Driver::ResolveGraphicsStagesAbi(std::span<const Shader* const> stages, std
     auto& key = HostThreadLocal<std::vector<std::uint64_t>, GraphicsAbiKeyStorage>();
     BuildRegisteredAbiKey(state, *localDevice, key);
     const auto primitiveType = state.userConfig.find(0x242u);
+    if (memoizable) {
+        memo.headers = {};
+        memo.codes = {};
+        for (std::size_t index = 0; index < stages.size(); ++index) {
+            memo.headers[index] = stages[index];
+            memo.codes[index] = GuestShaderFields(stages[index]).code;
+        }
+        memo.context.assign(context.begin(), context.end());
+        memo.primitive.assign(primitive.begin(), primitive.end());
+        memo.registry = registry;
+        memo.device = localDevice.get();
+        memo.selected = selectedStages;
+        memo.key = key;
+        memo.primitiveType = primitiveType == state.userConfig.end() ? 0u : primitiveType->second;
+        memo.valid = true;
+    }
     const auto resolveStages = [&](const std::vector<std::weak_ptr<const ShaderSnapshot>>& stages) {
         for (const auto& stage : stages) {
             const auto snapshot = stage.lock();
