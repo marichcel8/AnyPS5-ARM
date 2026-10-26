@@ -286,6 +286,10 @@ int main() {
             std::puts("skipped, APS5_RAYTRACING replaces the node test");
             return VulkanTestSkipped;
         }
+        if (ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Spirv) {
+            std::puts("skipped, the MSL backend has no BVH traversal: image_bvh64_intersect_ray is not implemented on Metal");
+            return VulkanTestSkipped;
+        }
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
         GuestBlock guest;
