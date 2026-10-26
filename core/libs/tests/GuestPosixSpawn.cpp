@@ -288,6 +288,8 @@ static void CheckSpawnedChild(const char* role, int expectedCode) {
     if (std::strcmp(role, "child-sleep") == 0)
         Check(waitpid_nid_postfix(processId, &status, 1) == 0);
     Check(waitpid_nid_postfix(processId, &status, 0) == processId);
+    if ((status & 0x7f) != 0 || ((status >> 8) & 0xff) != expectedCode)
+        std::fprintf(stderr, "posix_spawn child %s: status 0x%x, expected exit code %d\n", role, static_cast<unsigned>(status), expectedCode);
     Check((status & 0x7f) == 0 && ((status >> 8) & 0xff) == expectedCode);
     status = -1;
     Check(waitpid_nid_postfix(processId, &status, 0) == -1 && *__error_nid_postfix() == 10);
