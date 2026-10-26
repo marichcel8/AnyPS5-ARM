@@ -2381,6 +2381,7 @@ struct VulkanDevice::State {
             lap(4);
 
             auto dynamic = translated.dynamic;
+            if (Trace() && depth != nullptr) std::fprintf(stderr, "[metal] draw depth: viewport %.1f,%.1f %.1fx%.1f znear %f zfar %f clip %d remap mode %u scale %f offset %f test %d write %d compare %d\n", dynamic.viewport.originX, dynamic.viewport.originY, dynamic.viewport.width, dynamic.viewport.height, dynamic.viewport.znear, dynamic.viewport.zfar, static_cast<int>(dynamic.depthClip), static_cast<unsigned>(graphics.depthRemap.mode), graphics.depthRemap.scale, graphics.depthRemap.offset, graphics.depthTest ? 1 : 0, graphics.depthWrite ? 1 : 0, static_cast<int>(graphics.depthCompare));
             dynamic.scissor.x = std::min(dynamic.scissor.x, passWidth);
             dynamic.scissor.y = std::min(dynamic.scissor.y, passHeight);
             dynamic.scissor.width = std::min(dynamic.scissor.width, passWidth - dynamic.scissor.x);
