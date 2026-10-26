@@ -229,6 +229,7 @@ struct CachedSurface {
     std::uint64_t guestBytes = 0;
     std::uint64_t validEpoch = 0;
     bool dirty = false;
+    std::uint64_t drawnFrame = 0;
 };
 
 struct SurfaceRef {
@@ -712,6 +713,8 @@ struct VulkanDevice::State {
     id<MTL4ArgumentTable> scanoutTable = nil;
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
+    std::uint64_t scanoutFrames = 1;
+    std::uint64_t directDeclined = 0;
     std::array<double, 5> presentMs{};
     std::uint64_t writebackSurfaces = 0;
     std::uint64_t flushes = 0;
@@ -1278,19 +1281,44 @@ struct VulkanDevice::State {
     }
 
     // A frame that was just rendered into a cached surface is scanned out straight from its texture: no 4K writeback to guest memory and no detiling kernel.
-    bool stageDirectScanout(const DisplayBuffer& buffer) {
-        if (buffer.tilingMode > 1u || DisplayTenBit(buffer.pixelFormat)) return false;
-        CachedSurface* found = nullptr;
-        for (auto* surface : dirtySurfaces) {
-            if (surface->guestAddress != buffer.address) continue;
-            id<MTLTexture> texture = (__bridge id<MTLTexture>)surface->texture.texture;
-            if (texture == nil || texture.textureType != MTLTextureType2D || texture.sampleCount != 1 || texture.width != buffer.width || texture.height != buffer.height || (texture.pixelFormat != MTLPixelFormatRGBA8Unorm && texture.pixelFormat != MTLPixelFormatBGRA8Unorm)) continue;
-            found = surface;
-            break;
+    static bool DirectScanoutFormat(MTLPixelFormat format, std::uint32_t& redLow) {
+        switch (format) {
+        case MTLPixelFormatRGBA8Unorm:
+        case MTLPixelFormatRGB10A2Unorm: redLow = 1u; return true;
+        case MTLPixelFormatBGRA8Unorm:
+        case MTLPixelFormatBGR10A2Unorm: redLow = 0u; return true;
+        default: return false;
         }
-        if (found == nullptr) return false;
+    }
+
+    bool stageDirectScanout(const DisplayBuffer& buffer) {
+        ++scanoutFrames;
+        if (buffer.tilingMode > 1u) return false;
+        CachedSurface* found = nullptr;
+        std::uint32_t textureRedLow = 0;
+        for (auto& [key, surface] : surfaces) {
+            if (surface.guestAddress != buffer.address || scanoutFrames - surface.drawnFrame > 2u) continue;
+            id<MTLTexture> texture = (__bridge id<MTLTexture>)surface.texture.texture;
+            std::uint32_t redLow = 0;
+            if (texture == nil || texture.textureType != MTLTextureType2D || texture.sampleCount != 1 || texture.width != buffer.width || texture.height != buffer.height || !DirectScanoutFormat(texture.pixelFormat, redLow)) continue;
+            if (found != nullptr && found->drawnFrame > surface.drawnFrame) continue;
+            found = &surface;
+            textureRedLow = redLow;
+        }
+        if (found == nullptr) {
+            if (directDeclined++ < 3u || directDeclined % 1200u == 0u) {
+                std::fprintf(stderr, "[metal] direct scanout declined (#%llu): display buffer %llx %ux%u tiling %u format %llx; surfaces:", static_cast<unsigned long long>(directDeclined), static_cast<unsigned long long>(buffer.address), buffer.width, buffer.height, static_cast<unsigned>(buffer.tilingMode), static_cast<unsigned long long>(buffer.pixelFormat));
+                std::size_t listed = 0;
+                for (auto& [key, surface] : surfaces) {
+                    if (surface.guestAddress == 0 || scanoutFrames - surface.drawnFrame > 2u || listed++ >= 6u) continue;
+                    id<MTLTexture> texture = (__bridge id<MTLTexture>)surface.texture.texture;
+                    std::fprintf(stderr, " [%llx %lux%lu fmt %lu dirty %d]", static_cast<unsigned long long>(surface.guestAddress), static_cast<unsigned long>(texture.width), static_cast<unsigned long>(texture.height), static_cast<unsigned long>(texture.pixelFormat), surface.dirty ? 1 : 0);
+                }
+                std::fprintf(stderr, "\n");
+            }
+            return false;
+        }
         id<MTLTexture> texture = (__bridge id<MTLTexture>)found->texture.texture;
-        const std::uint32_t textureRedLow = texture.pixelFormat == MTLPixelFormatRGBA8Unorm ? 1u : 0u;
         const std::uint32_t swap = textureRedLow != (DisplayRedLow(buffer.pixelFormat) ? 1u : 0u) ? 1u : 0u;
         const auto slot = presentTarget(buffer.width, buffer.height);
         auto compute = computeEncoder();
@@ -2062,6 +2090,7 @@ struct VulkanDevice::State {
             }
             for (auto& [surface, resource] : targets) {
                 surface->validEpoch = epoch;
+                surface->drawnFrame = scanoutFrames;
                 if (surface->dirty) continue;
                 surface->dirty = true;
                 surface->guestAddress = resource.baseAddress;
