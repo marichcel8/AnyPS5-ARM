@@ -57,6 +57,20 @@ struct AgcDetileParams {
     uint equation[16];
 };
 
+struct AgcMsaaParams {
+    AGC_POINTER(uchar) tiled;
+    uint width;
+    uint height;
+    uint fragments;
+    uint blockLog2Width;
+    uint blockLog2Height;
+    uint blocksPerRow;
+    uint pipeBankXor;
+    uint pad;
+    uint fragmentOffsets[8];
+    uint equation[16];
+};
+
 inline uint agc_equation_bit(uint mask, uint x, uint y, uint slice) {
     const uint selected = (x & (mask & 0xfffu)) ^ ((y << 12) & (mask & 0xfff000u)) ^ ((slice << 24) & (mask & 0xff000000u));
     return AGC_POPCOUNT(selected) & 1u;

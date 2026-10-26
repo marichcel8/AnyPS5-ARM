@@ -696,6 +696,23 @@ LastProvokingDraw RewriteLastProvokingVertex(const Graphics::State& graphics, co
     return result;
 }
 
+std::optional<std::string> MultisampleRejection(const Graphics::State& graphics) {
+    const std::uint32_t samples = std::max(graphics.samples, 1u);
+    bool multisampled = samples > 1u;
+    for (const auto& color : graphics.colors) {
+        if (color.samples != samples) return std::string("a color target's sample count differs from the draw's on Metal");
+        multisampled = multisampled || color.samples > 1u;
+    }
+    if (graphics.depth && graphics.depth->samples != samples) return std::string("the depth target's sample count differs from the draw's on Metal");
+    if (!multisampled) return std::nullopt;
+    if (samples != 2u && samples != 4u && samples != 8u) return std::string("the draw's sample count is not 2, 4 or 8");
+    if (graphics.perSampleShading) return std::string("per-sample shading is not wired on Metal yet");
+    if (graphics.customSampleLocations || graphics.sampleLocationGrid) return std::string("custom sample locations are not wired on Metal yet");
+    if (graphics.ditheredAlphaToCoverage) return std::string("dithered alpha to coverage is not wired on Metal yet");
+    if (Graphics::PartialSampleMask(graphics) && !(Graphics::UniformSampleMask(graphics) && Graphics::HostSampleMask(graphics) == 0u)) return std::string("partial sample masks are not wired on Metal yet");
+    return std::nullopt;
+}
+
 std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
     for (const auto& shader : shaders) {
         if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex and pixel stages");
@@ -712,8 +729,7 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
     }
     const auto translated = Metal::TranslateState(adjusted ? *adjusted : graphics, HasFlatInputs(shaders));
     if (translated.rejection != nullptr) return std::string(translated.rejection);
-    if (graphics.samples > 1 || std::any_of(graphics.colors.begin(), graphics.colors.end(), [](const Graphics::ColorTarget& color) { return color.samples > 1; }) || (graphics.depth && graphics.depth->samples > 1)) return std::string("multisampled Metal draws are not wired yet");
-    return std::nullopt;
+    return MultisampleRejection(graphics);
 }
 
 std::uint32_t MslExperiment() {
@@ -2243,6 +2259,12 @@ struct VulkanDevice::State {
             std::array<std::uint64_t, ArgumentSlots> slots{};
             std::vector<ImageUse> uses;
             bindStage(shader, snapshots, slots, uses);
+            for (const auto& use : uses) {
+                if (!use.written) continue;
+                for (const auto& [key, depth] : depthSurfaces) {
+                    if (depth.texture.sampleCount > 1 && key[0] == use.resource.baseAddress) throw std::runtime_error("AGC graphics: storage image access to a multisampled depth surface is not implemented on Metal");
+                }
+            }
             writebackDirty();
             std::uint64_t ldsAddress = 0;
             if (shader.workgroupMemoryDwords != 0) {
@@ -2487,12 +2509,16 @@ struct VulkanDevice::State {
     }
 
     DepthSurface& depthSurface(const Graphics::DepthTarget& target, Metal::PixelFormat format) {
-        const DepthKey key{target.address, static_cast<std::uint64_t>(target.extent.width) | static_cast<std::uint64_t>(target.extent.height) << 32u, static_cast<std::uint64_t>(format)};
+        const DepthKey key{target.address, static_cast<std::uint64_t>(target.extent.width) | static_cast<std::uint64_t>(target.extent.height) << 32u, static_cast<std::uint64_t>(format) | static_cast<std::uint64_t>(std::max(target.samples, 1u)) << 32u};
         if (const auto found = depthSurfaces.find(key); found != depthSurfaces.end()) {
             ApplyDepthFills(found->second, target);
             return found->second;
         }
         MTLTextureDescriptor* descriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:static_cast<MTLPixelFormat>(format) width:target.extent.width height:target.extent.height mipmapped:NO];
+        if (target.samples > 1u) {
+            descriptor.textureType = MTLTextureType2DMultisample;
+            descriptor.sampleCount = target.samples;
+        }
         descriptor.storageMode = MTLStorageModePrivate;
         descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
         descriptor.usage = MTLTextureUsageRenderTarget;
@@ -2641,7 +2667,10 @@ struct VulkanDevice::State {
         const auto translated = Metal::TranslateState(graphics, HasFlatInputs(shaders));
         if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection);
         if (translated.cullsEverything) return;
-        if (translated.pipeline.sampleCount > 1) throw std::runtime_error("AGC graphics: multisampled Metal draws are not wired yet");
+        if (translated.pipeline.sampleCount > 1) {
+            if (const auto rejection = MultisampleRejection(graphics)) throw Graphics::UnrenderableDraw("AGC graphics: " + *rejection);
+            if (![native supportsTextureSampleCount:translated.pipeline.sampleCount]) throw Graphics::UnrenderableDraw("AGC graphics: this Metal device cannot render " + std::to_string(translated.pipeline.sampleCount) + " samples per pixel");
+        }
         const bool profiling = cpuProfileEnabled();
         auto phaseAt = profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         std::array<std::uint64_t, DrawPhases> phases{};
@@ -2714,7 +2743,11 @@ struct VulkanDevice::State {
                 if (color.exportIndex >= request.state.colorCount) continue;
                 const auto format = request.state.colors[color.exportIndex].format;
                 if (format == Metal::PixelFormat::Invalid) continue;
-                const auto resource = Graphics::SurfaceForTarget(color);
+                auto resource = Graphics::SurfaceForTarget(color);
+                if (color.samples > 1u) {
+                    resource.dimension = Graphics::TextureDimension::k2DMsaa;
+                    resource.samples = color.samples;
+                }
                 const auto [surface, info, layers] = surfaceFor(resource);
                 Metal::TextureHandle handle = surface->texture;
                 if (handle.pixelFormat != format) {
@@ -2756,7 +2789,7 @@ struct VulkanDevice::State {
                     if (surface->dirty || surface->scaled) continue;
                     surface->resource = resource;
                     surface->address = resolve(resource.baseAddress, Graphics::DescribeSurface(resource).guestBytes, true, {}, surface);
-                    loads.push_back({surface, resource, surface->address, false});
+                    if (resource.dimension != Graphics::TextureDimension::k2DMsaa) loads.push_back({surface, resource, surface->address, false});
                 }
             }
             if (!reuse && depth != nullptr && graphics.depth) importDepth(*depth, *graphics.depth);

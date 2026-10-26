@@ -55,3 +55,14 @@ kernel void aps5_linear_to_tiled(constant AgcDetileParams& p [[buffer(0)]], uint
     if (!agc_locate(p, gid, x, y, offset)) return;
     agc_store_element(p.tiled, offset, ELEMENT_BYTES, agc_load_element(p.linear, y * p.linearPitchBytes + x * ELEMENT_BYTES, ELEMENT_BYTES));
 }
+
+kernel void aps5_msaa_to_tiled(constant AgcMsaaParams& p [[buffer(0)]], texture2d_ms<uint, access::read> source [[texture(0)]], uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= p.width || gid.y >= p.height) return;
+    const uint coordinate = gid.x | (gid.y << 16);
+    uint within = p.pipeBankXor;
+    for (uint bit = 0u; bit < 16u; ++bit) within ^= (popcount(p.equation[bit] & coordinate) & 1u) << bit;
+    const uint block = (gid.y >> p.blockLog2Height) * p.blocksPerRow + (gid.x >> p.blockLog2Width);
+    for (uint fragment = 0u; fragment < p.fragments; ++fragment) {
+        agc_store_element(p.tiled, block * 65536u + (within ^ p.fragmentOffsets[fragment]), ELEMENT_BYTES, agc_untransform(source.read(gid, fragment), TRANSFORM));
+    }
+}

@@ -2,7 +2,9 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/TextureJobs.hpp"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "prx/libSceAgcDriver/Graphics/include/MultisampleSwizzleEquations.hpp"
 #include <algorithm>
+#include <bit>
 #include <atomic>
 #include <cstdlib>
 #include <cstring>
@@ -165,7 +167,9 @@ struct TextureManager::State {
         const auto texelBytes = object.format->texelBytes;
         const auto format = static_cast<MTLPixelFormat>(WriteViewFormat(texelBytes));
         id<MTLTexture> view = nil;
-        if (object.info.kind == TextureKind::Tex3D) {
+        if (object.info.kind == TextureKind::Tex2DMsaa) {
+            view = [object.texture newTextureViewWithPixelFormat:format textureType:MTLTextureType2DMultisample levels:NSMakeRange(level, 1) slices:NSMakeRange(0, 1)];
+        } else if (object.info.kind == TextureKind::Tex3D) {
             view = [object.texture newTextureViewWithPixelFormat:format textureType:MTLTextureType3D levels:NSMakeRange(level, 1) slices:NSMakeRange(0, 1)];
         } else if (object.info.kind == TextureKind::Tex1D || object.info.kind == TextureKind::Tex1DArray) {
             view = [object.texture newTextureViewWithPixelFormat:format textureType:MTLTextureType1DArray levels:NSMakeRange(level, 1) slices:NSMakeRange(0, object.slices)];
@@ -271,7 +275,7 @@ TextureHandle TextureManager::Create(const TextureCreateInfo& requested, std::st
         descriptor.storageMode = MTLStorageModePrivate;
         descriptor.hazardTrackingMode = MTLHazardTrackingModeUntracked;
         MTLTextureUsage usage = MTLTextureUsageShaderRead | MTLTextureUsagePixelFormatView;
-        if (info.shaderWrite) usage |= MTLTextureUsageShaderWrite;
+        if (info.shaderWrite && info.kind != TextureKind::Tex2DMsaa) usage |= MTLTextureUsageShaderWrite;
         if (info.renderTarget) usage |= MTLTextureUsageRenderTarget;
         static const bool compressedTargets = std::getenv("APS5_METAL_COMPRESSED_TARGETS") != nullptr;
         if (compressedTargets && info.renderTarget) usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
@@ -424,6 +428,36 @@ void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& 
     const auto& format = *object->format;
     if ((format.transform != TextureTransform::None && format.transform != TextureTransform::Repack101111) || format.blockCompressed) throw std::runtime_error("AGC graphics: this texture format cannot be written back to guest memory on Metal");
     if (object->info.kind == TextureKind::Tex1D || object->info.kind == TextureKind::Tex1DArray) throw std::runtime_error("AGC graphics: 1D texture writeback is not modeled on Metal");
+    if (object->info.kind == TextureKind::Tex2DMsaa) {
+        const auto samples = object->info.samples;
+        const auto elementBytes = format.guestElementBytes;
+        const auto* equation = FindMultisampleSwizzleEquation(descriptor.tileMode, elementBytes, samples);
+        if (equation == nullptr || (descriptor.pipeBankXor & ~0xcf00u) != 0u) throw std::runtime_error("AGC graphics: this multisampled surface layout cannot be written back to guest memory on Metal");
+        const auto fragmentBits = static_cast<std::uint32_t>(std::countr_zero(samples));
+        const auto elementBits = 16u - static_cast<std::uint32_t>(std::countr_zero(elementBytes)) - fragmentBits;
+        const auto widthBits = (elementBits + ((fragmentBits & 1u) == 0u ? 1u : 0u)) / 2u;
+        AgcMsaaParams params{};
+        params.tiled = surfaceDeviceAddress;
+        params.width = object->info.width;
+        params.height = object->info.height;
+        params.fragments = samples;
+        params.blockLog2Width = widthBits;
+        params.blockLog2Height = elementBits - widthBits;
+        params.blocksPerRow = (params.width + (1u << widthBits) - 1u) >> widthBits;
+        params.pipeBankXor = descriptor.pipeBankXor;
+        for (std::uint32_t fragment = 0; fragment < samples; ++fragment) {
+            for (std::uint32_t bit = 0; bit < 16u; ++bit) params.fragmentOffsets[fragment] |= static_cast<std::uint32_t>(std::popcount((static_cast<std::uint64_t>(fragment) << 48u) & equation->bits[bit]) & 1) << bit;
+        }
+        for (std::uint32_t bit = 0; bit < 16u; ++bit) params.equation[bit] = static_cast<std::uint32_t>(equation->bits[bit] & 0xffffffffull);
+        id<MTLTexture> view;
+        {
+            std::lock_guard lock(s.mutex);
+            view = s.writeView(*object, 0u);
+        }
+        s.detiler->EncodeMultisample(computeEncoder, elementBytes, format.transform, format.texelBytes, params, (__bridge void*)view);
+        s.writebacks.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     const auto plan = PlanSurface(descriptor, surfaceDeviceAddress);
     const bool volume = object->info.kind == TextureKind::Tex3D;
     const auto kernel = volume ? DetileKernel::VolumeToTiled : DetileKernel::Array2DToTiled;
