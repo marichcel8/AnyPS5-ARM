@@ -269,12 +269,6 @@ struct DepthSurface {
     std::uint64_t guestBytes = 0;
 };
 
-std::array<std::uint32_t, 8> DepthPlaneWords(const Graphics::DepthTarget& target) {
-    const auto base = (target.address | target.pipeBankXor) >> 8u;
-    const auto width = target.extent.width - 1u, height = target.extent.height - 1u;
-    return {static_cast<std::uint32_t>(base), static_cast<std::uint32_t>((base >> 32u) & 255u) | (22u << 20u) | ((width & 3u) << 30u), (width >> 2u) | (height << 14u), (9u << 28u) | (target.depthSwizzle << 20u) | 0x204u, 0u, 0u, 0u, 0u};
-}
-
 std::atomic<std::uint64_t>& GlobalComputePipelinesCreated() {
     static std::atomic<std::uint64_t> created{0};
     return created;
@@ -813,6 +807,7 @@ struct VulkanDevice::State {
     std::array<id<MTLTexture>, 4> nullTextures{};
     std::vector<CachedSurface*> dirtySurfaces;
     std::vector<DepthSurface*> dirtyDepths;
+    std::vector<std::pair<const float*, std::size_t>> depthProbes;
     std::map<DepthKey, DepthSurface> depthSurfaces;
     std::unique_ptr<Metal::PipelineCache> renderPipelines;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> stageSources;
@@ -1119,8 +1114,10 @@ struct VulkanDevice::State {
             const auto pitch = width * 4u;
             const auto bytes = static_cast<std::uint64_t>(pitch) * height;
             const auto scratch = upload(bytes);
-            [compute copyFromTexture:surface->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)scratch.buffer destinationOffset:scratch.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes];
+            [compute copyFromTexture:surface->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)scratch.buffer destinationOffset:scratch.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes options:MTLBlitOptionNone];
             [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+            if (Trace()) depthProbes.emplace_back(reinterpret_cast<const float*>(scratch.data), static_cast<std::size_t>(bytes / 4u));
+            if (Trace()) std::fprintf(stderr, "[metal] depth export: texture %p guest %016llx device %016llx, %ux%u, tile %u, format %u, bytes %llu\n", (__bridge void*)surface->texture, static_cast<unsigned long long>(surface->guestAddress), static_cast<unsigned long long>(surface->address), width, height, static_cast<unsigned>(surface->resource.tileMode), surface->resource.format, static_cast<unsigned long long>(surface->guestBytes));
             textures->EncodeLinearToTiled((__bridge void*)compute, surface->resource, surface->address, scratch.gpuAddress, pitch);
             [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             cbMovedBytes += surface->guestBytes;
@@ -1824,6 +1821,7 @@ struct VulkanDevice::State {
             auto& surface = *use.surface;
             if (surface.dirty || surface.validEpoch == epoch) continue;
             surface.validEpoch = epoch;
+            if (Trace()) std::fprintf(stderr, "[metal] upload: guest %016llx device %016llx, %ux%u, tile %u, format %u\n", static_cast<unsigned long long>(use.resource.baseAddress), static_cast<unsigned long long>(use.address), use.resource.width, use.resource.height, static_cast<unsigned>(use.resource.tileMode), use.resource.format);
             textures->EncodeUpload((__bridge void*)compute, surface.texture, use.resource, use.address, textures->DefaultUploadPath());
             ++cbUploads;
             cbMovedBytes += Graphics::DescribeSurface(use.resource).guestBytes;
@@ -2109,11 +2107,12 @@ struct VulkanDevice::State {
         throw Graphics::UnrenderableDraw("AGC graphics: Metal render pipeline failed to build: " + (handle.Failed() ? handle.Error() : std::string("timed out")));
     }
 
-    void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target) {
-        if (Trace()) std::fprintf(stderr, "[metal] depth mark: address %016llx, %ux%u, format %lu, samples %u\n", static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
+    void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target, const Graphics::State& graphics) {
+        if (Trace()) std::fprintf(stderr, "[metal] depth mark state: test %d write %d compare %d clear %f initialized %d fill %d\n", graphics.depthTest ? 1 : 0, graphics.depthWrite ? 1 : 0, static_cast<int>(graphics.depthCompare), target.clearDepth, depth.initialized ? 1 : 0, depth.fillDepth ? 1 : 0);
+        if (Trace()) std::fprintf(stderr, "[metal] depth mark: texture %p address %016llx, %ux%u, format %lu, samples %u\n", (__bridge void*)depth.texture, static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
         if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0) return;
         try {
-            const auto resource = Graphics::DecodeTextureResource(DepthPlaneWords(target));
+            const auto resource = Graphics::DecodeTextureResource(Graphics::DepthCopySourceWords(target));
             const auto* format = Metal::FindFormat(resource.format);
             if (format == nullptr || !format->uploadable || format->guestElementBytes != 4u) return;
             const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
@@ -2171,6 +2170,7 @@ struct VulkanDevice::State {
             attachment.loadAction = load;
             attachment.storeAction = MTLStoreActionStore;
             attachment.clearDepth = depth->fillDepth.value_or(target->clearDepth);
+            if (std::getenv("APS5_METAL_DEPTH_CLEAR_PROBE") != nullptr) attachment.clearDepth = 0.5;
             if (stencil) {
                 MTLRenderPassStencilAttachmentDescriptor* stencilAttachment = descriptor.stencilAttachment;
                 stencilAttachment.texture = depth->texture;
@@ -2382,6 +2382,7 @@ struct VulkanDevice::State {
             lap(4);
 
             auto dynamic = translated.dynamic;
+            if (Trace() && depth != nullptr) std::fprintf(stderr, "[metal] draw depth: viewport %.1f,%.1f %.1fx%.1f znear %f zfar %f clip %d remap mode %u scale %f offset %f test %d write %d compare %d\n", dynamic.viewport.originX, dynamic.viewport.originY, dynamic.viewport.width, dynamic.viewport.height, dynamic.viewport.znear, dynamic.viewport.zfar, static_cast<int>(dynamic.depthClip), static_cast<unsigned>(graphics.depthRemap.mode), graphics.depthRemap.scale, graphics.depthRemap.offset, graphics.depthTest ? 1 : 0, graphics.depthWrite ? 1 : 0, static_cast<int>(graphics.depthCompare));
             dynamic.scissor.x = std::min(dynamic.scissor.x, passWidth);
             dynamic.scissor.y = std::min(dynamic.scissor.y, passHeight);
             dynamic.scissor.width = std::min(dynamic.scissor.width, passWidth - dynamic.scissor.x);
@@ -2422,7 +2423,7 @@ struct VulkanDevice::State {
                 surface->guestBytes = Graphics::DescribeSurface(resource).guestBytes;
                 dirtySurfaces.push_back(surface);
             }
-            if (depth != nullptr && graphics.depthWrite && !depth->dirty && graphics.depth->samples == 1u) markDepthDirty(*depth, *graphics.depth);
+            if (depth != nullptr && graphics.depthWrite && !depth->dirty && graphics.depth->samples == 1u) markDepthDirty(*depth, *graphics.depth, graphics);
             ++recordedSinceSubmit;
             ++cbDraws;
             if (gpuTimeEnabled()) {
@@ -2566,6 +2567,12 @@ auto VulkanDevice::WaitIdle() -> void {
     s.writebackDepths();
     s.flush();
     s.drain(s.lastSerial);
+    for (const auto& [data, count] : s.depthProbes) {
+        std::size_t nonzero = 0;
+        for (std::size_t index = 0; index < count; ++index) nonzero += data[index] != 0.0f;
+        std::fprintf(stderr, "[metal] depth export readback: first %f, %zu of %zu nonzero\n", data[0], nonzero, count);
+    }
+    s.depthProbes.clear();
 }
 
 auto VulkanDevice::PrepareForReplacement() -> void { WaitIdle(); }
