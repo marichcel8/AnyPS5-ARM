@@ -52,6 +52,7 @@ extern const char* const aps5_profile_path;
 
 void aps5_host_bridge(GuestState* state, std::uint64_t target);
 void aps5_enter();
+int aps5_invoke_translated(const void*, const void*, const void*, const void*);
 [[noreturn]] void aps5_native_restore(const std::uint64_t* registers);
 extern std::uint64_t aps5_setjmp_target;
 }
@@ -138,6 +139,11 @@ GuestState* NewState() {
 GuestState* ThreadState() {
     if (threadState == nullptr) threadState = NewState();
     return threadState;
+}
+
+const void* ResolveCallback(const void* function) {
+    const auto* found = Find(reinterpret_cast<std::uint64_t>(function));
+    return found != nullptr ? reinterpret_cast<const void*>(found->code) : nullptr;
 }
 
 // Host code calling a guest function pointer executes the guest image, which is not executable.
@@ -271,6 +277,8 @@ void InstallRedirect() {
         aps5_setjmp_target = reinterpret_cast<std::uint64_t>(jumpSet);
         longjmpTarget = reinterpret_cast<std::uint64_t>(jumpLong);
     }
+    if (auto* hooks = reinterpret_cast<void (*)(const void* (*)(const void*), int (*)(const void*, const void*, const void*, const void*))>(dlsym(RTLD_DEFAULT, "Aps5CallbackHooks_nid_no_patch")))
+        hooks(ResolveCallback, aps5_invoke_translated);
     struct sigaction action {};
     action.sa_sigaction = Redirect;
     action.sa_flags = SA_SIGINFO | SA_ONSTACK;
