@@ -286,6 +286,13 @@ void Position(State& state, const std::string& value) {
             Line(state, coordinate + " = (" + coordinate + " * " + F32(transform.scale[axis]) + " + " + F32(transform.offset[axis]) + ") / " + F32(transform.halfExtent[axis]) + " - 1.0f;");
         }
     }
+    if (StageOf(state) == IrShaderStage::Vertex) {
+        state.features |= PushData;
+        const auto mode = Constant(state, PipelineSpecialization::DepthRemapBase, vertex.depthRemap.mode);
+        const auto scale = "as_type<float>(aps5_push[" + std::to_string(DepthRemapPushOffsetBytes / 4u) + "])";
+        const auto offset = "as_type<float>(aps5_push[" + std::to_string(DepthRemapPushOffsetBytes / 4u + 1u) + "])";
+        Line(state, "if (" + mode + " != 0u) " + position + ".z = " + position + ".z * " + scale + " + " + position + ".w * " + offset + ";");
+    }
     if (state.zeroClip != NoDistance) Line(state, "aps5_out.clip[" + std::to_string(state.zeroClip) + "] = all((as_type<uint4>(" + position + ") & 0x7fffffffu) == 0u) ? -1.0f : 0.0f;");
     const auto flip = Constant(state, MetalAbi::PositionFlipYConstant, 1u);
     const auto depth = Constant(state, MetalAbi::DepthNegativeOneToOneConstant, 0u);
