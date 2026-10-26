@@ -23,6 +23,8 @@
 #import <Metal/Metal.h>
 #include <SDL_metal.h>
 #include <dispatch/dispatch.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <algorithm>
 #include <array>
@@ -131,6 +133,23 @@ struct Upload {
     std::byte* data = nullptr;
     std::uint64_t gpuAddress = 0;
 };
+
+bool PagesAreDataMemory(std::uint64_t base, std::uint64_t bytes) {
+    const std::uint64_t end = base + bytes;
+    std::uint64_t cursor = base;
+    while (cursor < end) {
+        mach_vm_address_t region = cursor;
+        mach_vm_size_t regionBytes = 0;
+        vm_region_basic_info_data_64_t info{};
+        mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+        mach_port_t object = MACH_PORT_NULL;
+        if (mach_vm_region(mach_task_self(), &region, &regionBytes, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &count, &object) != KERN_SUCCESS || region > cursor) return false;
+        constexpr vm_prot_t Required = VM_PROT_READ | VM_PROT_WRITE;
+        if ((info.protection & Required) != Required || (info.protection & VM_PROT_EXECUTE) != 0) return false;
+        cursor = region + regionBytes;
+    }
+    return true;
+}
 
 struct HostImport {
     Metal::HostSpan span;
@@ -676,7 +695,7 @@ struct VulkanDevice::State {
     const HostImport* importHost(std::uint64_t address, std::uint64_t bytes) {
         if (const auto* found = findImport(address, bytes)) return found;
         const auto span = Metal::HostPagesCovering(address, bytes, device->Limits().hostPageBytes);
-        if (span.bytes == 0 || span.bytes > device->Limits().maxBufferBytes) return nullptr;
+        if (span.bytes == 0 || span.bytes > device->Limits().maxBufferBytes || !PagesAreDataMemory(span.base, span.bytes)) return nullptr;
         id<MTLBuffer> buffer = [native newBufferWithBytesNoCopy:reinterpret_cast<void*>(span.base) length:span.bytes options:MTLResourceStorageModeShared | MTLResourceHazardTrackingModeUntracked deallocator:nil];
         if (buffer == nil) return nullptr;
         buffer.label = @"AnyPS5 host import";
