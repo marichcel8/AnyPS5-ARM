@@ -2045,6 +2045,7 @@ struct VulkanDevice::State {
         if ((changed & Metal::DynamicCull) != 0) [render setCullMode:static_cast<MTLCullMode>(dynamic.cull)];
         if ((changed & Metal::DynamicWinding) != 0) [render setFrontFacingWinding:static_cast<MTLWinding>(dynamic.winding)];
         if ((changed & Metal::DynamicDepthClip) != 0) [render setDepthClipMode:static_cast<MTLDepthClipMode>(dynamic.depthClip)];
+        if ((changed & Metal::DynamicFill) != 0) [render setTriangleFillMode:static_cast<MTLTriangleFillMode>(dynamic.fill)];
         boundDynamic = dynamic;
         dynamicValid = true;
     }
