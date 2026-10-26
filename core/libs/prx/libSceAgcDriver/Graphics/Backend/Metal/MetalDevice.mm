@@ -2545,6 +2545,8 @@ struct VulkanDevice::State {
         if (const auto found = stageSources.find(identity); found != stageSources.end()) return found->second;
         StageSource entry;
         entry.source = std::make_shared<const std::string>(shader.msl.Source());
+        static const bool dump = std::getenv("APS5_METAL_DUMP_MSL") != nullptr;
+        if (dump) std::fprintf(stderr, "[metal] msl stage %016llx\n%s\n", static_cast<unsigned long long>(shader.msl.ContentHash().low), entry.source->c_str());
         const auto hash = shader.msl.ContentHash();
         entry.key = Metal::CompileKeyBuilder(0x4d534c47ull).Add(hash.low).Add(hash.high).Finish();
         const auto declared = DeclaredConstants(*entry.source);
@@ -2754,7 +2756,7 @@ struct VulkanDevice::State {
         return created;
     }
 
-    void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key, const std::vector<MTLSamplePosition>& samplePositions = {}) {
+    void openPass(const std::array<ColorAttachment, Metal::MaxColorAttachments>& colors, DepthSurface* depth, const Graphics::DepthTarget* target, bool stencil, std::uint32_t width, std::uint32_t height, std::vector<std::uint64_t> key, const std::vector<MTLSamplePosition>& samplePositions = {}, std::uint32_t rasterSamples = 1u) {
         begin();
         endRender();
         endCompute();
@@ -2809,7 +2811,7 @@ struct VulkanDevice::State {
         descriptor.renderTargetWidth = width;
         descriptor.renderTargetHeight = height;
         if (!samplePositions.empty()) [descriptor setSamplePositions:samplePositions.data() count:samplePositions.size()];
-        if (depth == nullptr && std::all_of(colors.begin(), colors.end(), [](const ColorAttachment& color) { return color.texture == nil; })) descriptor.defaultRasterSampleCount = 1;
+        if (depth == nullptr && std::all_of(colors.begin(), colors.end(), [](const ColorAttachment& color) { return color.texture == nil; })) descriptor.defaultRasterSampleCount = rasterSamples;
         id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)open.commands;
         render = [commands renderCommandEncoderWithDescriptor:descriptor];
         if (render == nil) throw std::runtime_error("AGC graphics: Metal render encoder could not be created");
@@ -3019,6 +3021,7 @@ struct VulkanDevice::State {
             if (width == 0 || height == 0) return;
             key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
             const auto samplePositions = GuestSamplePositions(graphics);
+            key.push_back(translated.pipeline.sampleCount);
             for (const auto& position : samplePositions) {
                 std::uint64_t packed = 0;
                 std::memcpy(&packed, &position, sizeof(packed));
@@ -3046,7 +3049,7 @@ struct VulkanDevice::State {
                     [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
                     encodeUploads(compute, pending);
                 }
-                openPass(colors, depth, graphics.depth ? &*graphics.depth : nullptr, stencil, width, height, std::move(key), samplePositions);
+                openPass(colors, depth, graphics.depth ? &*graphics.depth : nullptr, stencil, width, height, std::move(key), samplePositions, translated.pipeline.sampleCount);
             }
             lap(4);
 
