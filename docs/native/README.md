@@ -69,6 +69,8 @@ python3 tools/translator/package_native_app.py \
 
 Imports that no arm64 library provides are listed at the end; each one is linked to a stub that names it and stops the game if it is ever called.
 
+The game's own prx modules (`sce_module`, `prx`) are translated too and land next to the originals as `<module>.guest.prx`. Modules the game only loads later from another folder, such as Unity's `Media/Plugins`, need `--module-dir Media/Plugins`; `--skip-sce-module` leaves all of them out.
+
 ## Run
 
 Double-click the app, or start it from a terminal:
@@ -100,6 +102,7 @@ python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm
 - `import`: a hand-made PS5 ELF that calls `puts` and `exit` through its GOT.
 - `lifter-smoke`: integer arithmetic, flags, shifts, division, recursion, indirect calls.
 - `vector-smoke`: SSE/AVX2, FMA and BMI over random inputs, NaNs and out-of-range values, compared with the same C file run as x86-64 under Rosetta. The reference is built without optimization, because Rosetta itself gets some optimized AVX sequences wrong.
+- `module`, `tls-modules`: guest modules packaged like a game's `sce_module`: calls into a module, its dynamic and initial-exec TLS, its unwind info, and a TLS variable one module exports to another, on two threads.
 
 ## How it works, briefly
 
@@ -113,7 +116,6 @@ Design details, the hard parts and the plan: [NATIVE_ARM64.md](../dev/NATIVE_ARM
 
 ## Known limits
 
-- Game-bundled prx modules (`sce_module`) are not translated yet. DOOM's bundled `libc.prx` is only stubs, so it does not matter there; most commercial titles need it.
 - Not ported yet: fibers, guest C++ exception unwinding through translated code, `getcontext`/`setcontext`, 80-bit `long double`. They stop the game with a clear message when reached.
 - x86 memory ordering is stronger than arm64's. The translator does not add barriers yet, so multithreaded code that relies on x86 ordering can misbehave.
 - New NaNs are positive on arm64 and negative on x86; code that looks at a NaN's sign can differ.

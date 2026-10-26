@@ -1,6 +1,8 @@
 #include "GuestState.hpp"
+#include "Image.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cinttypes>
 #include <cmath>
@@ -19,13 +21,6 @@
 #include <sys/ucontext.h>
 #include <unordered_map>
 
-// Emitted by the translator: the guest image (its lowest segment at offset 0), its size, the table
-// of translated functions sorted by guest offset, the guest entry point and the PT_TLS layout.
-struct TranslatedFunction {
-    std::uint64_t offset;
-    void (*code)(GuestState*);
-};
-
 // The System V va_list the guest's variadic calls are read through (SceTypes.hpp VaList).
 struct GuestVaList {
     std::uint32_t gpOffset;
@@ -41,6 +36,8 @@ struct EnterFrame {
     std::uint8_t q[8][16];
 };
 
+// Emitted by the translator: the guest image (its lowest segment at offset 0), its size, the table
+// of translated functions sorted by guest offset, the guest entry point and the PT_TLS layout.
 extern "C" {
 extern std::uint8_t aps5_guest_image[];
 extern const std::uint64_t aps5_guest_image_size;
@@ -52,7 +49,6 @@ extern const char* const aps5_profile_path;
 
 void aps5_host_bridge(GuestState* state, std::uint64_t target);
 void aps5_enter();
-int aps5_invoke_translated(const void*, const void*, const void*, const void*);
 [[noreturn]] void aps5_native_restore(const std::uint64_t* registers);
 extern std::uint64_t aps5_setjmp_target;
 }
@@ -92,18 +88,41 @@ std::uint64_t ImageBase() {
     return reinterpret_cast<std::uint64_t>(aps5_guest_image);
 }
 
+// The translated images: the executable and every loaded module. Slots are only appended, and an
+// unloaded module's slot keeps size 0, so lookups need no lock. Modules a title links register
+// before the executable's own initializers run, so all of this is constant-initialized.
+constexpr std::size_t MaxImages = 1024;
+TranslatedImage images[MaxImages];
+std::atomic<std::uint64_t> imageSizes[MaxImages];
+std::map<std::uint64_t, std::uint64_t>* earlierCounts[MaxImages];
+std::atomic<std::size_t> imageCount{0};
+std::mutex imagesLock;
+
+const TranslatedImage* ImageAt(std::uint64_t address) {
+    const auto count = imageCount.load(std::memory_order_acquire);
+    if (count != 0 && address - images[0].base < aps5_guest_image_size) return &images[0];
+    for (std::size_t i = 1; i < count; ++i) {
+        const auto size = imageSizes[i].load(std::memory_order_acquire);
+        if (size != 0 && address - images[i].base < size) return &images[i];
+    }
+    return nullptr;
+}
+
 const TranslatedFunction* Find(std::uint64_t address) {
-    const auto base = ImageBase();
-    if (address < base || address - base >= aps5_guest_image_size) return nullptr;
-    const auto offset = address - base;
-    const auto* begin = aps5_guest_functions;
-    const auto* end = aps5_guest_functions + aps5_guest_function_count;
+    const auto* image = ImageAt(address);
+    if (image == nullptr) return nullptr;
+    const auto offset = address - image->base;
+    const auto* begin = image->functions;
+    const auto* end = image->functions + image->functionCount;
     const auto* found = std::lower_bound(begin, end, offset, [](const TranslatedFunction& function, std::uint64_t value) { return function.offset < value; });
     return found != end && found->offset == offset ? found : nullptr;
 }
 
 [[noreturn]] void Fail(const char* what, std::uint64_t address) {
-    std::fprintf(stderr, "[translator] %s 0x%" PRIx64 " (guest offset 0x%" PRIx64 ")\n", what, address, address - ImageBase());
+    if (const auto* image = ImageAt(address))
+        std::fprintf(stderr, "[translator] %s 0x%" PRIx64 " (%s offset 0x%" PRIx64 ")\n", what, address, image->name, address - image->base);
+    else
+        std::fprintf(stderr, "[translator] %s 0x%" PRIx64 "\n", what, address);
     std::abort();
 }
 
@@ -155,7 +174,10 @@ void Redirect(int signal, siginfo_t* info, void* context) {
     if (const auto* function = Find(pc)) {
         machine->__ss.__x[16] = reinterpret_cast<std::uint64_t>(function->code);
         machine->__ss.__pc = reinterpret_cast<std::uint64_t>(&aps5_enter);
-        if (tracing) std::fprintf(stderr, "[translator] host call into guest offset 0x%" PRIx64 "\n", pc - ImageBase());
+        if (tracing) {
+            const auto* image = ImageAt(pc);
+            std::fprintf(stderr, "[translator] host call into %s offset 0x%" PRIx64 "\n", image->name, pc - image->base);
+        }
         return;
     }
     const auto& previous = signal == SIGBUS ? previousBus : previousSegv;
@@ -167,7 +189,7 @@ void Redirect(int signal, siginfo_t* info, void* context) {
         previous.sa_handler(signal);
         return;
     }
-    if (pc >= ImageBase() && pc - ImageBase() < aps5_guest_image_size) Fail("host call into untranslated guest code at", pc);
+    if (ImageAt(pc) != nullptr) Fail("host call into untranslated guest code at", pc);
     // The process dies on the re-raised fault; say where it was first.
     Dl_info where {};
     const bool named = dladdr(reinterpret_cast<void*>(pc), &where) != 0;
@@ -180,48 +202,56 @@ void Redirect(int signal, siginfo_t* info, void* context) {
     sigaction(signal, &fallback, nullptr);
 }
 
-struct ProfileRow {
-    std::uint64_t offset;
-    std::uint64_t count;
-};
-
-struct Profile {
-    std::mutex lock;
-    std::map<std::uint64_t, std::uint64_t> earlier;
-};
-
-Profile* profile = nullptr;
-
-void WriteProfile() {
-    unsigned long bytes = 0;
-    const auto* rows = reinterpret_cast<const ProfileRow*>(getsectiondata(&_mh_execute_header, "__DATA", "__aps5_prof", &bytes));
-    const std::lock_guard<std::mutex> guard(profile->lock);
-    auto counts = profile->earlier;
-    for (std::size_t i = 0; rows != nullptr && i < bytes / sizeof(ProfileRow); ++i) {
-        if (rows[i].count != 0) counts[rows[i].offset] += rows[i].count;
+// Each image's counts go to its own profile file (a module is translated on its own, with its own
+// cache directory), added to what the file held when the image was registered.
+void WriteImageProfile(std::size_t index) {
+    const auto& image = images[index];
+    auto counts = *earlierCounts[index];
+    for (std::size_t i = 0; image.profileRows != nullptr && i < image.profileRowCount; ++i) {
+        if (image.profileRows[i].count != 0) counts[image.profileRows[i].offset] += image.profileRows[i].count;
     }
-    const std::string partial = std::string(aps5_profile_path) + ".part";
+    const std::string partial = std::string(image.profilePath) + ".part";
     FILE* file = std::fopen(partial.c_str(), "w");
     if (file == nullptr) return;
     for (const auto& [offset, count] : counts) std::fprintf(file, "%" PRIx64 " %" PRIu64 "\n", offset, count);
-    if (std::fclose(file) == 0) std::rename(partial.c_str(), aps5_profile_path);
+    if (std::fclose(file) == 0) std::rename(partial.c_str(), image.profilePath);
 }
 
-void StartProfile() {
-    if (aps5_profile_path == nullptr) return;
-    profile = new Profile;
-    if (FILE* file = std::fopen(aps5_profile_path, "r")) {
-        std::uint64_t offset = 0, count = 0;
-        while (std::fscanf(file, "%" SCNx64 " %" SCNu64, &offset, &count) == 2) profile->earlier[offset] += count;
-        std::fclose(file);
+void WriteProfiles() {
+    const std::lock_guard<std::mutex> guard(imagesLock);
+    for (std::size_t i = 0; i < imageCount.load(std::memory_order_relaxed); ++i) {
+        if (earlierCounts[i] != nullptr && imageSizes[i].load(std::memory_order_relaxed) != 0) WriteImageProfile(i);
     }
-    std::atexit(WriteProfile);
+}
+
+std::once_flag profileStarted;
+
+void StartProfile() {
+    std::atexit(WriteProfiles);
     std::thread([] {
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(30));
-            WriteProfile();
+            WriteProfiles();
         }
     }).detach();
+}
+
+void Register(const TranslatedImage& image) {
+    if (image.profilePath != nullptr) std::call_once(profileStarted, StartProfile);
+    const std::lock_guard<std::mutex> guard(imagesLock);
+    const auto index = imageCount.load(std::memory_order_relaxed);
+    if (index == MaxImages) Fail("too many translated images; cannot register", image.base);
+    images[index] = image;
+    if (image.profilePath != nullptr) {
+        earlierCounts[index] = new std::map<std::uint64_t, std::uint64_t>;
+        if (FILE* file = std::fopen(image.profilePath, "r")) {
+            std::uint64_t offset = 0, count = 0;
+            while (std::fscanf(file, "%" SCNx64 " %" SCNu64, &offset, &count) == 2) (*earlierCounts[index])[offset] += count;
+            std::fclose(file);
+        }
+    }
+    imageSizes[index].store(image.size, std::memory_order_release);
+    imageCount.store(index + 1, std::memory_order_release);
 }
 
 // Fills the guest jmp_buf for the setjmp call whose return address is at rsp, and leaves the state as
@@ -287,11 +317,43 @@ void InstallRedirect() {
     sigaction(SIGSEGV, &action, &previousSegv);
 }
 
+std::once_flag started;
+
+// The executable's image (always the first slot) and the fault redirect, before the first guest code
+// runs: that is a linked module's initializer when the title has modules, otherwise main.
+void Start() {
+    std::call_once(started, [] {
+        unsigned long bytes = 0;
+        auto* rows = reinterpret_cast<ProfileRow*>(getsectiondata(&_mh_execute_header, "__DATA", "__aps5_prof", &bytes));
+        Register({ImageBase(), aps5_guest_image_size, aps5_guest_functions, aps5_guest_function_count, aps5_profile_path, rows, bytes / sizeof(ProfileRow), "eboot"});
+        InstallRedirect();
+    });
+}
+
 }
 
 extern "C" {
 
 std::uint64_t aps5_setjmp_target = 0;
+
+void aps5_register_image(const TranslatedImage* image) {
+    Start();
+    Register(*image);
+}
+
+void aps5_unregister_image(std::uint64_t base) {
+    const std::lock_guard<std::mutex> guard(imagesLock);
+    for (std::size_t i = 0; i < imageCount.load(std::memory_order_relaxed); ++i) {
+        if (images[i].base != base || imageSizes[i].load(std::memory_order_relaxed) == 0) continue;
+        if (earlierCounts[i] != nullptr) WriteImageProfile(i);
+        imageSizes[i].store(0, std::memory_order_release);
+    }
+}
+
+const void* aps5_translated(std::uint64_t address) {
+    const auto* function = Find(address);
+    return function != nullptr ? reinterpret_cast<const void*>(function->code) : nullptr;
+}
 
 // Called by aps5_call (HostBridge.S) for a guest setjmp: fills the guest jmp_buf and returns the
 // area where the native registers of the translated caller are saved.
@@ -306,7 +368,7 @@ void aps5_call_impl(GuestState* state, std::uint64_t target) {
         function->code(state);
         return;
     }
-    if (target >= ImageBase() && target - ImageBase() < aps5_guest_image_size) {
+    if (ImageAt(target) != nullptr) {
         Dl_info self {};
         dladdr(reinterpret_cast<void*>(&aps5_call_impl), &self);
         std::fprintf(stderr, "[translator] from translated code at %p (executable offset 0x%llx)\n", __builtin_return_address(0),
@@ -377,8 +439,7 @@ int aps5_guest_va_start(GuestVaList* list, void* saveArea, unsigned fixedGp, uns
 }
 
 int main(int argc, char** argv, char** envp) {
-    InstallRedirect();
-    StartProfile();
+    Start();
     // The FreeBSD start block the guest entry receives: argc, argv[], NULL, envp[], NULL.
     int envc = 0;
     while (envp != nullptr && envp[envc] != nullptr) ++envc;

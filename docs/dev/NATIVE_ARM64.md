@@ -106,6 +106,17 @@ Three things keep very large guest functions from stalling LLVM:
 | `APS5_TRANSLATOR_VERIFY` | unset | verify each lifted partition, as the fixtures do |
 | `APS5_TRANSLATOR_STATS` | unset | print the time of each partition and of each phase |
 
+### Guest modules
+
+A title's own prx modules are translated like its executable, each on its own, into an arm64 dylib next to the original named `<module>.guest.prx`, the name libkernel's loader resolves a module path to in the relinker's macOS mode. `package_native_app.py` finds them where the relinker does (`sce_module` or `sce_modules`, and `prx`; `--module-dir` adds folders such as `Media/Plugins`).
+
+- **Images:** the runtime keeps a table of translated images, the executable and each loaded module, with their guest ranges and function tables. Indirect calls, the fault redirect and the callback hooks look addresses up across all of them, so calls between the executable and modules, in either direction, need nothing else. A module's object keeps its tables hidden; `runtime/Module.cpp`, linked into each module, registers them from the module's initializer and removes them when it is unloaded. The translator runtime functions themselves stay in the executable.
+- **Exports:** a module exports its symbols under their NIDs, as alternate entries into its image, so the executable and other modules bind to them like to a library. The executable links the start modules before the arm64 libraries, so a guest export wins over a host one, as with the relinker's flat-namespace binds. A stub library (nine in ten of its exported functions only return zero, as in homebrew `libc.prx` files) does not export the zero functions the host also has, so the host keeps them.
+- **Loading:** modules in `sce_module` and `prx` are linked into the executable in dependency order, so dyld loads and initializes them before the title starts, dependencies first. Modules of a `--module-dir` folder are only loaded by `sceKernelLoadStartModule`. A module's initializer runs `DT_INIT` with the pending module arguments, whose result `sceKernelLoadStartModule` returns, then `DT_INIT_ARRAY`; `DT_FINI_ARRAY` and `DT_FINI` go to `__cxa_atexit` against the module.
+- **TLS:** as in the relinker's macOS mode, each module has its own TLS block and thread pointer. Its descriptor is in `__APS5DATA,__meta`; libkernel registers it, and the module's `%fs` accesses read its thread pointer from the descriptor's key, allocating the block on a thread's first access. `DTPMOD64` slots hold the descriptor, so libkernel's `__tls_get_addr` finds the block; an exported TLS variable is a TLS index other modules read in their initializers. Initial-exec access to another module's TLS is not supported, as in the relinker.
+- **Unwinding:** each module has its own `__meta` with its program headers, so `dl_iterate_phdr` and `sceKernelGetModuleInfoForUnwind` find its `eh_frame` like the executable's.
+- **Profiles:** a module has its own translation cache directory and quick-tier profile.
+
 ## Milestones
 
 1. ✅ The prx libraries build for arm64. The x86-only parts throw until they are ported.

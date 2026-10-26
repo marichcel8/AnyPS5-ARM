@@ -1,12 +1,13 @@
 #include "LifterImpl.hpp"
 
+#include <llvm/IR/GlobalAlias.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
 namespace Translator {
 
 Lifter::Impl::Impl(const Elf& elf, llvm::LLVMContext& context, Program& program, bool lifting)
     : elf(elf), context(context), builder(context), imageBegin(elf.ImageBegin()), decoded(lifting ? ownDecoded : program.decoded), functions(program.functions), tableTargets(program.tableTargets),
-      jumpTables(program.jumpTables) {
+      jumpTables(program.jumpTables), moduleImage(elf.IsModule()), moduleTls(elf.IsModule() && elf.Tls().memorySize != 0) {
     if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstone) != CS_ERR_OK) throw std::runtime_error("cannot open capstone");
     cs_option(capstone, CS_OPT_DETAIL, CS_OPT_ON);
 }
@@ -192,9 +193,12 @@ llvm::ConstantInt* Lifter::Impl::Const(unsigned bits, std::uint64_t value) {
     return llvm::ConstantInt::get(context, llvm::APInt(bits, bits >= 64 ? value : value & ((1ull << bits) - 1)));
 }
 
+llvm::Constant* Lifter::Impl::ImagePointer(std::uint64_t vaddr) {
+    return llvm::ConstantExpr::getGetElementPtr(builder.getInt8Ty(), image, builder.getInt64(vaddr - imageBegin));
+}
+
 llvm::Constant* Lifter::Impl::Host(std::uint64_t vaddr) {
-    auto* address = llvm::ConstantExpr::getGetElementPtr(builder.getInt8Ty(), image, builder.getInt64(vaddr - imageBegin));
-    return llvm::ConstantExpr::getPtrToInt(address, builder.getInt64Ty());
+    return llvm::ConstantExpr::getPtrToInt(ImagePointer(vaddr), builder.getInt64Ty());
 }
 
 llvm::Value* Lifter::Impl::Resize(llvm::Value* value, unsigned bits, bool isSigned) {
@@ -267,7 +271,8 @@ llvm::Value* Lifter::Impl::Address(const Instruction& instruction, const x86_op_
             address = builder.CreateAdd(address, index);
         }
     }
-    if (segment && memory.segment == X86_REG_FS) address = builder.CreateAdd(address, builder.CreateLoad(builder.getInt64Ty(), Field(StateLayout::FsBase)));
+    if (segment && memory.segment == X86_REG_FS && moduleTls) address = builder.CreateAdd(address, builder.CreateCall(threadPointerRuntime));
+    else if (segment && memory.segment == X86_REG_FS) address = builder.CreateAdd(address, builder.CreateLoad(builder.getInt64Ty(), Field(StateLayout::FsBase)));
     if (segment && memory.segment == X86_REG_GS) address = builder.CreateAdd(address, builder.CreateLoad(builder.getInt64Ty(), Field(StateLayout::GsBase)));
     return address;
 }
@@ -1327,11 +1332,20 @@ void Lifter::Impl::EmitImage(Statistics& stats) {
     std::map<std::uint64_t, const Relocation*> slots;
     for (const auto& relocation : elf.Relocations()) {
         const auto type = relocation.type;
-        if (type != RelocationAbsolute64 && type != RelocationGlobDat && type != RelocationJumpSlot && type != RelocationRelative) {
+        const bool tls = type == RelocationTlsModule || type == RelocationTlsOffset || type == RelocationTlsStatic;
+        const bool imported = relocation.symbol != 0 && relocation.symbol < elf.Symbols().size() && elf.Symbols()[relocation.symbol].section == 0;
+        if (type != RelocationAbsolute64 && type != RelocationGlobDat && type != RelocationJumpSlot && type != RelocationRelative && !(tls && moduleImage && (moduleTls || imported))) {
             ++stats.unsupported["relocation type " + std::to_string(type)];
             continue;
         }
         if (relocation.offset < imageBegin || relocation.offset + 8 > imageBegin + size) continue;
+        if (tls && imported) {
+            if (type == RelocationTlsStatic) {
+                ++stats.unsupported["initial-exec access to another module's TLS"];
+                continue;
+            }
+            tlsImports.push_back({relocation.offset - imageBegin, elf.Symbols()[relocation.symbol].name, type == RelocationTlsModule, relocation.addend});
+        }
         slots[relocation.offset - imageBegin] = &relocation;
     }
     std::vector<llvm::Type*> types;
@@ -1348,6 +1362,7 @@ void Lifter::Impl::EmitImage(Statistics& stats) {
     auto* type = llvm::StructType::get(context, types, true);
     image = new llvm::GlobalVariable(*module, type, false, llvm::GlobalValue::ExternalLinkage, nullptr, "aps5_guest_image");
     image->setAlignment(llvm::Align(0x4000));
+    Publish(image);
     std::vector<llvm::Constant*> values;
     for (const auto& [offset, length] : pieces) {
         if (length == 0) {
@@ -1366,17 +1381,41 @@ llvm::Constant* Lifter::Impl::SlotValue(const Relocation& relocation) {
         if (offset == 0) return base;
         return llvm::ConstantExpr::getGetElementPtr(builder.getInt8Ty(), base, builder.getInt64(static_cast<std::uint64_t>(offset)));
     };
+    auto number = [&](std::int64_t value) { return llvm::ConstantExpr::getIntToPtr(builder.getInt64(static_cast<std::uint64_t>(value)), builder.getPtrTy()); };
     if (relocation.type == RelocationRelative) return offsetFrom(image, relocation.addend - static_cast<std::int64_t>(imageBegin));
     const auto& symbol = elf.Symbols().at(relocation.symbol);
-    if (symbol.section != 0) return offsetFrom(image, static_cast<std::int64_t>(symbol.value - imageBegin) + relocation.addend);
-    const auto name = symbol.name.substr(0, symbol.name.find('#'));
+    const bool imported = relocation.symbol != 0 && symbol.section == 0;
+    switch (relocation.type) {
+    case RelocationTlsModule:
+        return imported ? number(0) : TlsDescriptor();
+    case RelocationTlsOffset:
+        return number(imported ? 0 : static_cast<std::int64_t>(symbol.value) + relocation.addend);
+    case RelocationTlsStatic:
+        return number(static_cast<std::int64_t>(symbol.value) + relocation.addend - static_cast<std::int64_t>(elf.TlsBlockSize()));
+    default:
+        break;
+    }
+    if (symbol.section == SectionAbsolute) return number(static_cast<std::int64_t>(symbol.value) + relocation.addend);
+    if (!imported) return offsetFrom(image, static_cast<std::int64_t>(symbol.value - imageBegin) + relocation.addend);
+    return offsetFrom(Import(symbol), relocation.addend);
+}
+
+// An imported symbol, by its NID. A module's __tls_get_addr is libkernel's resolver for the TLS
+// indexes the modules hold, as in the relinker's macOS mode.
+llvm::Constant* Lifter::Impl::Import(const Symbol& symbol) {
+    auto name = symbol.name.substr(0, symbol.name.find('#'));
+    if (moduleImage && name == "vNe1w4diLCs") name = "Aps5GuestTlsGetAddr_nid_no_patch";
     llvm::GlobalValue* import = module->getNamedValue(name);
     if (import == nullptr) {
         if ((symbol.info & 0xf) == SymbolTypeFunction) import = llvm::Function::Create(llvm::FunctionType::get(builder.getVoidTy(), false), llvm::GlobalValue::ExternalLinkage, name, module);
         else import = new llvm::GlobalVariable(*module, builder.getInt8Ty(), false, llvm::GlobalValue::ExternalLinkage, nullptr, name);
         if ((symbol.info >> 4) == SymbolBindingWeak) import->setLinkage(llvm::GlobalValue::ExternalWeakLinkage);
     }
-    return offsetFrom(import, relocation.addend);
+    return import;
+}
+
+llvm::Constant* Lifter::Impl::TlsDescriptor() {
+    return llvm::ConstantExpr::getGetElementPtr(builder.getInt8Ty(), meta, builder.getInt64(MetaTlsDescriptor));
 }
 
 void Lifter::Impl::EmitTables() {
@@ -1385,7 +1424,7 @@ void Lifter::Impl::EmitTables() {
     for (const auto& [entry, function] : lifted) rows.push_back(llvm::ConstantStruct::get(rowType, {builder.getInt64(entry - imageBegin), function}));
     auto* tableType = llvm::ArrayType::get(rowType, rows.size());
     auto constant = [&](llvm::Type* type, llvm::Constant* value, const char* name) {
-        new llvm::GlobalVariable(*module, type, true, llvm::GlobalValue::ExternalLinkage, value, name);
+        Publish(new llvm::GlobalVariable(*module, type, true, llvm::GlobalValue::ExternalLinkage, value, name));
     };
     constant(tableType, llvm::ConstantArray::get(tableType, rows), "aps5_guest_functions");
     constant(builder.getInt64Ty(), builder.getInt64(rows.size()), "aps5_guest_function_count");
@@ -1395,29 +1434,115 @@ void Lifter::Impl::EmitTables() {
     auto* tlsType = llvm::ArrayType::get(builder.getInt64Ty(), 4);
     constant(tlsType, llvm::ConstantDataArray::get(context, llvm::ArrayRef<std::uint64_t>{tls.memorySize != 0 ? tls.vaddr - imageBegin : 0, tls.fileSize, tls.memorySize, elf.TlsAlign()}),
              "aps5_guest_tls");
+    if (moduleImage) {
+        EmitModuleTables();
+        EmitExports();
+    }
+}
+
+// What a module's initializer (runtime/Module.cpp) runs: DT_INIT, then DT_INIT_ARRAY, and DT_FINI_ARRAY
+// in reverse and DT_FINI at unload, as image offsets (~0 when absent). The TLS import rows name the
+// slots it fills from other modules' TLS indexes.
+void Lifter::Impl::EmitModuleTables() {
+    const auto found = elf.Initializers();
+    auto offset = [&](std::uint64_t vaddr) { return vaddr != 0 ? vaddr - imageBegin : ~std::uint64_t{0}; };
+    auto* i64 = builder.getInt64Ty();
+    auto* tablesType = llvm::ArrayType::get(i64, 6);
+    const std::vector<std::uint64_t> tables{offset(found.init), offset(found.fini), offset(found.initArray), found.initArraySize / 8, offset(found.finiArray), found.finiArraySize / 8};
+    Publish(new llvm::GlobalVariable(*module, tablesType, true, llvm::GlobalValue::ExternalLinkage, llvm::ConstantDataArray::get(context, llvm::ArrayRef<std::uint64_t>(tables)), "aps5_guest_module"));
+    auto* rowType = llvm::StructType::get(context, {i64, builder.getPtrTy(), i64, i64});
+    std::vector<llvm::Constant*> rows;
+    for (const auto& slot : tlsImports) {
+        Symbol symbol;
+        symbol.name = slot.symbol;
+        symbol.info = SymbolTypeTls;
+        rows.push_back(llvm::ConstantStruct::get(rowType, {builder.getInt64(slot.offset), Import(symbol), builder.getInt64(slot.module ? 0 : 1), builder.getInt64(static_cast<std::uint64_t>(slot.addend))}));
+    }
+    auto* tableType = llvm::ArrayType::get(rowType, rows.size());
+    Publish(new llvm::GlobalVariable(*module, tableType, true, llvm::GlobalValue::ExternalLinkage, llvm::ConstantArray::get(tableType, rows), "aps5_guest_tls_imports"));
+    Publish(new llvm::GlobalVariable(*module, i64, true, llvm::GlobalValue::ExternalLinkage, builder.getInt64(rows.size()), "aps5_guest_tls_import_count"));
+    auto* descriptor = llvm::GlobalAlias::create(builder.getInt8Ty(), 0, llvm::GlobalValue::ExternalLinkage, "aps5_guest_tls_descriptor", TlsDescriptor(), module);
+    Publish(descriptor);
+}
+
+bool Lifter::Impl::ReturnsZero(std::uint64_t address) const {
+    static const std::vector<std::vector<std::uint8_t>> patterns{{0x31, 0xc0, 0xc3}, {0x66, 0x0f, 0xef, 0xc0, 0x31, 0xc0, 0xc3}};
+    return std::any_of(patterns.begin(), patterns.end(), [&](const std::vector<std::uint8_t>& code) {
+        const auto* bytes = elf.At(address, code.size());
+        return bytes != nullptr && elf.InExecutable(address) && std::equal(code.begin(), code.end(), bytes);
+    });
+}
+
+// A stub library (nine in ten of its exported functions only return zero, as in homebrew libc.prx
+// files) stands in for the host library: the host wins the zero exports it also has.
+bool Lifter::Impl::PlaceholderExport(const Symbol& symbol, bool stubLibrary) const {
+    if (!stubLibrary || hostExports == nullptr || (symbol.info & 0xf) != SymbolTypeFunction || !ReturnsZero(symbol.value)) return false;
+    return hostExports->count(symbol.name.substr(0, symbol.name.find('#'))) != 0;
+}
+
+// The module's exports under their NIDs: functions and data as alternate entries into the image, TLS
+// variables as TLS indexes ({descriptor, offset}) that importers read in their initializers.
+void Lifter::Impl::EmitExports() {
+    auto exported = [](const Symbol& symbol) {
+        return symbol.section != 0 && symbol.section < 0xff00 && (symbol.info >> 4) != 0 && symbol.visibility != 1 && symbol.visibility != 2 && !symbol.name.empty();
+    };
+    std::size_t functions = 0, zero = 0;
+    for (const auto& symbol : elf.Symbols()) {
+        if (!exported(symbol) || (symbol.info & 0xf) != SymbolTypeFunction) continue;
+        ++functions;
+        if (ReturnsZero(symbol.value)) ++zero;
+    }
+    const bool stubLibrary = functions != 0 && zero * 10 >= functions * 9;
+    auto* indexType = llvm::StructType::get(context, {builder.getPtrTy(), builder.getInt64Ty()});
+    for (const auto& symbol : elf.Symbols()) {
+        if (!exported(symbol) || PlaceholderExport(symbol, stubLibrary)) continue;
+        const auto name = symbol.name.substr(0, symbol.name.find('#'));
+        if (module->getNamedValue(name) != nullptr) continue;
+        if ((symbol.info & 0xf) == SymbolTypeTls) {
+            if (!moduleTls) continue;
+            new llvm::GlobalVariable(*module, indexType, true, llvm::GlobalValue::ExternalLinkage, llvm::ConstantStruct::get(indexType, {TlsDescriptor(), builder.getInt64(symbol.value)}), name);
+            continue;
+        }
+        if (symbol.value < imageBegin || symbol.value >= elf.ImageEnd()) continue;
+        llvm::GlobalAlias::create(builder.getInt8Ty(), 0, llvm::GlobalValue::ExternalLinkage, name, ImagePointer(symbol.value), module);
+    }
 }
 
 // __APS5DATA,__meta, as the relinker writes it for the Rosetta mode (MacOsImage.cpp): libc emulates
 // dl_iterate_phdr from the load bias and the original program headers, which is how the guest finds
 // its PT_SCE_PROCPARAM. The TLS slots stay zero; the translator runtime sets up guest TLS itself.
-void Lifter::Impl::EmitImageMetadata() {
-    constexpr std::uint64_t Version = 2, ReservedWords = 9;
+// A module's TLS descriptor (version, template, template size, block size, alignment, pthread key) sits
+// in the metadata where the relinker puts it; libkernel registers it and allocates the module's blocks.
+void Lifter::Impl::DeclareImageMetadata() {
     const auto& headers = elf.ProgramHeaders();
     auto* i64 = builder.getInt64Ty();
-    auto* headerBytes = llvm::ArrayType::get(builder.getInt8Ty(), headers.size());
-    auto* type = llvm::StructType::get(context, {i64, builder.getPtrTy(), llvm::ArrayType::get(i64, ReservedWords), i64, headerBytes}, true);
-    auto* loadBias = llvm::ConstantExpr::getGetElementPtr(builder.getInt8Ty(), image, builder.getInt64(0 - imageBegin));
-    auto* value = llvm::ConstantStruct::get(type, {builder.getInt64(Version), loadBias, llvm::ConstantAggregateZero::get(llvm::ArrayType::get(i64, ReservedWords)),
-                                                   builder.getInt64(headers.size() / 56), llvm::ConstantDataArray::get(context, llvm::ArrayRef<std::uint8_t>(headers))});
-    auto* meta = new llvm::GlobalVariable(*module, type, false, llvm::GlobalValue::InternalLinkage, value, "aps5_guest_meta");
+    auto* ptr = builder.getPtrTy();
+    auto* type = llvm::StructType::get(context, {i64, ptr, i64, i64, i64, ptr, i64, i64, i64, i64, i64, i64, llvm::ArrayType::get(builder.getInt8Ty(), headers.size())}, true);
+    meta = new llvm::GlobalVariable(*module, type, false, llvm::GlobalValue::InternalLinkage, nullptr, "aps5_guest_meta");
     meta->setSection("__APS5DATA,__meta");
     meta->setAlignment(llvm::Align(8));
     llvm::appendToUsed(*module, {meta});
 }
 
+void Lifter::Impl::EmitImageMetadata() {
+    constexpr std::uint64_t Version = 2;
+    const auto& headers = elf.ProgramHeaders();
+    const auto& tls = elf.Tls();
+    auto* type = llvm::cast<llvm::StructType>(meta->getValueType());
+    auto* loadBias = llvm::ConstantExpr::getGetElementPtr(builder.getInt8Ty(), image, builder.getInt64(0 - imageBegin));
+    auto* none = llvm::ConstantPointerNull::get(builder.getPtrTy());
+    auto* tlsTemplate = moduleTls && tls.fileSize != 0 ? ImagePointer(tls.vaddr) : static_cast<llvm::Constant*>(none);
+    auto word = [&](std::uint64_t value) { return builder.getInt64(value); };
+    auto* value = llvm::ConstantStruct::get(type, {word(Version), loadBias, word(0), word(0), word(moduleTls ? 1 : 0), tlsTemplate, word(moduleTls ? tls.fileSize : 0),
+                                                   word(moduleTls ? elf.TlsBlockSize() : 0), word(moduleTls ? elf.TlsAlign() : 0), word(0), word(0), word(headers.size() / 56),
+                                                   llvm::ConstantDataArray::get(context, llvm::ArrayRef<std::uint8_t>(headers))});
+    meta->setInitializer(value);
+}
+
 void Lifter::Impl::DeclareImage() {
     image = new llvm::GlobalVariable(*module, builder.getInt8Ty(), false, llvm::GlobalValue::ExternalLinkage, nullptr, "aps5_guest_image");
     image->setAlignment(llvm::Align(0x4000));
+    Publish(image);
 }
 
 Lifter::Lifter(const Elf& elf) : elf(elf), program(std::make_unique<Program>()) {}
@@ -1483,8 +1608,17 @@ std::unique_ptr<llvm::Module> Lifter::Lift(llvm::LLVMContext& context, const std
         *callee = module->getOrInsertFunction(name, llvm::FunctionType::get(builder.getVoidTy(), {ptr, builder.getInt64Ty()}, false));
         llvm::cast<llvm::Function>(callee->getCallee())->setDoesNotReturn();
     }
-    if (first) lifter.EmitImage(partitionStats);
-    else lifter.DeclareImage();
+    lifter.hostExports = &hostExports;
+    if (lifter.moduleTls) {
+        lifter.threadPointerRuntime = module->getOrInsertFunction("aps5_module_thread_pointer", llvm::FunctionType::get(builder.getInt64Ty(), false));
+        llvm::cast<llvm::Function>(lifter.threadPointerRuntime.getCallee())->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    }
+    if (first) {
+        lifter.DeclareImageMetadata();
+        lifter.EmitImage(partitionStats);
+    } else {
+        lifter.DeclareImage();
+    }
     const std::set<std::uint64_t> own(entries.begin(), entries.end());
     auto* functionType = llvm::FunctionType::get(builder.getVoidTy(), {ptr}, false);
     for (const auto& [entry, addresses] : lifter.functions) {

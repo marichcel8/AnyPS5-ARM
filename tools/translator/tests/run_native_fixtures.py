@@ -8,7 +8,11 @@ FIXTURES = HERE.parents[2] / "core/relinker/relinker/tests/macos"
 sys.path.insert(0, str(FIXTURES))
 
 import guesttools
+import run_macos_fixtures
 from import_fixture import fixture as import_fixture
+
+sys.path.insert(0, str(HERE.parent))
+import package_native_app
 
 
 VECTOR_FLAGS = ["-mavx2", "-mfma", "-mbmi", "-mbmi2", "-mlzcnt", "-mpopcnt"]
@@ -58,6 +62,25 @@ def translate_and_run(build, libraries, directory, expected_exit, expected_outpu
     return None
 
 
+def package_and_run(build, libraries, directory, expected_exit):
+    """A fixture with guest modules in sce_module, packaged the way package_native_app.py does it: each
+    module becomes a .guest.prx dylib the executable links."""
+    os.environ["APS5_TRANSLATOR_VERIFY"] = "1"
+    package_native_app.LLVM = pathlib.Path(guesttools.LLVM)
+    work = directory / "work"
+    work.mkdir()
+    try:
+        modules = package_native_app.bundled_modules(directory, [])
+        relinked = package_native_app.build_executable(directory / "eboot.elf", libraries, build, work, "full", None, modules)
+    except (RuntimeError, subprocess.CalledProcessError) as error:
+        return f"packaging failed: {error}"
+    (relinked / "libs").symlink_to(libraries.resolve())
+    executed = subprocess.run([str(relinked / "eboot")], capture_output=True, text=True, timeout=60, cwd=relinked)
+    if executed.returncode != expected_exit:
+        return f"exit {executed.returncode}, expected {expected_exit}: {executed.stdout.strip()[-200:]} {executed.stderr.strip()[-300:]}"
+    return None
+
+
 def main():
     build, libraries = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])
     temporary = len(sys.argv) <= 3
@@ -73,13 +96,19 @@ def main():
         expected = host_reference("vector_smoke.c", VECTOR_FLAGS, work)
         if expected is not None:
             cases.append(("vector-smoke", compiled("vector_smoke.c", VECTOR_FLAGS), *expected))
+        # Guest modules: TLS (dynamic, initial-exec, exported to another module), exports, unwind info.
+        cases.append(("module", run_macos_fixtures.compiled_module, 143, None))
+        cases.append(("tls-modules", run_macos_fixtures.compiled_tls_modules, 47, None))
     failures = 0
     for name, build_fixture, expected_exit, expected_output in cases:
         directory = work / name
         shutil.rmtree(directory, ignore_errors=True)
         directory.mkdir(parents=True)
         build_fixture(directory)
-        error = translate_and_run(build, libraries, directory, expected_exit, expected_output)
+        if expected_output is None:
+            error = package_and_run(build, libraries, directory, expected_exit)
+        else:
+            error = translate_and_run(build, libraries, directory, expected_exit, expected_output)
         print(f"{'PASS' if error is None else 'FAIL'} {name}" + ("" if error is None else f": {error}"))
         failures += error is not None
     if failures:
