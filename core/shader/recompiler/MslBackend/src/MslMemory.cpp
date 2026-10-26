@@ -229,7 +229,7 @@ void ReadConstBuffer(State& state, const IrValue& inst) {
     const auto size = Temp(state);
     Line(state, "const uint " + address + " = " + offset + " + " + U32(mem.offset) + ";");
     if (mem.gpuDescriptor) Line(state, "const uint " + byte + " = " + address + " & ~3u;");
-    else Line(state, "const uint " + byte + " = " + address + " - uint((" + resource + ".base + ulong(" + address + ")) & 3ul);");
+    else Line(state, "const uint " + byte + " = (" + address + " & ~3u) - uint(" + resource + ".base & 3ul);");
     Line(state, "const ulong " + size + " = " + resource + ".stride == 0u ? ulong(" + resource + ".records) : ulong(" + resource + ".stride) * ulong(" + resource + ".records);");
     Open(state, "if (" + address + " >= " + offset + " && " + resource + ".valid && ulong(" + byte + ") + 4ul <= " + size + ") {");
     Line(state, result + " = " + BufferLoad(state, inst, mem, resource, byte, 4u) + ";");
