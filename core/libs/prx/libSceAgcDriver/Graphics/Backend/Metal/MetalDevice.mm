@@ -176,6 +176,7 @@ struct Completion {
     std::vector<LabelStore> labels;
     std::vector<std::function<void()>> actions;
     bool waking = false;
+    std::chrono::steady_clock::time_point submitted;
 };
 
 struct Waker {
@@ -212,6 +213,8 @@ struct CachedSurface {
     std::map<ViewKey, Metal::TextureHandle> views;
     Graphics::GuestTextureResource resource{};
     std::uint64_t address = 0;
+    std::uint64_t guestAddress = 0;
+    std::uint64_t guestBytes = 0;
     std::uint64_t validEpoch = 0;
     bool dirty = false;
 };
@@ -578,6 +581,12 @@ struct VulkanDevice::State {
     id<MTL4ArgumentTable> scanoutTable = nil;
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
+    std::array<double, 5> presentMs{};
+    std::uint64_t writebackSurfaces = 0;
+    std::uint64_t flushes = 0;
+    std::uint64_t completedFlushes = 0;
+    double completionMsTotal = 0.0;
+    double completionMsMax = 0.0;
     std::uint64_t reportDraws = 0;
     std::uint64_t reportDispatches = 0;
     Metal::PresenterStats reportStats{};
@@ -705,8 +714,9 @@ struct VulkanDevice::State {
         return &imports.back();
     }
 
-    std::uint64_t resolve(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+    std::uint64_t resolve(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots, const CachedSurface* self = nullptr, bool settle = true) {
         if (address == 0 || bytes == 0) return 0;
+        if (settle) writebackOverlapping(address, bytes, self);
         if (!writable) {
             for (const auto& snapshot : snapshots) {
                 if (address >= snapshot.address && bytes <= snapshot.bytes.size() && address - snapshot.address <= snapshot.bytes.size() - bytes) {
@@ -782,22 +792,39 @@ struct VulkanDevice::State {
         return encoder;
     }
 
-    void writebackDirty() {
-        if (dirtySurfaces.empty()) return;
+    void encodeWritebacks(const std::vector<CachedSurface*>& surfaces) {
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-        for (auto* surface : dirtySurfaces) {
+        writebackSurfaces += surfaces.size();
+        for (auto* surface : surfaces) {
             textures->EncodeWriteback((__bridge void*)compute, surface->texture, surface->resource, surface->address);
             surface->dirty = false;
         }
-        dirtySurfaces.clear();
         [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
     }
 
-    void flush() {
+    void writebackDirty() {
+        if (dirtySurfaces.empty()) return;
+        encodeWritebacks(dirtySurfaces);
+        dirtySurfaces.clear();
+    }
+
+    bool writebackOverlapping(std::uint64_t address, std::uint64_t bytes, const CachedSurface* self) {
+        if (dirtySurfaces.empty() || bytes == 0) return false;
+        std::vector<CachedSurface*> hit;
+        for (auto* surface : dirtySurfaces) {
+            if (surface != self && surface->guestAddress < address + bytes && address < surface->guestAddress + surface->guestBytes) hit.push_back(surface);
+        }
+        if (hit.empty()) return false;
+        encodeWritebacks(hit);
+        std::erase_if(dirtySurfaces, [](const CachedSurface* surface) { return !surface->dirty; });
+        return true;
+    }
+
+    void flush(bool settleSurfaces = true) {
         if (!open) return;
         @autoreleasepool {
-            writebackDirty();
+            if (settleSurfaces) writebackDirty();
             endRender();
             endCompute();
             sync->EncodeLabels(open);
@@ -811,6 +838,8 @@ struct VulkanDevice::State {
             }
             sealing.clear();
             auto& completion = completions[serial];
+            completion.submitted = std::chrono::steady_clock::now();
+            ++flushes;
             completion.writeBacks = std::move(writeBacks);
             completion.staged = std::move(staged);
             writeBacks.clear();
@@ -820,6 +849,7 @@ struct VulkanDevice::State {
             for (auto& write : pendingWrites) {
                 if (write.serial == 0) write.serial = serial;
             }
+            for (const auto* surface : dirtySurfaces) noteWrite(surface->guestAddress, surface->guestBytes);
             recordedSinceSubmit = 0;
             ++epoch;
         }
@@ -829,6 +859,10 @@ struct VulkanDevice::State {
         while (!completions.empty() && completions.begin()->first <= through) {
             auto entry = std::move(completions.begin()->second);
             completions.erase(completions.begin());
+            const auto latency = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - entry.submitted).count();
+            completionMsTotal += latency;
+            completionMsMax = std::max(completionMsMax, latency);
+            ++completedFlushes;
             for (const auto& item : entry.writeBacks) std::memcpy(item.host, item.staged, item.bytes);
             for (const auto& buffer : entry.staged) device->ReleaseBuffer(buffer);
             for (const auto& label : entry.labels) storeLabel(label);
@@ -861,7 +895,7 @@ struct VulkanDevice::State {
 
     Completion* afterRecorded() {
         reap();
-        if (open) flush();
+        if (open) flush(false);
         if (completions.empty()) return nullptr;
         auto& [serial, completion] = *completions.rbegin();
         if (!completion.waking) {
@@ -956,6 +990,10 @@ struct VulkanDevice::State {
     void flushFor(std::uint64_t address, std::size_t bytes) {
         std::lock_guard lock(mutex);
         reap();
+        if (!encodingNow && writebackOverlapping(address, bytes, nullptr)) {
+            flush();
+            ++hookSubmits;
+        }
         const auto end = address + bytes;
         bool open = false;
         std::uint64_t wait = 0;
@@ -1127,10 +1165,17 @@ struct VulkanDevice::State {
         source.height = presentHeight;
         const auto scanned = presentAfter;
         presentAfter = 0;
+        const auto began = std::chrono::steady_clock::now();
         if (scanned != 0) device->WaitOnQueue(Queue, Queue, scanned);
         const auto result = presenter->Present(source);
+        const auto presented = std::chrono::steady_clock::now();
         if (result.serial != 0) presentSerials[slot] = result.serial;
         if (scanned != 0 && !device->WaitSerial(Queue, scanned, WaitTimeoutMs)) throw std::runtime_error("AGC graphics: Metal scanout did not finish in time");
+        const auto waited = std::chrono::steady_clock::now();
+        presentMs[0] += std::chrono::duration<double, std::milli>(presented - began).count();
+        presentMs[1] += std::chrono::duration<double, std::milli>(waited - presented).count();
+        presentMs[2] += result.pacedMs;
+        presentMs[3] += result.waitMs;
         reportPresents();
         return result.pacedMs + result.waitMs;
     }
@@ -1153,6 +1198,14 @@ struct VulkanDevice::State {
                      static_cast<unsigned long long>(drawCount - reportDraws), static_cast<unsigned long long>(dispatchCount - reportDispatches), static_cast<unsigned long long>(hookSubmits - reportSubmits), static_cast<unsigned long long>(hookWaits - reportWaits),
                      static_cast<unsigned long long>(labels[0] - reportLabels[0]), static_cast<unsigned long long>(labels[1] - reportLabels[1]), static_cast<unsigned long long>(labels[2] - reportLabels[2]),
                      static_cast<unsigned long long>((snapshotBytes - reportSnapshotBytes) / 1024));
+        if (reportFrames != 0u) std::fprintf(stderr, "[metal] present per flip: %.2f ms Present call (paced %.2f ms, drawable wait %.2f ms), %.2f ms wait for scanout serial\n", presentMs[0] / static_cast<double>(reportFrames), presentMs[2] / static_cast<double>(reportFrames), presentMs[3] / static_cast<double>(reportFrames), presentMs[1] / static_cast<double>(reportFrames));
+        std::fprintf(stderr, "[metal] flushes %llu, writeback surfaces %llu, submit-to-completion %.2f ms avg, %.2f ms max over %llu completions\n", static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(writebackSurfaces), completedFlushes != 0u ? completionMsTotal / static_cast<double>(completedFlushes) : 0.0, completionMsMax, static_cast<unsigned long long>(completedFlushes));
+        flushes = 0;
+        writebackSurfaces = 0;
+        completedFlushes = 0;
+        completionMsTotal = 0.0;
+        completionMsMax = 0.0;
+        presentMs = {};
         reportSnapshotBytes = snapshotBytes;
         reportLabels = labels;
         reportAt = now;
@@ -1230,7 +1283,7 @@ struct VulkanDevice::State {
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
         auto& surface = *found;
         const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
-        const auto address = resolve(resource.baseAddress, bytes, written, snapshots);
+        const auto address = resolve(resource.baseAddress, bytes, written, snapshots, &surface);
         uses.push_back({&surface, resource, address, written});
         Metal::ViewInfo view;
         view.kind = viewKind;
@@ -1457,6 +1510,7 @@ struct VulkanDevice::State {
             std::lock_guard lock(mutex);
             const EncodingScope encoding;
             registry->Refresh();
+            writebackDirty();
             begin();
             std::array<std::uint64_t, ArgumentSlots> slots{};
             std::vector<ImageUse> uses;
@@ -1739,7 +1793,7 @@ struct VulkanDevice::State {
                 for (auto& [surface, resource] : targets) {
                     if (surface->dirty) continue;
                     surface->resource = resource;
-                    surface->address = resolve(resource.baseAddress, Graphics::DescribeSurface(resource).guestBytes, true, {});
+                    surface->address = resolve(resource.baseAddress, Graphics::DescribeSurface(resource).guestBytes, true, {}, surface);
                     loads.push_back({surface, resource, surface->address, false});
                 }
             }
@@ -1778,7 +1832,7 @@ struct VulkanDevice::State {
             const auto primitive = static_cast<MTLPrimitiveType>(translated.primitive);
             if (params.indexed) {
                 const auto bytes = static_cast<std::uint64_t>(params.indexCount) * params.indexSize;
-                const auto indices = resolve(params.indexAddress, bytes, false, snapshots);
+                const auto indices = resolve(params.indexAddress, bytes, false, snapshots, nullptr, false);
                 [render drawIndexedPrimitives:primitive indexCount:params.indexCount indexType:params.indexSize == 2u ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferLength:bytes instanceCount:params.instanceCount baseVertex:static_cast<NSInteger>(params.firstVertex) baseInstance:params.firstInstance];
             } else {
                 [render drawPrimitives:primitive vertexStart:params.firstVertex vertexCount:params.indexCount instanceCount:params.instanceCount baseInstance:params.firstInstance];
@@ -1787,6 +1841,8 @@ struct VulkanDevice::State {
                 surface->validEpoch = epoch;
                 if (surface->dirty) continue;
                 surface->dirty = true;
+                surface->guestAddress = resource.baseAddress;
+                surface->guestBytes = Graphics::DescribeSurface(resource).guestBytes;
                 dirtySurfaces.push_back(surface);
             }
             ++recordedSinceSubmit;
@@ -1912,6 +1968,7 @@ auto VulkanDevice::WaitIdle() -> void {
     auto& s = *state;
     if (s.sync == nullptr) return;
     std::lock_guard lock(s.mutex);
+    s.writebackDirty();
     s.flush();
     s.drain(s.lastSerial);
 }
