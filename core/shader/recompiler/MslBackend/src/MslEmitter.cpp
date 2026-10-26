@@ -406,7 +406,7 @@ std::string MslEmitter::Emit(const IrProgram& program, const ShaderStageInputInf
     if ((state.features & Lds) != 0u) declare("threadgroup uint aps5_lds[" + std::to_string(std::max(state.ldsDwords, 1u)) + "];");
     ForEachHalf(state, [&](std::uint32_t) {
         if ((state.features & Scratch) != 0u) declare("uint aps5_scratch" + HalfSuffix() + "[" + std::to_string(std::max(state.scratchDwords, 1u)) + "];");
-        if ((state.features & VectorWindow) != 0u) declare("uint aps5_window" + HalfSuffix() + "[" + std::to_string(std::max(state.windowDwords, 1u)) + "];");
+        if ((state.features & VectorWindow) != 0u) declare("uint aps5_window" + HalfSuffix() + "[" + std::to_string(std::max(state.windowDwords, 1u)) + "] = {};");
         for (const auto* value : state.hoistOrder) {
             const auto type = TypeName(value->Type());
             if (type.empty()) Fail(*value, "is carried across blocks with a type MSL does not hold");
