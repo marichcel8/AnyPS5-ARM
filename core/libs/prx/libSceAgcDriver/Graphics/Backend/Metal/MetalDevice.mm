@@ -810,7 +810,7 @@ struct VulkanDevice::State {
     static constexpr std::chrono::microseconds OpenLabelDeadline{1000};
     std::vector<LabelStore> openLabels;
     std::chrono::steady_clock::time_point openLabelsSince;
-    std::condition_variable labelTimerWake;
+    std::condition_variable_any labelTimerWake;
     std::thread labelTimer;
     bool labelTimerStop = false;
 
