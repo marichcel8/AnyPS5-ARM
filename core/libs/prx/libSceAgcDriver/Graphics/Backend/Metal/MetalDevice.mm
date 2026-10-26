@@ -271,6 +271,28 @@ std::uint64_t HtileBytes(VkExtent2D extent) {
     return static_cast<std::uint64_t>((extent.width + 1023u) / 1024u) * ((extent.height + 511u) / 512u) * 32768u;
 }
 
+void ScanHtile(DepthSurface& surface, const Graphics::DepthTarget& target) {
+    if (target.samples != 1u || target.htileAddress == 0u) return;
+    std::vector<std::uint32_t> words(HtileBytes(target.extent) / 4u);
+    try {
+        GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(words)), 4);
+    } catch (const std::exception&) {
+        return;
+    }
+    const bool depthCleared = std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return (word & 0xfu) == 0u; });
+    const bool stencilCleared = target.htileStencil && std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return ((word >> 8u) & 0x3u) == 0u; });
+    if (!depthCleared && !stencilCleared) return;
+    if (depthCleared) {
+        surface.htilePattern = words.front();
+        surface.initialized = false;
+        surface.fillDepth.reset();
+    }
+    if (stencilCleared) {
+        surface.stencilInitialized = false;
+        surface.fillStencil.reset();
+    }
+}
+
 void ApplyDepthFills(DepthSurface& surface, const Graphics::DepthTarget& target) {
     const bool d16 = target.format == VK_FORMAT_D16_UNORM || target.format == VK_FORMAT_D16_UNORM_S8_UINT;
     for (const auto& fill : Graphics::DepthMetadataFillsSince(surface.seenFills)) {
@@ -1952,6 +1974,7 @@ struct VulkanDevice::State {
             if (width == 0 || height == 0) return;
             key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
 
+            if (depth != nullptr && graphics.depth && !(render != nil && key == passKey)) ScanHtile(*depth, *graphics.depth);
             const bool reuse = render != nil && key == passKey && (depth == nullptr || (depth->initialized && (!stencil || depth->stencilInitialized)));
             std::vector<ImageUse> loads = uses;
             if (!reuse) {
