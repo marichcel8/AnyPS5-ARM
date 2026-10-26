@@ -772,9 +772,12 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
     if (RewritesLastProvokingVertex(graphics, shaders)) {
         adjusted = graphics;
         adjusted->provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
+    } else if (NeedsFanList(graphics)) {
+        adjusted = graphics;
+        adjusted->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
     }
     const auto translated = Metal::TranslateState(adjusted ? *adjusted : graphics, HasFlatInputs(shaders));
-    if (translated.rejection != nullptr) return std::string(translated.rejection);
+    if (translated.rejection != nullptr) return std::string(translated.rejection) + " (topology " + std::to_string(static_cast<int>(graphics.topology)) + ")";
     return MultisampleRejection(graphics);
 }
 
