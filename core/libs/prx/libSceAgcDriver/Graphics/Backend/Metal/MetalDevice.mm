@@ -114,6 +114,11 @@ bool GpuScanout(const DisplayBuffer& buffer) {
     return !disabled && buffer.dccAddress == 0 && !DisplayHalfFloat(buffer.pixelFormat) && !DisplayPq(buffer.pixelFormat) && DisplayTexelBytes(buffer.pixelFormat) == 4u && buffer.tilingMode <= 1u;
 }
 
+bool cpuProfileEnabled() {
+    static const bool enabled = std::getenv("APS5_METAL_CPU_PROFILE") != nullptr;
+    return enabled;
+}
+
 bool gpuTimeEnabled() {
     static const bool enabled = std::getenv("APS5_METAL_GPU_TIME") != nullptr;
     return enabled;
@@ -606,6 +611,8 @@ std::uint32_t MslExperiment() {
         if (list.find("nopow") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoPow;
         if (list.find("nouniform") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoUniformLoad;
         if (list.find("constout") != std::string::npos) result |= ShaderRecompiler::MslExperimentConstantOutput;
+        if (list.find("nosample") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoSample;
+        if (list.find("nopack") != std::string::npos) result |= ShaderRecompiler::MslExperimentNoPack;
         std::fprintf(stderr, "[metal] msl experiment %s (mask %u): shader output is wrong on purpose\n", text, result);
         return result;
     }();
@@ -666,6 +673,20 @@ struct VulkanDevice::State {
     std::uint32_t cbUploads = 0;
     std::uint64_t cbMovedBytes = 0;
     std::string cbLastDraw;
+    // Driver-thread time per draw phase (APS5_METAL_CPU_PROFILE): lock wait, pipeline lookup, stage binding, surface lookup, uploads and pass open, encoding, bookkeeping.
+    static constexpr std::size_t DrawPhases = 7;
+    std::array<std::uint64_t, DrawPhases> drawPhaseNs{};
+    std::uint64_t drawPhaseDraws = 0;
+    // Inside bindStage (same switch): prelude, buffers, images, samplers, tables, epilogue, then surfaceFor, resolve and viewOf inside imageView.
+    static constexpr std::size_t BindPhases = 10;
+    std::array<std::uint64_t, BindPhases> bindPhaseNs{};
+    std::chrono::steady_clock::time_point bindPhaseAt;
+    void bindLap(std::size_t phase) {
+        if (!cpuProfileEnabled()) return;
+        const auto now = std::chrono::steady_clock::now();
+        bindPhaseNs[phase] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - bindPhaseAt).count());
+        bindPhaseAt = now;
+    }
     std::uint64_t lastSerial = 0;
     const char* resolvedBy = "";
     std::vector<PendingWrite> pendingWrites;
@@ -854,9 +875,33 @@ struct VulkanDevice::State {
         return &imports.back();
     }
 
+    // Per path (snapshot, window, import, staged) call count and time, for APS5_METAL_CPU_PROFILE; the settle step is counted separately.
+    std::array<std::uint64_t, 4> resolveNs{};
+    std::array<std::uint64_t, 4> resolveCalls{};
+    std::uint64_t settleNs = 0;
+
     std::uint64_t resolve(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots, const CachedSurface* self = nullptr, bool settle = true) {
+        if (!cpuProfileEnabled()) return resolveRange(address, bytes, writable, snapshots, self, settle);
+        const auto begin = std::chrono::steady_clock::now();
+        resolvedBy = "";
+        const auto result = resolveRange(address, bytes, writable, snapshots, self, settle);
+        const auto ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count());
+        const std::string_view path = resolvedBy;
+        const std::size_t index = path == "snapshot" ? 0u : path == "window" ? 1u : path == "import" ? 2u : 3u;
+        if (!path.empty()) {
+            resolveNs[index] += ns;
+            ++resolveCalls[index];
+        }
+        return result;
+    }
+
+    std::uint64_t resolveRange(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots, const CachedSurface* self, bool settle) {
         if (address == 0 || bytes == 0) return 0;
-        if (settle) writebackOverlapping(address, bytes, self);
+        if (settle) {
+            const auto settleAt = cpuProfileEnabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            writebackOverlapping(address, bytes, self);
+            if (cpuProfileEnabled()) settleNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - settleAt).count());
+        }
         if (!writable) {
             for (const auto& snapshot : snapshots) {
                 if (address >= snapshot.address && bytes <= snapshot.bytes.size() && address - snapshot.address <= snapshot.bytes.size() - bytes) {
@@ -889,9 +934,20 @@ struct VulkanDevice::State {
         return buffer.gpuAddress;
     }
 
+    // The table only depends on the window snapshot and the host imports, and the upload stays valid until the
+    // command buffer completes, so every stage of the same submit shares one copy.
+    struct BdaCache {
+        std::shared_ptr<const Metal::WindowSnapshot> windows;
+        std::size_t imports = 0;
+        std::uint64_t epoch = 0;
+        std::uint64_t address = 0;
+    } bdaCache;
+
     std::uint64_t bdaTable(std::span<const Graphics::GuestMemorySnapshot>) {
         std::vector<ShaderRecompiler::BdaAbi::Range> ranges;
-        if (const auto windows = device->Guest().Snapshot(); windows != nullptr) ranges = windows->table;
+        const auto windows = device->Guest().Snapshot();
+        if (bdaCache.address != 0 && bdaCache.windows == windows && bdaCache.imports == imports.size() && bdaCache.epoch == epoch) return bdaCache.address;
+        if (windows != nullptr) ranges = windows->table;
         for (const auto& import : imports) {
             ranges.push_back({import.span.base, import.span.End(), import.buffer.gpuAddress, ShaderRecompiler::BdaAbi::Read | ShaderRecompiler::BdaAbi::Write, 0});
         }
@@ -899,6 +955,7 @@ struct VulkanDevice::State {
         const auto bytes = Metal::BdaTableBytes(ranges.size());
         const auto allocation = upload(bytes);
         Metal::WriteBdaTable(std::span<std::byte>(allocation.data, bytes), ranges);
+        bdaCache = {windows, imports.size(), epoch, allocation.gpuAddress};
         return allocation.gpuAddress;
     }
 
@@ -1447,6 +1504,21 @@ struct VulkanDevice::State {
             NSProcessInfo* process = [NSProcessInfo processInfo];
             std::fprintf(stderr, "[metal] device state: thermal %ld, low power mode %d, allocated %.0f MB of %.0f MB recommended\n", static_cast<long>(process.thermalState), process.lowPowerModeEnabled ? 1 : 0, static_cast<double>(native.currentAllocatedSize) / 1048576.0, static_cast<double>(native.recommendedMaxWorkingSetSize) / 1048576.0);
         }
+        if (drawPhaseDraws != 0u) {
+            const auto per = [&](std::size_t phase) { return static_cast<double>(drawPhaseNs[phase]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
+            std::fprintf(stderr, "[metal] cpu per draw over %llu draws: lock wait %.2f us, pipeline %.2f us, stage binding %.2f us, surfaces %.2f us, uploads+pass %.2f us, encode %.2f us, bookkeeping %.2f us\n", static_cast<unsigned long long>(drawPhaseDraws), per(0), per(1), per(2), per(3), per(4), per(5), per(6));
+            const auto bind = [&](std::size_t phase) { return static_cast<double>(bindPhaseNs[phase]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
+            std::fprintf(stderr, "[metal] cpu per draw inside stage binding: prelude %.2f us, image decode+loop %.2f us, plus surfaceFor %.2f us, resolve %.2f us, view %.2f us, buffers %.2f us, samplers %.2f us, tables %.2f us, epilogue+bda %.2f us\n", bind(0), bind(2) + bind(6), bind(7), bind(8), bind(9), bind(1), bind(3), bind(4), bind(5));
+            const auto path = [&](std::size_t index) { return static_cast<double>(resolveNs[index]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
+            const auto calls = [&](std::size_t index) { return static_cast<double>(resolveCalls[index]) / static_cast<double>(drawPhaseDraws); };
+            std::fprintf(stderr, "[metal] resolve per draw: snapshot %.2f us (%.2f calls), window %.2f us (%.2f calls), import %.2f us (%.2f calls), staged %.2f us (%.2f calls), settle %.2f us\n", path(0), calls(0), path(1), calls(1), path(2), calls(2), path(3), calls(3), static_cast<double>(settleNs) / static_cast<double>(drawPhaseDraws) / 1000.0);
+            resolveNs = {};
+            resolveCalls = {};
+            settleNs = 0;
+            drawPhaseNs = {};
+            bindPhaseNs = {};
+            drawPhaseDraws = 0;
+        }
         const auto gpu = device->TakeGpuTime();
         if (gpu.enabled) std::fprintf(stderr, "[metal] gpu busy %.1f ms over %llu command buffers in %.1f s (%.1f %% of wall), longest %.2f ms (%s)\n", gpu.busyMs, static_cast<unsigned long long>(gpu.commandBuffers), seconds, seconds > 0.0 ? gpu.busyMs / (seconds * 10.0) : 0.0, gpu.maxMs, gpu.longestTag.c_str());
         flushes = 0;
@@ -1528,11 +1600,14 @@ struct VulkanDevice::State {
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
         auto resource = Graphics::ArrayLayerWindow(Graphics::DecodeTextureResource(words), MaxTextureArrayLayers);
         if (const auto* format = Metal::FindFormat(resource.format); numeric && *numeric != Numeric::Float && format != nullptr && format->transform == Metal::TextureTransform::Repack101111) resource.format = RawPackedFormat;
+        bindLap(6);
         const auto [found, info, layers] = surfaceFor(resource);
+        bindLap(7);
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
         auto& surface = *found;
         const auto bytes = Graphics::DescribeSurface(resource).guestBytes;
         const auto address = resolve(resource.baseAddress, bytes, written, snapshots, &surface);
+        bindLap(8);
         uses.push_back({&surface, resource, address, written});
         Metal::ViewInfo view;
         view.kind = viewKind;
@@ -1554,7 +1629,9 @@ struct VulkanDevice::State {
         if (!written && descriptorSwizzle) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
         else if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {4, 5, 6, 7});
         if (Trace()) std::fprintf(stderr, "[metal] image view: format %u surface pixel %u view pixel %u numeric %d kind %u slices %u\n", static_cast<unsigned>(resource.format), static_cast<unsigned>(surface.texture.pixelFormat), static_cast<unsigned>(view.pixelFormat), numeric ? static_cast<int>(*numeric) : -1, static_cast<unsigned>(view.kind), view.sliceCount);
-        return viewOf(surface, view).resourceId;
+        const auto viewed = viewOf(surface, view).resourceId;
+        bindLap(9);
+        return viewed;
     }
 
     SurfaceRef surfaceFor(const Graphics::GuestTextureResource& resource) {
@@ -1650,6 +1727,7 @@ struct VulkanDevice::State {
     }
 
     void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses) {
+        if (cpuProfileEnabled()) bindPhaseAt = std::chrono::steady_clock::now();
         slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
         slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
         std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
@@ -1669,13 +1747,16 @@ struct VulkanDevice::State {
             mipmappedSamplers |= use.mipmapped;
         }
         pointSamplers &= ~otherSamplers;
+        bindLap(0);
         for (const auto& binding : shader.bindings) {
             switch (binding.role) {
             case ShaderRecompiler::DescriptorRole::ShaderData:
                 slots[SlotIndex(BufferSlot::ShaderData)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
+                bindLap(1);
                 break;
             case ShaderRecompiler::DescriptorRole::FlattenedSrt:
                 slots[SlotIndex(BufferSlot::FlattenedSrt)] = uploadBytes(binding.guestDescriptor.data(), binding.guestDescriptor.size() * sizeof(std::uint32_t));
+                bindLap(1);
                 break;
             case ShaderRecompiler::DescriptorRole::GuestBuffers: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest buffer descriptor must contain four DWORDs per element");
@@ -1690,6 +1771,7 @@ struct VulkanDevice::State {
                     if (Trace()) std::fprintf(stderr, "[metal] buffer %u.%u: 0x%llx+0x%llx %s through %s\n", binding.binding, element, static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), written ? "written" : "read", resolvedBy);
                 }
                 slots[SlotIndex(BufferSlot::GuestBuffers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(1);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::GuestImages: {
@@ -1699,6 +1781,7 @@ struct VulkanDevice::State {
                     if (Trace()) std::fprintf(stderr, "[metal] image binding %u element %u -> table index 0x%x\n", binding.binding, element, index);
                     imageEntries.emplace_back(index, image(binding, element, snapshots, uses));
                 }
+                bindLap(2);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::GuestSamplers: {
@@ -1712,6 +1795,7 @@ struct VulkanDevice::State {
                     if (Trace()) std::fprintf(stderr, "[metal] sampler %u.%u: point %u, words %08x %08x %08x %08x, integer mask %x, other mask %x\n", binding.binding, element, point ? 1u : 0u, binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u], integerSamplers, otherSamplers);
                 }
                 slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(3);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::ImageTable:
@@ -1723,6 +1807,7 @@ struct VulkanDevice::State {
                 for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = tableImage(binding, element, snapshots, uses);
                 const auto role = binding.role == ShaderRecompiler::DescriptorRole::ImageTable ? BufferSlot::ImageTable : BufferSlot::ImageStorageTable;
                 slots[SlotIndex(role)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(4);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::SamplerTable: {
@@ -1730,6 +1815,7 @@ struct VulkanDevice::State {
                 std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
                 for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, false);
                 slots[SlotIndex(BufferSlot::SamplerTable)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                bindLap(4);
                 break;
             }
             case ShaderRecompiler::DescriptorRole::ImageTableMap: {
@@ -1761,6 +1847,7 @@ struct VulkanDevice::State {
             slots[SlotIndex(BufferSlot::GuestImages)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0])) - static_cast<std::uint64_t>(first) * sizeof(entries[0]);
         }
         if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
+        bindLap(5);
     }
 
     void dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
@@ -1978,8 +2065,18 @@ struct VulkanDevice::State {
         if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection);
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) throw std::runtime_error("AGC graphics: multisampled Metal draws are not wired yet");
+        const bool profiling = cpuProfileEnabled();
+        auto phaseAt = profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        std::array<std::uint64_t, DrawPhases> phases{};
+        const auto lap = [&](std::size_t phase) {
+            if (!profiling) return;
+            const auto now = std::chrono::steady_clock::now();
+            phases[phase] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - phaseAt).count());
+            phaseAt = now;
+        };
         @autoreleasepool {
             std::lock_guard lock(mutex);
+            lap(0);
             const EncodingScope encoding;
             registry->Refresh();
             begin();
@@ -2022,12 +2119,14 @@ struct VulkanDevice::State {
                 vertexBuffers.push_back(resolved);
             }
             void* pipelineState = renderPipeline(request);
+            lap(1);
 
             std::array<std::uint64_t, ArgumentSlots> vertexSlots{};
             std::array<std::uint64_t, ArgumentSlots> fragmentSlots{};
             std::vector<ImageUse> uses;
             bindStage(*vertex->program, snapshots, vertexSlots, uses);
             if (fragment != nullptr) bindStage(*fragment->program, snapshots, fragmentSlots, uses);
+            lap(2);
 
             std::array<ColorAttachment, Metal::MaxColorAttachments> colors{};
             std::vector<std::pair<CachedSurface*, Graphics::GuestTextureResource>> targets;
@@ -2069,11 +2168,13 @@ struct VulkanDevice::State {
             }
             if (width == 0 || height == 0) return;
             key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
+            lap(3);
 
             if (depth != nullptr && graphics.depth && !(render != nil && key == passKey)) ScanHtile(*depth, *graphics.depth);
             const bool reuse = render != nil && key == passKey && (depth == nullptr || (depth->initialized && (!stencil || depth->stencilInitialized)));
-            std::vector<ImageUse> loads = uses;
+            std::vector<ImageUse> loads;
             if (!reuse) {
+                loads = uses;
                 for (auto& [surface, resource] : targets) {
                     if (surface->dirty) continue;
                     surface->resource = resource;
@@ -2082,13 +2183,15 @@ struct VulkanDevice::State {
                 }
             }
             if (!reuse || needsUpload(uses)) {
-                if (needsUpload(loads)) {
+                const auto& pending = reuse ? uses : loads;
+                if (needsUpload(pending)) {
                     auto compute = computeEncoder();
                     [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
-                    encodeUploads(compute, loads);
+                    encodeUploads(compute, pending);
                 }
                 openPass(colors, depth, graphics.depth ? &*graphics.depth : nullptr, stencil, width, height, std::move(key));
             }
+            lap(4);
 
             auto dynamic = translated.dynamic;
             dynamic.scissor.x = std::min(dynamic.scissor.x, passWidth);
@@ -2121,6 +2224,7 @@ struct VulkanDevice::State {
             } else {
                 [render drawPrimitives:primitive vertexStart:params.firstVertex vertexCount:params.indexCount instanceCount:params.instanceCount baseInstance:params.firstInstance];
             }
+            lap(5);
             for (auto& [surface, resource] : targets) {
                 surface->validEpoch = epoch;
                 surface->drawnFrame = scanoutFrames;
@@ -2139,6 +2243,11 @@ struct VulkanDevice::State {
                 cbLastDraw = text;
             }
             draws.fetch_add(1, std::memory_order_relaxed);
+            if (profiling) {
+                lap(6);
+                for (std::size_t phase = 0; phase < DrawPhases; ++phase) drawPhaseNs[phase] += phases[phase];
+                ++drawPhaseDraws;
+            }
         }
     }
 };
