@@ -1435,7 +1435,11 @@ int DoMprotect(const void* addr, size_t len, int prot) {
     std::uintptr_t stackStart = 0;
     std::uintptr_t stackEnd = 0;
     if ((prot & GuestProtGpuReadWrite) == 0 && GuestThreadStack(address, &stackStart, &stackEnd) && address >= stackStart && address + len <= stackEnd) {
+#ifdef __APPLE__
+        const auto hostPageMask = static_cast<std::uintptr_t>(::sysconf(_SC_PAGESIZE)) - 1;
+#else
         constexpr std::uintptr_t hostPageMask = 0xfff;
+#endif
         const auto requested = std::max(first, (stackStart + hostPageMask) & ~hostPageMask);
         const auto insideEnd = std::min(end, stackEnd & ~hostPageMask);
         if (requested >= insideEnd) return 0;
