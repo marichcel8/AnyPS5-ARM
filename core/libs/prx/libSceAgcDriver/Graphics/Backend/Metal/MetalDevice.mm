@@ -1172,6 +1172,14 @@ struct VulkanDevice::State {
         drain(wait);
     }
 
+    bool copyWhenIdle(std::uint64_t destination, std::uint64_t source, std::size_t bytes) {
+        std::lock_guard lock(mutex);
+        reap();
+        if (open || encodingNow || !completions.empty() || !pendingWrites.empty() || recordedSinceSubmit != 0) return false;
+        GuestMemory::StoreOwnBytes(destination, bytes, [&] { std::memcpy(reinterpret_cast<void*>(destination), reinterpret_cast<const void*>(source), bytes); });
+        return true;
+    }
+
     void drain(std::uint64_t serial) {
         if (serial == 0) return;
         if (!device->WaitSerial(Queue, serial, WaitTimeoutMs)) throw std::runtime_error("AGC graphics: Metal queue did not finish in time");
@@ -2355,7 +2363,20 @@ auto VulkanDevice::FillBuffer(std::uint64_t, std::size_t, std::span<const std::u
 
 auto VulkanDevice::DumpSamplesOnGpu(std::uint64_t) -> bool { return false; }
 
-auto VulkanDevice::CopyBuffer(std::uint64_t, std::uint64_t, std::size_t, std::size_t, std::size_t, std::size_t, std::uint64_t, std::uint32_t, const CopyWriterNote&) -> CopyOutcome { return CopyOutcome{2, false, 0.0, CopyOutcome::None, false, false, 0.0, 0, 0, 0, false}; }
+auto VulkanDevice::CopyBuffer(std::uint64_t destination, std::uint64_t source, std::size_t bytes, std::size_t cpuMax, std::size_t, std::size_t, std::uint64_t, std::uint32_t, const CopyWriterNote&) -> CopyOutcome {
+    CopyOutcome outcome{2, false, 0.0, CopyOutcome::None, false, false, 0.0, 0, 0, 0, false};
+    if (bytes == 0) return outcome;
+    if (bytes > cpuMax) {
+        outcome.reason = CopyOutcome::Size;
+        return outcome;
+    }
+    if (!state->copyWhenIdle(destination, source, bytes)) {
+        outcome.reason = CopyOutcome::Reader;
+        return outcome;
+    }
+    outcome.path = 0;
+    return outcome;
+}
 
 auto VulkanDevice::CopyVerifyCounts() -> CopyVerification { return {}; }
 
