@@ -103,7 +103,16 @@ thread_local Pool* currentPool = nullptr;
 thread_local bool currentPoolExhausted = false;
 
 void* PoolCalloc(std::size_t count, std::size_t size) noexcept {
-    if (!currentPool) return nullptr;
+    if (!currentPool) {
+        if (size && count > std::numeric_limits<std::size_t>::max() / size) return nullptr;
+        const auto bytes = count * size;
+        if (bytes > std::numeric_limits<std::size_t>::max() - sizeof(Allocation)) return nullptr;
+        auto* allocation = static_cast<Allocation*>(std::calloc(1, sizeof(Allocation) + bytes));
+        if (!allocation) return nullptr;
+        allocation->pool = nullptr;
+        allocation->size = bytes;
+        return allocation + 1;
+    }
     if (size && count > std::numeric_limits<std::size_t>::max() / size) {
         currentPoolExhausted = true;
         return nullptr;
@@ -129,7 +138,7 @@ void* PoolCalloc(std::size_t count, std::size_t size) noexcept {
 void PoolFree(void* pointer) noexcept {
     if (!pointer) return;
     auto* allocation = static_cast<Allocation*>(pointer) - 1;
-    {
+    if (allocation->pool) {
         std::lock_guard lock(allocation->pool->mutex);
         allocation->pool->current -= allocation->size;
     }
@@ -497,6 +506,8 @@ Runtime& State() {
     static auto* runtime = new Runtime;
     return *runtime;
 }
+
+const bool allocatorInstalled = (State(), true);
 
 Context& GetContext(int handle) {
     const auto found = State().contexts.find(handle);
