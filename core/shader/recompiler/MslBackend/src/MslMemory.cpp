@@ -495,7 +495,7 @@ void AddressAtomic(State& state, const IrValue& inst) {
         Open(state, "if (" + high + " == " + U32(SharedApertureHigh) + ") {");
         LdsArray(state);
         Line(state, unaligned);
-        Line(state, "else if ((" + low + " >> 2u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + low + " >> 2u]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ");");
+        Line(state, "else if ((" + low + " >> 2u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + low + " >> 2u]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ");");
         Close(state, "} else if (" + high + " == " + U32(PrivateApertureHigh) + ") {");
         ++state.depth;
         ScratchArray(state);
@@ -600,11 +600,11 @@ void SharedAtomic(State& state, const IrValue& inst) {
     const auto index = Temp(state);
     LdsArray(state);
     Line(state, "const uint " + index + " = " + SharedByte(state, inst, mem) + " >> 2u;");
-    const auto apply = "aps5_atomic_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")";
+    const auto apply = "aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")";
     const auto condition = (active.empty() ? std::string() : active + " && ") + index + " < " + U32(state.ldsDwords);
     if (state.lds64) {
         state.features |= Lds64 | Atomic64 | Float64 | Lane | LocalIndex;
-        Define(state, inst, "aps5_lds32(&aps5_lds_lock, reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")");
+        Define(state, inst, "aps5_lds32(aps5_lds_lock, reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ")");
         return;
     }
     if (!inst.HasUses()) {
@@ -697,7 +697,7 @@ void AddressAtomic64(State& state, const IrValue& inst) {
         Open(state, "if (" + high + " == " + U32(SharedApertureHigh) + ") {");
         LdsArray(state);
         Line(state, unaligned);
-        Line(state, "else if (((" + low + " >> 2u) + 1u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic64_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + low + " >> 2u]), " + U32(op) + ", " + data + ", " + wanted + ");");
+        Line(state, "else if (((" + low + " >> 2u) + 1u) < " + U32(state.ldsDwords) + ") " + result + " = aps5_atomic64_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + low + " >> 2u]), " + U32(op) + ", " + data + ", " + wanted + ");");
         Close(state, "} else if (" + high + " == " + U32(PrivateApertureHigh) + ") {");
         ++state.depth;
         ScratchArray(state);
@@ -759,7 +759,7 @@ void SharedAtomic64(State& state, const IrValue& inst) {
     state.features |= Lds64 | Atomic64 | Float64 | Lane | LocalIndex;
     Line(state, "const uint " + index + " = " + SharedByte(state, inst, mem) + " >> 2u;");
     const auto condition = (active.empty() ? std::string() : "(" + active + ") && ") + "(" + index + " + 1u) < " + U32(state.ldsDwords);
-    Define(state, inst, "aps5_lds64(&aps5_lds_lock, reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(op) + ", " + a + ", " + b + ")");
+    Define(state, inst, "aps5_lds64(aps5_lds_lock, reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), aps5_lane, " + condition + ", " + U32(op) + ", " + a + ", " + b + ")");
 }
 
 void ReadConst(State& state, const IrValue& inst) {
@@ -1025,7 +1025,7 @@ void EmitAppendConsume(State& state, const IrValue& inst) {
         const char* function = swap ? "atomic_exchange_explicit" : append ? "atomic_fetch_add_explicit" : "atomic_fetch_sub_explicit";
         Line(state, old + " = " + function + "(&aps5_gds[" + index + "], " + amount + ", memory_order_relaxed);");
     } else {
-        Line(state, old + " = aps5_atomic_lds(reinterpret_cast<threadgroup atomic_uint*>(&aps5_lds[" + index + "]), " + U32(swap ? 0u : append ? 2u : 3u) + ", " + amount + ", 0u);");
+        Line(state, old + " = aps5_atomic_lds(reinterpret_cast<aps5_lds_atomic>(&aps5_lds[" + index + "]), " + U32(swap ? 0u : append ? 2u : 3u) + ", " + amount + ", 0u);");
     }
     Close(state);
     const auto result = Temp(state);

@@ -60,6 +60,7 @@ inline constexpr std::uint32_t PositionFlipYConstant = 60000u;
 inline constexpr std::uint32_t DepthNegativeOneToOneConstant = 60001u;
 inline constexpr std::uint32_t LocalFetchFormatConstant = 60100u;
 inline constexpr std::uint32_t GeometrySlot = 14u;
+inline constexpr std::uint32_t WorkgroupMemorySlot = 14u;
 inline constexpr std::uint32_t VertexFetchSlot = 15u;
 inline constexpr std::uint32_t FirstVertexBufferSlot = 16u;
 inline constexpr std::uint32_t PerInstanceFetch = 0x80000000u;

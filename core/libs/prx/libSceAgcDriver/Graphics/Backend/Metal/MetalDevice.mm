@@ -810,6 +810,8 @@ struct VulkanDevice::State {
     bool gdsStageOpen = false;
     bool gdsInFlight = false;
     Metal::NativeBuffer gdsStage;
+    bool ldsStageOpen = false;
+    Metal::NativeBuffer ldsStage;
     std::map<std::uint64_t, Completion> completions;
     std::shared_ptr<Waker> waker;
     std::thread completer;
@@ -1215,6 +1217,7 @@ struct VulkanDevice::State {
             ++flushes;
             completion.writeBacks = std::move(writeBacks);
             gdsStageOpen = false;
+            ldsStageOpen = false;
             completion.staged = std::move(staged);
             writeBacks.clear();
             staged.clear();
@@ -2062,11 +2065,12 @@ struct VulkanDevice::State {
     void dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
         if (shader.backend != ShaderRecompiler::ShaderBackendKind::Msl) throw std::runtime_error("AGC graphics: the Metal backend dispatches only MSL results");
         if (shader.msl.empty()) throw std::runtime_error("AGC graphics: the MSL result has no source");
-        if (shader.workgroupMemoryDwords != 0) throw std::runtime_error("AGC graphics: Metal dispatch with device-memory LDS is not wired yet");
         if (x == 0 || y == 0 || z == 0) return;
+        const std::uint64_t ldsBytes = static_cast<std::uint64_t>(shader.workgroupMemoryDwords) * sizeof(std::uint32_t) * x * y * z;
         const auto threads = shader.hostThreadgroup;
         if (threads[0] == 0 || threads[1] == 0 || threads[2] == 0) throw std::runtime_error("AGC graphics: the MSL result has no threadgroup size");
-        if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error("AGC graphics: Metal dispatch exceeds the threadgroup count limit");
+        if (y > groupLimit[1] || z > groupLimit[2]) throw std::runtime_error(shader.workgroupMemoryDwords != 0 ? "AGC graphics: Metal dispatch exceeds the threadgroup count limit and a split aliases the device-memory LDS slots" : "AGC graphics: Metal dispatch exceeds the threadgroup count limit (" + std::to_string(y) + "x" + std::to_string(z) + " groups, " + std::to_string(shader.workgroupMemoryDwords) + " workgroup memory dwords)");
+        if (shader.workgroupMemoryDwords != 0 && (ldsBytes / sizeof(std::uint32_t) / shader.workgroupMemoryDwords != static_cast<std::uint64_t>(x) * y * z || ldsBytes > device->Limits().maxBufferBytes)) throw std::runtime_error("AGC graphics: Metal dispatch needs more device-memory LDS than one buffer holds");
         id<MTLComputePipelineState> state = pipeline(shader);
         @autoreleasepool {
             std::lock_guard lock(mutex);
@@ -2078,6 +2082,16 @@ struct VulkanDevice::State {
             std::vector<ImageUse> uses;
             bindStage(shader, snapshots, slots, uses);
             writebackDirty();
+            std::uint64_t ldsAddress = 0;
+            if (shader.workgroupMemoryDwords != 0) {
+                if (!ldsStageOpen || ldsStage.bytes < ldsBytes) {
+                    ldsStage = device->NewPrivateBuffer(ldsBytes, "AnyPS5 workgroup memory");
+                    if (!ldsStage) throw std::runtime_error("AGC graphics: Metal workgroup memory buffer could not be allocated");
+                    ldsStageOpen = true;
+                    staged.push_back(ldsStage);
+                }
+                ldsAddress = ldsStage.gpuAddress;
+            }
             auto compute = computeEncoder();
             if (encodedDispatches != 0) [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             if (needsUpload(uses)) {
@@ -2087,6 +2101,7 @@ struct VulkanDevice::State {
             for (std::uint32_t slot = 0; slot < ArgumentSlots; ++slot) {
                 if (slots[slot] != 0) [table setAddress:slots[slot] atIndex:slot];
             }
+            if (ldsAddress != 0) [table setAddress:ldsAddress atIndex:ShaderRecompiler::MetalAbi::WorkgroupMemorySlot];
             [compute setComputePipelineState:state];
             [compute setArgumentTable:table];
             [compute dispatchThreadgroups:MTLSizeMake(x, y, z) threadsPerThreadgroup:MTLSizeMake(threads[0], threads[1], threads[2])];
@@ -2641,7 +2656,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         s.registry->Refresh();
         NSError* error = nil;
         MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
-        descriptor.maxBufferBindCount = ArgumentSlots;
+        descriptor.maxBufferBindCount = ShaderRecompiler::MetalAbi::WorkgroupMemorySlot + 1u;
         s.table = [s.native newArgumentTableWithDescriptor:descriptor error:&error];
         if (s.table == nil) throw std::runtime_error("AGC graphics: Metal argument table could not be created");
         descriptor.maxBufferBindCount = RenderSlots;

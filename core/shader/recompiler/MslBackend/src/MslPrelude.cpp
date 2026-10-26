@@ -1145,13 +1145,15 @@ std::string Prelude(const State& state) {
             }
         }
     }
+    const std::string ldsSpace = state.ldsDevice ? "device" : "threadgroup";
     if (has(Lds)) {
-        auto lds = Replace(Replace(std::string(LocalMemoryText), "SPACE", "threadgroup"), "NAME", "_lds");
+        text += "typedef " + ldsSpace + " atomic_uint* aps5_lds_atomic;\n";
+        auto lds = Replace(Replace(std::string(LocalMemoryText), "SPACE", ldsSpace), "NAME", "_lds");
         lds = Replace(lds, "MERGE(index, ", "aps5_merge_threadgroup(&words[index], ");
         lds = Replace(lds, "MERGE(index + 1u, ", "aps5_merge_threadgroup(&words[index + 1u], ");
-        text += "static inline void aps5_merge_threadgroup(threadgroup uint* word, uint mask, uint value) {\n"
-                "    atomic_fetch_and_explicit(reinterpret_cast<threadgroup atomic_uint*>(word), ~mask, memory_order_relaxed);\n"
-                "    atomic_fetch_or_explicit(reinterpret_cast<threadgroup atomic_uint*>(word), value, memory_order_relaxed);\n"
+        text += "static inline void aps5_merge_threadgroup(" + ldsSpace + " uint* word, uint mask, uint value) {\n"
+                "    atomic_fetch_and_explicit(reinterpret_cast<aps5_lds_atomic>(word), ~mask, memory_order_relaxed);\n"
+                "    atomic_fetch_or_explicit(reinterpret_cast<aps5_lds_atomic>(word), value, memory_order_relaxed);\n"
                 "}\n";
         text += lds;
     }
@@ -1164,7 +1166,7 @@ std::string Prelude(const State& state) {
     if (has(Lds | GuestBuffers | Bda | UpdateTable)) {
         text += AtomicsText;
         text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "device"), "NAME", "");
-        if (has(Lds)) text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", "threadgroup"), "NAME", "_lds");
+        if (has(Lds)) text += Replace(Replace(std::string(AtomicSpaceText), "SPACE", ldsSpace), "NAME", "_lds");
     }
     if (has(Atomic64)) {
         text += Atomic64Text;
@@ -1173,8 +1175,8 @@ std::string Prelude(const State& state) {
         if (has(Bda) && has(Descriptors)) text += Replace(std::string(Atomic64GpuText), "$READ_WRITE", U32(BdaAbi::Read | BdaAbi::Write));
         auto device = Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "device"), "NAME", "");
         text += Replace(device, "MINMAX", std::string(Atomic64MinMaxText));
-        if (has(Lds)) text += Replace(Replace(Replace(std::string(Atomic64SpaceText), "SPACE", "threadgroup"), "NAME", "_lds"), "MINMAX", "");
-        if (has(Lds64)) text += Lds64Text;
+        if (has(Lds)) text += Replace(Replace(Replace(std::string(Atomic64SpaceText), "SPACE", ldsSpace), "NAME", "_lds"), "MINMAX", "");
+        if (has(Lds64)) text += Replace(std::string(Lds64Text), "threadgroup", ldsSpace);
     }
     for (std::size_t index = 0; index < state.imageTypes.size(); ++index) text += "struct aps5_img" + std::to_string(index) + " { " + state.imageTypes[index] + " t; };\n";
     if (has(Samplers | Tables)) text += "struct aps5_sampler { sampler s; };\n";
