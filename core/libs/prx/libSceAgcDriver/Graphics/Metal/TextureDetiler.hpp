@@ -19,6 +19,7 @@ enum class DetileKernel : std::uint8_t {
     VolumeToTiled,
     TiledToLinear,
     LinearToTiled,
+    MultisampleToTiled,
     Count
 };
 
@@ -39,6 +40,7 @@ public:
     TextureDetiler& operator=(const TextureDetiler&) = delete;
 
     void Encode(void* computeEncoder, DetileKernel kernel, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes, const AgcDetileParams& params, void* texture, std::uint32_t columns, std::uint32_t rows);
+    void EncodeMultisample(void* computeEncoder, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes, const AgcMsaaParams& params, void* texture);
     void Warm(DetileKernel kernel, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes);
     void Seal(QueueKind queue, std::uint64_t serial);
     DetileCounters Counters() const;

@@ -426,6 +426,7 @@ set(agcDriverMetalSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/State.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureFormat.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/TextureTiling.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Graphics/src/MultisampleTextureLayout.cpp
 )
 
 if(ANYPS5_GPU_BACKEND STREQUAL "Metal")

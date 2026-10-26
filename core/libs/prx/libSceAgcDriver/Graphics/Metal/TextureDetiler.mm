@@ -16,6 +16,7 @@
 namespace AgcDriver::Graphics::Metal {
 
 static_assert(sizeof(AgcDetileParams) == 160);
+static_assert(sizeof(AgcMsaaParams) == 136);
 
 namespace {
 
@@ -33,6 +34,7 @@ constexpr const char* KernelNames[] = {
     "aps5_volume_to_tiled",
     "aps5_tiled_to_linear",
     "aps5_linear_to_tiled",
+    "aps5_msaa_to_tiled",
 };
 static_assert(sizeof(KernelNames) / sizeof(KernelNames[0]) == static_cast<std::size_t>(DetileKernel::Count));
 
@@ -137,8 +139,9 @@ struct TextureDetiler::State {
         return chunks.back().get();
     }
 
-    std::uint64_t allocate(const AgcDetileParams& params) {
-        if (open == nullptr || open->used + sizeof(AgcDetileParams) > ChunkBytes) {
+    template <typename Params>
+    std::uint64_t allocate(const Params& params) {
+        if (open == nullptr || open->used + sizeof(Params) > ChunkBytes) {
             if (open != nullptr) sealing.push_back(open);
             open = acquire();
             if (open == nullptr) return 0;
@@ -201,6 +204,31 @@ void TextureDetiler::Encode(void* computeEncoder, DetileKernel kernel, std::uint
     }
     [encoder setArgumentTable:s.table];
     [encoder dispatchThreads:MTLSizeMake(columns, rows, 1) threadsPerThreadgroup:s.group];
+    ++s.counters.dispatches;
+}
+
+void TextureDetiler::EncodeMultisample(void* computeEncoder, std::uint32_t elementBytes, TextureTransform transform, std::uint32_t texelBytes, const AgcMsaaParams& params, void* texture) {
+    auto& s = *state;
+    if (params.width == 0 || params.height == 0) return;
+    auto ticket = s.request(DetileKernel::MultisampleToTiled, elementBytes, transform, texelBytes, CompilePriority::Urgent, true);
+    if (!ticket->Ready()) {
+        const auto started = std::chrono::steady_clock::now();
+        ticket->Wait(StallTimeoutMs);
+        s.stalls.fetch_add(1, std::memory_order_relaxed);
+        s.stallNanos.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
+    }
+    if (!ticket->Ready()) throw std::runtime_error("AGC graphics: Metal multisample export pipeline failed to build: " + (ticket->Done() ? ticket->Error() : std::string("timed out")));
+    id<MTLComputePipelineState> pipeline = (__bridge id<MTLComputePipelineState>)ticket->ProductAs<CompiledPipeline>()->native;
+    std::lock_guard lock(s.mutex);
+    const auto address = s.allocate(params);
+    if (address == 0) throw std::runtime_error("AGC graphics: Metal texture constants could not be allocated");
+    id<MTL4ComputeCommandEncoder> encoder = (__bridge id<MTL4ComputeCommandEncoder>)computeEncoder;
+    [encoder setComputePipelineState:pipeline];
+    [s.table setAddress:address atIndex:0];
+    id<MTLTexture> view = (__bridge id<MTLTexture>)texture;
+    [s.table setTexture:view.gpuResourceID atIndex:0];
+    [encoder setArgumentTable:s.table];
+    [encoder dispatchThreads:MTLSizeMake(params.width, params.height, 1) threadsPerThreadgroup:s.group];
     ++s.counters.dispatches;
 }
 
