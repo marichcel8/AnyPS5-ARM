@@ -173,6 +173,7 @@ void LoadBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     Line(state, "uint " + byte + " = 0u;");
     for (std::uint32_t component = 0; component < components; ++component) {
         Open(state, "if (aps5_vsharp_byte(" + resource + ", " + offset + " + " + U32(mem.offset + component * 4u) + ", " + soffset + ", " + U32(bytes) + ", " + byte + ")) {");
+        if (!mem.gpuDescriptor && bytes == 4u) Line(state, byte + " &= ~3u;");
         Line(state, Component(result, components, component) + " = " + BufferLoad(state, inst, mem, resource, byte, bytes) + ";");
         Close(state);
     }
@@ -201,6 +202,7 @@ void StoreBuffer(State& state, const IrValue& inst, std::uint32_t components) {
     for (std::uint32_t component = 0; component < components; ++component) {
         const auto value = Component(data, components, component);
         Open(state, "if (aps5_vsharp_byte(" + resource + ", " + offset + " + " + U32(mem.offset + component * 4u) + ", " + soffset + ", " + U32(bytes) + ", " + byte + ")) {");
+        if (!mem.gpuDescriptor && bytes == 4u) Line(state, byte + " &= ~3u;");
         if (mem.gpuDescriptor) {
             state.features |= BdaWrites;
             Line(state, "aps5_vsharp_store(aps5_c, " + resource + ", " + byte + ", " + U32(bytes) + ", " + value + ", " + Pc(inst) + ");");
@@ -228,7 +230,8 @@ void ReadConstBuffer(State& state, const IrValue& inst) {
     const auto byte = Temp(state);
     const auto size = Temp(state);
     Line(state, "const uint " + address + " = " + offset + " + " + U32(mem.offset) + ";");
-    Line(state, "const uint " + byte + " = " + address + " & ~3u;");
+    if (mem.gpuDescriptor) Line(state, "const uint " + byte + " = " + address + " & ~3u;");
+    else Line(state, "const uint " + byte + " = (" + address + " & ~3u) - uint(" + resource + ".base & 3ul);");
     Line(state, "const ulong " + size + " = " + resource + ".stride == 0u ? ulong(" + resource + ".records) : ulong(" + resource + ".stride) * ulong(" + resource + ".records);");
     Open(state, "if (" + address + " >= " + offset + " && " + resource + ".valid && ulong(" + byte + ") + 4ul <= " + size + ") {");
     Line(state, result + " = " + BufferLoad(state, inst, mem, resource, byte, 4u) + ";");
@@ -287,6 +290,7 @@ void BufferAtomic(State& state, const IrValue& inst) {
         Line(state, "device atomic_uint* " + pointer + " = aps5_buffer_atomic(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ", " + Pc(inst) + ");");
     }
     Line(state, "if (" + pointer + " != nullptr) " + result + " = aps5_atomic(" + pointer + ", " + U32(atomic.op) + ", " + atomic.a + ", " + atomic.b + ");");
+    if (!mem.gpuDescriptor) Line(state, "else " + result + " = aps5_buffer_peek(aps5_c, " + U32(BufferElement(state, inst, mem)) + ", " + resource + ", " + byte + ");");
     Close(state);
     Close(state);
     StopCheck(state);

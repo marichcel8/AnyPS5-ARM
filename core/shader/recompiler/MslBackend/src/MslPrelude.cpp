@@ -323,8 +323,7 @@ constexpr std::string_view DirectBuffersText = R"(static inline uint aps5_buffer
     device uchar* pointer = buffer.data + byte;
     if (((r.base + ulong(byte)) & ulong(bytes - 1u)) == 0ul) {
         if (bytes == 4u) return *reinterpret_cast<device uint*>(pointer);
-        if (bytes == 2u) return uint(*reinterpret_cast<device ushort*>(pointer));
-        return uint(*pointer);
+        if (bytes == 1u) return uint(*pointer);
     }
     uint value = 0u;
     for (uint part = 0u; part < bytes; ++part) value |= uint(pointer[part]) << (part * 8u);
@@ -335,19 +334,24 @@ static inline void aps5_buffer_store(thread aps5_ctx& c, uint element, aps5_vsha
     if (ulong(byte) + ulong(bytes) > ulong(buffer.size)) return;
     device uchar* pointer = buffer.data + byte;
     if (((r.base + ulong(byte)) & ulong(bytes - 1u)) == 0ul) {
-        if (bytes == 4u) *reinterpret_cast<device uint*>(pointer) = value;
-        else if (bytes == 2u) *reinterpret_cast<device ushort*>(pointer) = ushort(value);
-        else *pointer = uchar(value);
-        return;
+        if (bytes == 4u) { *reinterpret_cast<device uint*>(pointer) = value; return; }
+        if (bytes == 1u) { *pointer = uchar(value); return; }
     }
     for (uint part = 0u; part < bytes; ++part) pointer[part] = uchar(value >> (part * 8u));
 }
 static inline device atomic_uint* aps5_buffer_atomic(thread aps5_ctx& c, uint element, aps5_vsharp r, uint byte, uint pc) {
-    ulong guest = r.base + ulong(byte);
-    if ((guest & 3ul) != 0ul) { aps5_fault(c, $UNALIGNED, guest, 4u, pc); return nullptr; }
     aps5_guest_buffer buffer = c.buffers[element];
     if (ulong(byte) + 4ul > ulong(buffer.size)) return nullptr;
-    return reinterpret_cast<device atomic_uint*>(buffer.data + byte);
+    uint skew = uint((r.base + ulong(byte)) & 3ul);
+    if (skew > byte) return nullptr;
+    return reinterpret_cast<device atomic_uint*>(buffer.data + (byte - skew));
+}
+static inline uint aps5_buffer_peek(thread aps5_ctx& c, uint element, aps5_vsharp r, uint byte) {
+    aps5_guest_buffer buffer = c.buffers[element];
+    if (ulong(byte) + 4ul > ulong(buffer.size)) return 0u;
+    uint skew = uint((r.base + ulong(byte)) & 3ul);
+    if (skew <= byte) return 0u;
+    return *reinterpret_cast<device uint*>(buffer.data + (long(byte) - long(skew)));
 }
 )";
 

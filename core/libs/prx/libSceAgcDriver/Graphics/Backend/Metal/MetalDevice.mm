@@ -971,6 +971,40 @@ struct VulkanDevice::State {
         return nullptr;
     }
 
+    void importOverlapping(const std::pair<std::uint64_t, std::uint64_t>* ranges, std::size_t count) {
+        constexpr std::size_t Limit = 16;
+        if (count < 2u || count > Limit) return;
+        std::array<Metal::HostSpan, Limit> spans;
+        for (std::size_t index = 0; index < count; ++index) spans[index] = Metal::HostPagesCovering(ranges[index].first, ranges[index].second, device->Limits().hostPageBytes);
+        bool overlap = false;
+        for (std::size_t left = 0; left < count && !overlap; ++left) {
+            for (std::size_t right = left + 1u; right < count; ++right) {
+                if (spans[left].bytes != 0 && spans[right].bytes != 0 && spans[left].base < spans[right].End() && spans[right].base < spans[left].End()) {
+                    overlap = true;
+                    break;
+                }
+            }
+        }
+        if (!overlap) return;
+        std::sort(spans.begin(), spans.begin() + count, [](const auto& left, const auto& right) { return left.base < right.base; });
+        for (std::size_t first = 0; first < count;) {
+            if (spans[first].bytes == 0) {
+                ++first;
+                continue;
+            }
+            auto end = spans[first].End();
+            std::size_t next = first + 1u;
+            for (; next < count && spans[next].base < end; ++next) end = std::max<std::uint64_t>(end, spans[next].End());
+            if (next - first > 1u) {
+                if (const auto* found = importHost(spans[first].base, end - spans[first].base); found != nullptr && found != imports.data()) {
+                    const auto position = static_cast<std::ptrdiff_t>(found - imports.data());
+                    std::rotate(imports.begin(), imports.begin() + position, imports.begin() + position + 1);
+                }
+            }
+            first = next;
+        }
+    }
+
     const HostImport* importHost(std::uint64_t address, std::uint64_t bytes) {
         if (const auto* found = findImport(address, bytes)) return found;
         const auto span = Metal::HostPagesCovering(address, bytes, device->Limits().hostPageBytes);
@@ -1958,6 +1992,14 @@ struct VulkanDevice::State {
             case ShaderRecompiler::DescriptorRole::GuestBuffers: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest buffer descriptor must contain four DWORDs per element");
                 std::vector<ShaderRecompiler::MetalAbi::GuestBufferEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0, 0, 0});
+                std::array<std::pair<std::uint64_t, std::uint64_t>, 16> ranges;
+                std::size_t rangeCount = 0;
+                for (std::uint32_t element = 0; element < binding.count && binding.count <= ranges.size(); ++element) {
+                    const ShaderRecompiler::ShaderBufferResource descriptor{{binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u]}};
+                    const auto bytes = std::min<std::uint64_t>(descriptor.GetSize(), 0xffffffffull);
+                    if (descriptor.Base48() != 0 && bytes != 0) ranges[rangeCount++] = {descriptor.Base48(), bytes};
+                }
+                importOverlapping(ranges.data(), rangeCount);
                 for (std::uint32_t element = 0; element < binding.count; ++element) {
                     const ShaderRecompiler::ShaderBufferResource descriptor{{binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u]}};
                     const auto base = descriptor.Base48();
