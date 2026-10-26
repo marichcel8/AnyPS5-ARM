@@ -80,7 +80,7 @@ int main() {
             Run(*device, device->Target());
             Check();
         }
-        if (device->Target().subgroupSize == WaveSize) {
+        if (device->Target().subgroupSize == WaveSize && ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Spirv) {
             auto wide = device->Target();
             wide.subgroupSize = 64;
             Run(*device, wide);

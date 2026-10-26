@@ -74,7 +74,7 @@ void Run(AgcDriver::VulkanDevice& device, std::uint32_t waveSize, std::uint32_t 
     };
     request.useCache = false;
     const auto result = ShaderRecompiler::Recompile(request);
-    Require(FunctionVariables(result.spirv.Words()) > 8u, "vector window narrowing: wave" + std::to_string(waveSize) + " window was not split into separate slot variables");
+    if (result.backend == ShaderRecompiler::ShaderBackendKind::Spirv) Require(FunctionVariables(result.spirv.Words()) > 8u, "vector window narrowing: wave" + std::to_string(waveSize) + " window was not split into separate slot variables");
     device.Dispatch(result, 1, 1, 1, {}, reinterpret_cast<std::uintptr_t>(code.data()));
     device.WaitIdle();
 }
