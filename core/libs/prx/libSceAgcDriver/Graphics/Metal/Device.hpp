@@ -45,6 +45,13 @@ struct MemoryReport {
     std::uint64_t residencyCommits = 0;
 };
 
+struct GpuTimeReport {
+    double busyMs = 0.0;
+    double maxMs = 0.0;
+    std::uint64_t commandBuffers = 0;
+    bool enabled = false;
+};
+
 class Device {
 public:
     static std::unique_ptr<Device> Create(std::string* failure);
@@ -56,6 +63,8 @@ public:
     void* NativeDevice() const;
     void* NativeQueue(QueueKind queue) const;
     void* NativeResidencySet() const;
+
+    GpuTimeReport TakeGpuTime();
 
     GuestWindows& Guest();
 
