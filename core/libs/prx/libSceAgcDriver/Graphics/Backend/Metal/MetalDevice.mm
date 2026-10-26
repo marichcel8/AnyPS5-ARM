@@ -2616,7 +2616,7 @@ auto VulkanDevice::DispatchIndirect(const ShaderRecompiler::RecompileResult& sha
     const auto& limit = state->groupLimit;
     if (groups[0] > limit[0] || groups[1] > limit[1] || groups[2] > limit[2]) return {0, readMs};
     state->dispatch(shader, groups[0], groups[1], groups[2], snapshots);
-    return {1, readMs};
+    return {0, readMs};
 }
 
 auto VulkanDevice::PrepareRecipe(const std::shared_ptr<const Recipe>&, bool) -> std::shared_ptr<RecipeHit> { return {}; }
