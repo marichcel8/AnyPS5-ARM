@@ -68,6 +68,14 @@ std::optional<MemoryValueFill> MatchMemoryValueFill(std::span<const std::uint32_
 void NoteMemoryValueFill(const MemoryValueFill& fill);
 bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resource, const Texture* texture);
 void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32_t pattern);
+struct DepthMetadataFillRecord {
+    std::uint64_t generation;
+    std::uint64_t address;
+    std::size_t bytes;
+    std::uint32_t pattern;
+};
+std::uint64_t DepthMetadataFillGeneration();
+std::vector<DepthMetadataFillRecord> DepthMetadataFillsSince(std::uint64_t generation);
 VkImageAspectFlags HtileFillClears(std::uint32_t pattern, bool stencilInHtile);
 std::uint64_t HtileMetadataBytes(VkExtent2D extent);
 bool HtileFillCovers(std::uint64_t htile, VkExtent2D extent, std::uint64_t address, std::size_t bytes);
