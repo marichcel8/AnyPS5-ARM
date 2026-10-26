@@ -267,8 +267,6 @@ void deadzoneShapesSticks() {
     require(rejected, "an out-of-range deadzone is rejected");
 }
 
-}
-
 bool hasKey(const Pad::InputConfiguration& configuration, SDL_Scancode key, Pad::PadButton button) {
     for (const auto& binding : configuration.bindings) {
         if (binding.key == key && binding.control == Pad::InputControl::Button && binding.button == button) return true;
@@ -283,7 +281,9 @@ void layouts() {
     require(hasKey(both.classic, SDL_SCANCODE_F, Pad::PadButton::Cross), "top-level lines apply to the classic layout");
     require(!hasKey(both.shooter, SDL_SCANCODE_F, Pad::PadButton::Cross), "top-level lines do not touch the shooter layout");
     require(hasKey(both.shooter, SDL_SCANCODE_SPACE, Pad::PadButton::Cross), "the shooter layout jumps on Space");
-    require(hasKey(both.shooter, SDL_SCANCODE_UNKNOWN, Pad::PadButton::R2) == false, "mouse bindings carry no key");
+    bool leftFires = false;
+    for (const auto& binding : both.shooter.bindings) leftFires = leftFires || (binding.mouseButton == Pad::MouseButton::Left && binding.button == Pad::PadButton::R2);
+    require(leftFires, "the left mouse button fires R2 in the shooter layout");
     useConfig("Layout = Shooter\n[Shooter]\nCross = KEY:J\n[Classic]\nCircle = KEY:K\n");
     both = Pad::LoadInputLayouts();
     require(both.shooter.startLayout == Pad::Layout::Shooter, "Layout selects the starting layout");

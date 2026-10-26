@@ -88,6 +88,7 @@ PadInput::PadInput() : PadInput(Pad::LoadInputLayouts()) {
 
 PadInput::PadInput(Pad::InputLayouts layouts) : keyboardMouse(std::move(layouts)) {
     mouseLookArmed = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
+    APS5_LOG_OUT("[input] layout %s (F8 switches)", mouseLookArmed ? "Shooter" : "Classic");
     for (auto& channel : RemotePad::OpenAllFromEnvironment()) remotes.push_back(Remote{std::move(channel)});
     openAvailableControllers();
 }
