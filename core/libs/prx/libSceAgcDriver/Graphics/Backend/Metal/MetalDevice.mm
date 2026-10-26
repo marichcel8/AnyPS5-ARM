@@ -1564,7 +1564,6 @@ struct VulkanDevice::State {
     void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses) {
         slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(shader.pushConstants.data(), shader.pushConstants.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
         slots[SlotIndex(BufferSlot::FaultBuffer)] = fault.gpuAddress;
-        if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
         std::vector<std::pair<std::uint32_t, std::uint64_t>> imageEntries;
         std::uint32_t pointSamplers = 0;
         std::optional<std::uint32_t> tableElements;
@@ -1653,7 +1652,6 @@ struct VulkanDevice::State {
                 break;
             }
             case ShaderRecompiler::DescriptorRole::BdaPagetable:
-                if (slots[SlotIndex(BufferSlot::BdaPagetable)] == 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
                 break;
             case ShaderRecompiler::DescriptorRole::FaultBuffer:
                 break;
@@ -1674,6 +1672,7 @@ struct VulkanDevice::State {
             for (const auto& [index, resourceId] : imageEntries) entries[index - first].resourceId = resourceId;
             slots[SlotIndex(BufferSlot::GuestImages)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0])) - static_cast<std::uint64_t>(first) * sizeof(entries[0]);
         }
+        if (shader.bdaAbiVersion != 0) slots[SlotIndex(BufferSlot::BdaPagetable)] = bdaTable(snapshots);
     }
 
     void dispatch(const ShaderRecompiler::RecompileResult& shader, std::uint32_t x, std::uint32_t y, std::uint32_t z, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
