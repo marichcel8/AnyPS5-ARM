@@ -140,10 +140,8 @@ void VertexTailDraws(bool cullDistance) {
     Continuation[1] = 0x7e08020cu;
     Require(Check(prefix, Continuation) == original, "restored continuation did not restore the pixels");
     alignas(256) const std::array<std::uint32_t, 7> clipContinuation{0xbf840005u, 0x7e08020cu, 0xf80000cfu, 0x04030201u, 0xf80008dfu, 0x01010101u, 0xbf810000u};
-    std::puts("vertex tail: clip draw");
     const auto clipped = Check(prefix, clipContinuation, 0x00400001u, clipContinuation.size());
     Require(clipped != original && std::count(clipped.begin(), clipped.end(), Kept) > kept, "a clip distance exported by the continuation did not clip the triangle");
-    std::printf("vertex tail: shaderCullDistance %d\n", cullDistance ? 1 : 0);
     if (cullDistance) {
         const auto culled = Check(prefix, clipContinuation, 0x00400100u, clipContinuation.size());
         Require(culled == original, "a mixed-sign cull distance discarded the triangle");
