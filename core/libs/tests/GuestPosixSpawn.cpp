@@ -1,5 +1,6 @@
 #ifdef __APPLE__
 #include <crt_externs.h>
+#include <mach-o/dyld.h>
 #endif
 #include "prx/libc/include/Api.hpp"
 #include "prx/libSceLibcInternal/include/Api.hpp"
@@ -212,6 +213,13 @@ static std::filesystem::path OwnExecutablePath() {
     const DWORD length = GetModuleFileNameW(nullptr, own.data(), static_cast<DWORD>(own.size()));
     own.resize(length);
     return std::filesystem::path(own);
+#elif defined(__APPLE__)
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size);
+    std::vector<char> executable(size);
+    std::error_code error;
+    if (_NSGetExecutablePath(executable.data(), &size) != 0) return {};
+    return std::filesystem::canonical(executable.data(), error);
 #else
     std::error_code error;
     return std::filesystem::read_symlink("/proc/self/exe", error);
