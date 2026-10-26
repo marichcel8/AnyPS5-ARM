@@ -845,6 +845,26 @@ static void CheckExtendedMath() {
     Require(std::isnan(remainder_nid_postfix(1.0, 0.0)) && std::isnan(remainder_nid_postfix(INFINITY, 1.0)));
 }
 
+static void CheckExp2fConsoleBits() {
+    constexpr struct {
+        std::uint32_t input;
+        std::uint32_t expected;
+        int error;
+    } cases[] = {
+        {0x3d00010bu, 0x3f82cd8du, 0}, {0x3f000303u, 0x3fb5066du, 0}, {0x40a0051bu, 0x42000e29u, 0}, {0x42f0070cu, 0x7b813a1bu, 0},
+        {0xbf400909u, 0x3f183437u, 0}, {0xc2f00b14u, 0x037c3073u, 0}, {0x00000000u, 0x3f800000u, 0}, {0x80000000u, 0x3f800000u, 0},
+        {0x33000000u, 0x3f800000u, 0}, {0x3f800000u, 0x40000000u, 0}, {0x42fe0000u, 0x7f000000u, 0}, {0x42ffffffu, 0x7f7fffa7u, 0},
+        {0x43000000u, 0x7f800000u, ERANGE}, {0x7f7fffffu, 0x7f800000u, ERANGE}, {0x7f800000u, 0x7f800000u, 0}, {0xff800000u, 0x00000000u, 0},
+        {0xc2fc0000u, 0x00800000u, 0}, {0xc3150000u, 0x00000001u, 0}, {0xc315ffffu, 0x00000001u, 0}, {0xc3160000u, 0x00000000u, ERANGE},
+        {0xc3160001u, 0x00000000u, ERANGE}, {0xff7fffffu, 0x00000000u, ERANGE}, {0x7fc00001u, 0x7fc00001u, 0}, {0xffc00002u, 0xffc00002u, 0},
+    };
+    for (const auto& item : cases) {
+        errno = 1234;
+        Require(std::bit_cast<std::uint32_t>(exp2f_nid_postfix(std::bit_cast<float>(item.input))) == item.expected);
+        Require(errno == (item.error != 0 ? item.error : 1234));
+    }
+}
+
 static void CheckHyperbolic() {
     const double infinity = std::numeric_limits<double>::infinity();
     Require(_Cosh_nid_postfix(0.0, 2.0) == 2.0);
@@ -1680,6 +1700,7 @@ int main() {
     CheckHyperbolic();
     CheckAcoshfMsunBoundaries();
     CheckCoshfMsunBoundaries();
+    CheckExp2fConsoleBits();
     CheckScaledHyperbolic();
     CheckSinhf();
     CheckAtanhf();
