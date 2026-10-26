@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cctype>
 #include <cstdlib>
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <string>
 #include <vector>
 
 namespace AgcDriver::Graphics::Metal {
@@ -126,11 +128,27 @@ struct Device::State final : WindowBackend {
 
 std::unique_ptr<Device> Device::Create(std::string* failure) {
     @autoreleasepool {
-        const auto fail = [&](const char* what) -> std::unique_ptr<Device> {
+        const auto fail = [&](const std::string& what) -> std::unique_ptr<Device> {
             if (failure != nullptr) *failure = what;
             return nullptr;
         };
         id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (const char* requested = std::getenv("ANYPS5_GPU"); requested != nullptr && requested[0] != '\0') {
+            const auto lower = [](std::string text) {
+                std::transform(text.begin(), text.end(), text.begin(), [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+                return text;
+            };
+            const auto wanted = lower(requested);
+            std::string names;
+            id<MTLDevice> chosen = nil;
+            for (id<MTLDevice> candidate in MTLCopyAllDevices()) {
+                const std::string name = candidate.name != nil ? candidate.name.UTF8String : "";
+                names += (names.empty() ? "" : ", ") + name;
+                if (chosen == nil && lower(name).find(wanted) != std::string::npos) chosen = candidate;
+            }
+            if (chosen == nil) return fail(std::string("no usable device whose name contains ANYPS5_GPU=\"") + requested + "\"; devices: " + names);
+            device = chosen;
+        }
         if (device == nil) return fail("no Metal device");
         if (![device supportsFamily:MTLGPUFamilyMetal4]) return fail("the GPU does not support Metal 4");
         auto state = std::make_unique<State>();

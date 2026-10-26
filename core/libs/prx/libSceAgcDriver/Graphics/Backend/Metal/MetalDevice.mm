@@ -13,6 +13,7 @@
 #include "prx/libSceAgcDriver/Graphics/Metal/Textures.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestSamplerResource.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestTextureResource.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/TextureTiling.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/VertexInput.hpp"
 #include "BdaAbi.hpp"
 #include "ImageTableAbi.hpp"
@@ -150,6 +151,8 @@ bool PagesAreDataMemory(std::uint64_t base, std::uint64_t bytes) {
     }
     return true;
 }
+
+constexpr std::uint32_t MaxTextureArrayLayers = 2048;
 
 struct HostImport {
     Metal::HostSpan span;
@@ -1214,7 +1217,7 @@ struct VulkanDevice::State {
     std::uint64_t imageView(std::span<const std::uint32_t> words, ShaderRecompiler::DescriptorImageShape shape, bool written, std::optional<Numeric> numeric, bool descriptorSwizzle, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::vector<ImageUse>& uses, std::optional<std::uint32_t> storageMip = std::nullopt) {
         const auto viewKind = ViewKindOf(shape);
         if (std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words)) return nullTexture(viewKind).gpuResourceID._impl;
-        auto resource = Graphics::DecodeTextureResource(words);
+        auto resource = Graphics::ArrayLayerWindow(Graphics::DecodeTextureResource(words), MaxTextureArrayLayers);
         if (const auto* format = Metal::FindFormat(resource.format); numeric && *numeric != Numeric::Float && format != nullptr && format->transform == Metal::TextureTransform::Repack101111) resource.format = RawPackedFormat;
         const auto [found, info, layers] = surfaceFor(resource);
         if ((viewKind == Metal::TextureKind::Tex3D) != (info.kind == Metal::TextureKind::Tex3D) || (viewKind == Metal::TextureKind::Tex2DMsaa) != (info.kind == Metal::TextureKind::Tex2DMsaa)) throw std::runtime_error("AGC graphics: Metal image dimension does not match the shader image type");
