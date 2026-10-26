@@ -813,6 +813,15 @@ void StoreVectorWindow(State& state, const IrValue& inst) {
     Line(state, "if (" + index + " < " + U32(state.windowDwords) + ") aps5_window" + HalfSuffix() + "[" + index + "] = " + data + ";");
 }
 
+void WindowLaneGuard(State& state, const IrValue& inst) {
+    state.features |= Fault | Lane;
+    const auto lane = Typed(state, inst, 4u);
+    const auto slot = Typed(state, inst, 3u);
+    const auto own = "(aps5_lane + " + U32(CurrentHalf() * 32u) + ") == (" + lane + " & " + U32(state.program.WaveSize() - 1u) + ")";
+    const auto overwritten = Typed(state, inst, 0u) + " == " + slot + " && " + Typed(state, inst, 1u) + " != " + Typed(state, inst, 2u);
+    Line(state, "if (" + own + " && " + overwritten + ") aps5_fault(aps5_c, " + U32(static_cast<std::uint32_t>(BdaAbi::FaultReason::WindowLaneSpill)) + ", (ulong(" + lane + ") << 32u) | ulong(" + slot + "), " + Typed(state, inst, 1u) + ", " + Pc(inst) + ");");
+}
+
 }
 
 bool EmitMemory(State& state, const IrValue& inst) {
@@ -961,6 +970,7 @@ bool EmitMemory(State& state, const IrValue& inst) {
     case IrOpcode::SharedAtomicMskor64: SharedAtomic64(state, inst); return true;
     case IrOpcode::LoadVectorWindow: LoadVectorWindow(state, inst); return true;
     case IrOpcode::StoreVectorWindow: StoreVectorWindow(state, inst); return true;
+    case IrOpcode::WindowLaneGuard: WindowLaneGuard(state, inst); return true;
     default: break;
     }
     if (EmitImage(state, inst)) return true;
