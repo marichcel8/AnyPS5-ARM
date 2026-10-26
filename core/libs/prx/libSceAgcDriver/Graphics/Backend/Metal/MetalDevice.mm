@@ -341,20 +341,27 @@ bool IntegerFormat(Metal::PixelFormat format) {
     }
 }
 
-std::uint32_t PointSamplerMask(const ShaderRecompiler::DescriptorBinding& binding) {
-    if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages || binding.imageSamplers.size() < binding.count || ImageKindOf(binding.binding).storage) return 0;
+struct SamplerUse {
+    std::uint32_t integer = 0;
+    std::uint32_t other = 0;
+};
+
+SamplerUse SamplerUseOf(const ShaderRecompiler::DescriptorBinding& binding) {
+    if (binding.role != ShaderRecompiler::DescriptorRole::GuestImages || binding.imageSamplers.size() < binding.count || ImageKindOf(binding.binding).storage) return {};
     const bool integerView = ImageKindOf(binding.binding).numeric != Numeric::Float;
-    std::uint32_t mask = 0;
+    SamplerUse use;
     for (std::uint32_t element = 0; element < binding.count; ++element) {
         const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 8u, 8u);
         bool integer = integerView;
-        if (!integer && !std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) && !Graphics::IsNullTextureResource(words)) {
+        const bool empty = std::all_of(words.begin(), words.end(), [](std::uint32_t word) { return word == 0u; }) || Graphics::IsNullTextureResource(words);
+        if (!integer && !empty) {
             const auto* format = Metal::FindFormat(Graphics::DecodeTextureResource(words).format);
             integer = format != nullptr && IntegerFormat(format->pixelFormat);
         }
-        if (integer) mask |= binding.imageSamplers[element];
+        if (!integer && empty) continue;
+        (integer ? use.integer : use.other) |= binding.imageSamplers[element];
     }
-    return mask;
+    return use;
 }
 
 Metal::TextureKind ViewKindOf(ShaderRecompiler::DescriptorImageShape shape) {
@@ -1297,6 +1304,7 @@ struct VulkanDevice::State {
         }
         if (!written && descriptorSwizzle) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
         else if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {4, 5, 6, 7});
+        if (Trace()) std::fprintf(stderr, "[metal] image view: format %u surface pixel %u view pixel %u numeric %d kind %u slices %u\n", static_cast<unsigned>(resource.format), static_cast<unsigned>(surface.texture.pixelFormat), static_cast<unsigned>(view.pixelFormat), numeric ? static_cast<int>(*numeric) : -1, static_cast<unsigned>(view.kind), view.sliceCount);
         return viewOf(surface, view).resourceId;
     }
 
@@ -1385,6 +1393,7 @@ struct VulkanDevice::State {
         descriptor.label = @"AnyPS5 guest sampler";
         id<MTLSamplerState> state = [native newSamplerStateWithDescriptor:descriptor];
         if (state == nil) throw std::runtime_error("AGC graphics: Metal sampler state could not be created");
+        if (Trace()) std::fprintf(stderr, "[metal] sampler state: min %d mag %d mip %d point %d unnormalized %d aniso %d lod %.2f..%.2f\n", static_cast<int>(descriptor.minFilter), static_cast<int>(descriptor.magFilter), static_cast<int>(descriptor.mipFilter), point ? 1 : 0, unnormalized ? 1 : 0, static_cast<int>(descriptor.maxAnisotropy), descriptor.lodMinClamp, descriptor.lodMaxClamp);
         samplers.emplace(key, state);
         return state.gpuResourceID._impl;
     }
@@ -1397,7 +1406,15 @@ struct VulkanDevice::State {
         std::uint32_t pointSamplers = 0;
         std::optional<std::uint32_t> tableElements;
         std::vector<std::uint32_t> map;
-        for (const auto& binding : shader.bindings) pointSamplers |= PointSamplerMask(binding);
+        std::uint32_t otherSamplers = 0;
+        std::uint32_t integerSamplers = 0;
+        for (const auto& binding : shader.bindings) {
+            const auto use = SamplerUseOf(binding);
+            pointSamplers |= use.integer;
+            integerSamplers |= use.integer;
+            otherSamplers |= use.other;
+        }
+        pointSamplers &= ~otherSamplers;
         for (const auto& binding : shader.bindings) {
             switch (binding.role) {
             case ShaderRecompiler::DescriptorRole::ShaderData:
@@ -1424,14 +1441,20 @@ struct VulkanDevice::State {
             case ShaderRecompiler::DescriptorRole::GuestImages: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8u) throw std::runtime_error("AGC graphics: guest image descriptor must contain eight DWORDs per element");
                 for (std::uint32_t element = 0; element < binding.count; ++element) {
-                    imageEntries.emplace_back(ShaderRecompiler::MetalAbi::GuestImageIndex(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), element), image(binding, element, snapshots, uses));
+                    const auto index = ShaderRecompiler::MetalAbi::GuestImageIndex(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), element);
+                    if (Trace()) std::fprintf(stderr, "[metal] image binding %u element %u -> table index 0x%x\n", binding.binding, element, index);
+                    imageEntries.emplace_back(index, image(binding, element, snapshots, uses));
                 }
                 break;
             }
             case ShaderRecompiler::DescriptorRole::GuestSamplers: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 4u) throw std::runtime_error("AGC graphics: guest sampler descriptor must contain four DWORDs per element");
                 std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
-                for (std::uint32_t element = 0; element < binding.count; ++element) entries[element].resourceId = sampler(binding, element, element < 32u && ((pointSamplers >> element) & 1u) != 0u);
+                for (std::uint32_t element = 0; element < binding.count; ++element) {
+                    const bool point = element < 32u && ((pointSamplers >> element) & 1u) != 0u;
+                    entries[element].resourceId = sampler(binding, element, point);
+                    if (Trace()) std::fprintf(stderr, "[metal] sampler %u.%u: point %u, words %08x %08x %08x %08x, integer mask %x, other mask %x\n", binding.binding, element, point ? 1u : 0u, binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u], integerSamplers, otherSamplers);
+                }
                 slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
                 break;
             }
