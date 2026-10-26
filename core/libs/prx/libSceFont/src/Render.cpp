@@ -509,15 +509,15 @@ int APS5_VABI sceFontGlyphGetAttribute(FontGlyph glyph, int attribute, int* nowA
     return SCE_FONT_OK;
 }
 
-int APS5_VABI sceFontGlyphRenderImage(FontGlyph glyph, FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
+int APS5_VABI sceFontGlyphRenderImage(FontGlyph glyph, const FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
     return RenderGlyphObject(glyph, styleFrame, renderer, surface, x, y, metrics, result, GlyphPlacement::Attribute);
 }
 
-int APS5_VABI sceFontGlyphRenderImageHorizontal(FontGlyph glyph, FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
+int APS5_VABI sceFontGlyphRenderImageHorizontal(FontGlyph glyph, const FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
     return RenderGlyphObject(glyph, styleFrame, renderer, surface, x, y, metrics, result, GlyphPlacement::Horizontal);
 }
 
-int APS5_VABI sceFontGlyphRenderImageVertical(FontGlyph glyph, FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
+int APS5_VABI sceFontGlyphRenderImageVertical(FontGlyph glyph, const FontStyleFrame* styleFrame, FontRenderer renderer, FontRenderSurface* surface, float x, float y, FontGlyphMetrics* metrics, FontRenderOutput* result) {
     return RenderGlyphObject(glyph, styleFrame, renderer, surface, x, y, metrics, result, GlyphPlacement::Vertical);
 }
 

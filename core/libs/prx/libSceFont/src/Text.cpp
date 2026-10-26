@@ -82,8 +82,8 @@ struct FontWordsData {
     FontTextSource* source = nullptr;
 };
 
-FontWordsData* GetWordsData(void* fontWords) {
-    auto* data = static_cast<FontWordsData*>(fontWords);
+FontWordsData* GetWordsData(FontWords* fontWords) {
+    auto* data = reinterpret_cast<FontWordsData*>(fontWords);
     return data && data->magic == FONT_WORDS_MAGIC ? data : nullptr;
 }
 
@@ -623,8 +623,8 @@ FontTextCharacter* APS5_VABI sceFontCharacterRefersTextNext(const FontTextCharac
     return textCharacter ? NextTextCharacter(textCharacter) : nullptr;
 }
 
-int APS5_VABI sceFontCreateWords(const FontMemory* fontMemory, FontTextSource* textSource, const void* detail, void** pFontWords) {
-    (void)detail;
+int APS5_VABI sceFontCreateWords(const FontMemory* fontMemory, FontTextSource* textSource, std::uint64_t unusedSlot, FontWords** pFontWords) {
+    (void)unusedSlot;
     if (!fontMemory || !textSource || !pFontWords) {
         if (pFontWords) *pFontWords = nullptr;
         return SCE_FONT_ERROR_INVALID_PARAMETER;
@@ -637,11 +637,11 @@ int APS5_VABI sceFontCreateWords(const FontMemory* fontMemory, FontTextSource* t
     auto* data = new (raw) FontWordsData{};
     data->memory = fontMemory;
     data->source = textSource;
-    *pFontWords = data;
+    *pFontWords = reinterpret_cast<FontWords*>(data);
     return SCE_FONT_OK;
 }
 
-int APS5_VABI sceFontDestroyWords(void** pFontWords) {
+int APS5_VABI sceFontDestroyWords(FontWords** pFontWords) {
     if (!pFontWords) return SCE_FONT_ERROR_INVALID_PARAMETER;
     auto* data = GetWordsData(*pFontWords);
     *pFontWords = nullptr;
@@ -656,7 +656,7 @@ int APS5_VABI sceFontDestroyWords(void** pFontWords) {
 // A word is a run of characters other than white space, or one ideographic character, with the white
 // space that follows it; white space at the start character is a word of its own. termCharacter, when
 // given, ends the search without being part of the word.
-int APS5_VABI sceFontWordsFindWordCharacters(void* fontWords, FontTextCharacter* startCharacter, FontTextCharacter* termCharacter, FontTextCharacter** pLastCharacter, FontTextCharacter** pNextCharacter) {
+int APS5_VABI sceFontWordsFindWordCharacters(FontWords* fontWords, FontTextCharacter* startCharacter, FontTextCharacter* termCharacter, FontTextCharacter** pLastCharacter, FontTextCharacter** pNextCharacter) {
     if (pLastCharacter) *pLastCharacter = nullptr;
     if (pNextCharacter) *pNextCharacter = nullptr;
     if (!GetWordsData(fontWords)) return SCE_FONT_ERROR_INVALID_WORDS;

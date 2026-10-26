@@ -16,6 +16,7 @@
 #endif
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "prx/libkernel/Socket/include/SocketSelectDeadline.hpp"
+#include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libSceNet/src/ResolverTestHooks.hpp"
 #include "SceTypes.hpp"
@@ -2204,7 +2205,7 @@ int main() {
     Require(sceNetResolverAbort(-1, 1) == static_cast<int>(0x80410109) && *sceNetErrnoLoc() == 9);
     Require(sceNetResolverGetError(resolver, nullptr) == static_cast<int>(0x80410116) && *sceNetErrnoLoc() == 22);
     records.fill(0xA5);
-    Require(sceNetResolverStartNtoaMultipleRecords(resolver, "localhost", records.data(), 5000000, 1, 0) == 0);
+    Require(sceNetResolverStartNtoaMultipleRecords(resolver, "localhost", reinterpret_cast<NetResolverInfo*>(records.data()), 5000000, 1, 0) == 0);
     Require(std::memcmp(records.data(), resolved.data(), 384) == 0);
     Require(sceNetResolverStartNtoaMultipleRecords(resolver, "localhost", nullptr, 5000000, 1, 0) ==
         static_cast<int>(0x80410116) && *sceNetErrnoLoc() == 22);

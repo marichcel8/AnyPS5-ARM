@@ -1,5 +1,6 @@
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/include/Api.hpp"
+#include "prx/libkernel/File/include/File.hpp"
 #include "SceTypes.hpp"
 #include <array>
 #include <atomic>

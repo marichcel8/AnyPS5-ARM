@@ -111,7 +111,7 @@ extern "C" void ForgetUnloadedUnwindImages_nid_no_patch() {
   std::lock_guard lock(unwindImagesMutex);
   for (const auto base : unloaded) UnwindImages().erase(base);
 }
-#elif !defined(__APPLE__)
+#else
 
 namespace {
 struct ImageSearch {
