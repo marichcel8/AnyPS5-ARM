@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
+#include "Recompiler.hpp"
 #include "VulkanTestDevice.hpp"
 #include "ProvokingVertex_vert_spv.h"
 #include "ProvokingVertex_frag_spv.h"
@@ -145,6 +146,10 @@ int main() {
     try {
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Spirv) {
+            std::puts("provoking vertex: the fixtures are prebuilt SPIR-V shaders and the guest P0 rect list needs tessellation, neither of which the MSL backend can run; the Metal last-vertex rewrite has no coverage here");
+            return VulkanTestSkipped;
+        }
         const auto vertex = Shader(PROVOKING_VERTEX_VERT_SPV, 1);
         const auto fragment = Shader(PROVOKING_VERTEX_FRAG_SPV, 2);
         const std::array<AgcDriver::Graphics::CompiledShader, 2> shaders{{
