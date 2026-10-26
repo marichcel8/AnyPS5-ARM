@@ -903,8 +903,10 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     const auto texture = parts.texture;
     const auto coordinate = Temp(state);
     Line(state, "const auto " + coordinate + " = " + CoordF32(access, layout.coord, shape.coordinates, ShapeOf(mem.imageDimension).coordinates) + ";");
-    const auto spatial = HostPlane(SpatialPart(coordinate, shape), shape, true);
-    const std::string array = shape.arrayed ? LayerPart(coordinate, shape, true) : std::string();
+    const auto instructionShape = ShapeOf(mem.imageDimension);
+    const bool flattened = instructionShape.spatial == 1u && shape.spatial == 2u;
+    const auto spatial = flattened ? "float2(" + coordinate + ".x, 0.5f)" : HostPlane(SpatialPart(coordinate, shape), shape, true);
+    const std::string array = !shape.arrayed ? std::string() : flattened ? (instructionShape.arrayed ? "uint(max(floor(" + coordinate + ".y + 0.5f), 0.0f))" : std::string("0u")) : LayerPart(coordinate, shape, true);
 
     std::string options;
     if (gather) {
