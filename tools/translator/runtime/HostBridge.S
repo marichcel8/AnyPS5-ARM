@@ -75,6 +75,14 @@ _aps5_enter:
     ldp x29, x30, [sp], #16
     ret
 
+// aps5_invoke_translated(a, b, c, code): a host call of a translated guest function without the
+// fault redirect; x3 carries the function's translated entry and the arguments stay in x0-x2.
+    .p2align 2
+    .globl _aps5_invoke_translated
+_aps5_invoke_translated:
+    mov x16, x3
+    b _aps5_enter
+
 // aps5_call(GuestState* state, uint64_t target): every translated call or jump to an address the
 // translator could not resolve. A call to the libc setjmp saves the registers of its translated
 // caller, so that aps5_native_restore can later continue there as if this call returned again;

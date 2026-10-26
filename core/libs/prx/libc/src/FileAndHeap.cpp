@@ -1,5 +1,6 @@
 #include "prx/libc/include/Api.hpp"
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -158,6 +159,60 @@ static bool IsPipeStream(std::FILE* native) {
     return GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(_fileno(native)))) == FILE_TYPE_PIPE;
 }
 #endif
+
+namespace {
+
+using CallbackResolve = const void* (*)(const void*);
+using CallbackInvoke = int (*)(const void*, const void*, const void*, const void*);
+
+std::atomic<CallbackResolve> callbackResolve{nullptr};
+std::atomic<CallbackInvoke> callbackInvoke{nullptr};
+
+struct DirectCompare {
+    GuestCompare function;
+    const void* code;
+    CallbackInvoke invoke;
+
+    int operator()(const void* left, const void* right) const {
+        return code != nullptr ? invoke(left, right, nullptr, code) : function(left, right);
+    }
+};
+
+struct DirectContextCompare {
+    GuestContextCompare function;
+    void* context;
+    const void* code;
+    CallbackInvoke invoke;
+
+    int operator()(const void* left, const void* right) const {
+        return code != nullptr ? invoke(left, right, context, code) : function(left, right, context);
+    }
+};
+
+const void* ResolveCallback(const void* function, CallbackInvoke& invoke) {
+    const auto resolve = callbackResolve.load(std::memory_order_acquire);
+    invoke = callbackInvoke.load(std::memory_order_acquire);
+    return resolve != nullptr && invoke != nullptr ? resolve(function) : nullptr;
+}
+
+DirectCompare DirectComparator(GuestCompare function) {
+    CallbackInvoke invoke = nullptr;
+    const void* code = ResolveCallback(reinterpret_cast<const void*>(function), invoke);
+    return {function, code, invoke};
+}
+
+DirectContextCompare DirectContextComparator(GuestContextCompare function, void* context) {
+    CallbackInvoke invoke = nullptr;
+    const void* code = ResolveCallback(reinterpret_cast<const void*>(function), invoke);
+    return {function, context, code, invoke};
+}
+
+}
+
+extern "C" void Aps5CallbackHooks_nid_no_patch(CallbackResolve resolve, CallbackInvoke invoke) {
+    callbackInvoke.store(invoke, std::memory_order_release);
+    callbackResolve.store(resolve, std::memory_order_release);
+}
 
 static void SwapElements(unsigned char* left, unsigned char* right, size_t size) {
     for (size_t index = 0; index < size; ++index) std::swap(left[index], right[index]);
@@ -705,12 +760,13 @@ void* APS5_VABI bsearch_nid_postfix(const void* key, const void* base, size_t co
     if (count > std::numeric_limits<size_t>::max() / size)
         throw std::overflow_error("bsearch: array size overflow");
     const auto* bytes = static_cast<const unsigned char*>(base);
+    const auto direct = DirectComparator(compare);
     size_t first = 0;
     while (count != 0) {
         const size_t half = count / 2;
         const size_t middle = first + half;
         const auto* element = bytes + middle * size;
-        const int result = compare(key, element);
+        const int result = direct(key, element);
         if (result == 0) return const_cast<unsigned char*>(element);
         if (result < 0) count = half;
         else { first = middle + 1; count -= half + 1; }
@@ -727,6 +783,7 @@ int APS5_VABI mergesort_nid_postfix(void* base, size_t count, size_t size, Guest
     if (!compare) throw std::invalid_argument("mergesort: null comparator");
     if (!base) throw std::invalid_argument("mergesort: null base");
     if (count > (std::numeric_limits<size_t>::max() - 8) / size) throw std::overflow_error("mergesort: array size overflow");
+    const auto direct = DirectComparator(compare);
     auto* const scratch = static_cast<unsigned char*>(malloc_nid_postfix(count * size + 8));
     if (!scratch) return -1;
     auto* source = static_cast<unsigned char*>(base);
@@ -737,7 +794,7 @@ int APS5_VABI mergesort_nid_postfix(void* base, size_t count, size_t size, Guest
             const size_t high = std::min(low + 2 * width, count);
             size_t left = low, right = middle, out = low;
             while (left < middle && right < high) {
-                const size_t taken = compare(source + left * size, source + right * size) <= 0 ? left++ : right++;
+                const size_t taken = direct(source + left * size, source + right * size) <= 0 ? left++ : right++;
                 std::memcpy(target + out++ * size, source + taken * size, size);
             }
             std::memcpy(target + out * size, source + left * size, (middle - left) * size);
@@ -760,7 +817,7 @@ void APS5_VABI qsort_nid_postfix(void* base, size_t count, size_t size, int (APS
     if (count > std::numeric_limits<size_t>::max() / size) throw std::overflow_error("qsort: array size overflow");
     if (count == 1) return;
 
-    SortElements(static_cast<unsigned char*>(base), count, size, compare);
+    SortElements(static_cast<unsigned char*>(base), count, size, DirectComparator(compare));
 }
 
 int APS5_VABI qsort_s_nid_postfix(void* base, size_t count, size_t size, GuestContextCompare compare, void* context) {
@@ -775,7 +832,7 @@ int APS5_VABI qsort_s_nid_postfix(void* base, size_t count, size_t size, GuestCo
         return 22;
     }
     if (count > 1 && size != 0)
-        SortElements(static_cast<unsigned char*>(base), count, size, [compare, context](const void* left, const void* right) { return compare(left, right, context); });
+        SortElements(static_cast<unsigned char*>(base), count, size, DirectContextComparator(compare, context));
     return 0;
 }
 
