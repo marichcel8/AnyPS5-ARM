@@ -408,7 +408,8 @@ void PrepareStage(State& state) {
         DeclareVertexOutputs(state);
     } else {
         const auto& pixel = PixelInfo(state);
-        if (pixel.QuadMasked()) throw MslUnsupported("MSL backend: PA_SC_AA_MASK quad pixel or sample masks are not emitted");
+        if (pixel.QuadSampleMaskPartial()) throw MslUnsupported("MSL backend: PA_SC_AA_MASK sample masks are not emitted");
+        if (pixel.quadPixelMask != 0xfu) Argument(state, "aps5_frag_coord", "float4 aps5_frag_coord [[position]]");
         if (pixel.psOrderedPixelShader) throw MslUnsupported("MSL backend: primitive-ordered pixel shaders need raster order groups, which are not emitted");
         if (state.program.Metadata().barycentricEmulation) throw MslUnsupported("MSL backend: barycentric emulation is section S7");
         DeclarePixelOutputs(state);
@@ -420,7 +421,14 @@ void PrepareStage(State& state) {
             }
         }
     }
-    state.exit = state.validMask ? "if (!aps5_valid) discard_fragment(); return aps5_out;" : "return aps5_out;";
+    const bool quadMasked = stage == IrShaderStage::Pixel && PixelInfo(state).quadPixelMask != 0xfu;
+    state.quadMasked = quadMasked;
+    if (state.validMask || quadMasked) {
+        const std::string condition = std::string(quadMasked ? "aps5_quad_masked" : "") + (quadMasked && state.validMask ? " || " : "") + (state.validMask ? "!aps5_valid" : "");
+        state.exit = "if (" + condition + ") discard_fragment(); return aps5_out;";
+    } else {
+        state.exit = "return aps5_out;";
+    }
 }
 
 std::string StageBuiltin(State& state, StageInputKind kind, std::uint32_t component) {
@@ -521,6 +529,9 @@ std::string StageHeader(const State& state, const std::string& parameters) {
         text += "    aps5_out.point_size = " + FloatBits(size) + ";\n";
     }
     if (state.validMask) text += "    bool aps5_valid = true;\n";
+    if (pixel && PixelInfo(state).quadPixelMask != 0xfu) {
+        text += "    const bool aps5_quad_masked = ((" + U32(PixelInfo(state).quadPixelMask) + " >> ((uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u))) & 1u) == 0u;\n";
+    }
     return text;
 }
 

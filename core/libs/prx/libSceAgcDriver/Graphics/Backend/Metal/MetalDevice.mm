@@ -2531,6 +2531,7 @@ struct VulkanDevice::State {
         }
         if (submittedParams.indirect) throw std::runtime_error("AGC graphics: Metal indirect draws are not wired yet");
         if (submittedParams.indexCount == 0 || submittedParams.instanceCount == 0) return;
+        if (Graphics::PartialSampleMask(submitted) && Graphics::UniformSampleMask(submitted) && Graphics::HostSampleMask(submitted) == 0u) return;
         if (submittedParams.indexed && submittedParams.indexSize != 2u && submittedParams.indexSize != 4u) throw std::runtime_error("AGC graphics: only uint16 and uint32 index buffers are supported");
         std::optional<LastProvokingDraw> provoking;
         if (RewritesLastProvokingVertex(submitted, shaders)) {
