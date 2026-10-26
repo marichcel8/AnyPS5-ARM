@@ -408,7 +408,8 @@ void PrepareStage(State& state) {
         DeclareVertexOutputs(state);
     } else {
         const auto& pixel = PixelInfo(state);
-        if (pixel.QuadMasked()) throw MslUnsupported("MSL backend: PA_SC_AA_MASK quad pixel or sample masks are not emitted");
+        if (pixel.QuadSampleMaskPartial()) throw MslUnsupported("MSL backend: PA_SC_AA_MASK sample masks are not emitted");
+        if (pixel.quadPixelMask != 0xfu) Argument(state, "aps5_frag_coord", "float4 aps5_frag_coord [[position]]");
         if (pixel.psOrderedPixelShader) throw MslUnsupported("MSL backend: primitive-ordered pixel shaders need raster order groups, which are not emitted");
         if (state.program.Metadata().barycentricEmulation) throw MslUnsupported("MSL backend: barycentric emulation is section S7");
         DeclarePixelOutputs(state);
@@ -521,6 +522,9 @@ std::string StageHeader(const State& state, const std::string& parameters) {
         text += "    aps5_out.point_size = " + FloatBits(size) + ";\n";
     }
     if (state.validMask) text += "    bool aps5_valid = true;\n";
+    if (pixel && PixelInfo(state).quadPixelMask != 0xfu) {
+        text += "    if (((" + U32(PixelInfo(state).quadPixelMask) + " >> ((uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u))) & 1u) == 0u) discard_fragment();\n";
+    }
     return text;
 }
 
