@@ -288,6 +288,10 @@ int main() {
         }
         const auto device = OpenVulkanTestDevice();
         if (!device) return VulkanTestSkipped;
+        if (ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Spirv) {
+            std::puts("skipped, the MSL backend has no BVH traversal: image_bvh64_intersect_ray is not implemented on Metal");
+            return VulkanTestSkipped;
+        }
         GuestBlock guest;
         Require((guest.Address() >> 35u) != 0u, "bvh64 intersect ray: the guest block is not above 32 GiB, the node pointer would fit 32 bits");
         FillNodes(guest);

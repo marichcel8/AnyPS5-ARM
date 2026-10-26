@@ -417,7 +417,7 @@ void TextureManager::EncodeUpload(void* computeEncoder, const TextureHandle& han
     s.uploads.fetch_add(1, std::memory_order_relaxed);
 }
 
-void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& handle, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress) {
+void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& handle, const GuestTextureResource& descriptor, std::uint64_t surfaceDeviceAddress, std::span<const std::uint32_t> skipLayers) {
     auto& s = *state;
     auto* object = static_cast<Object*>(handle.object);
     if (object == nullptr) throw std::runtime_error("AGC graphics: texture writeback needs a texture");
@@ -428,6 +428,7 @@ void TextureManager::EncodeWriteback(void* computeEncoder, const TextureHandle& 
     const bool volume = object->info.kind == TextureKind::Tex3D;
     const auto kernel = volume ? DetileKernel::VolumeToTiled : DetileKernel::Array2DToTiled;
     for (const auto& job : plan.jobs) {
+        if (std::find(skipLayers.begin(), skipLayers.end(), job.destinationLayer) != skipLayers.end()) continue;
         id<MTLTexture> view;
         {
             std::lock_guard lock(s.mutex);
