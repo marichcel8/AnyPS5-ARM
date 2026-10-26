@@ -521,7 +521,7 @@ std::string StageHeader(const State& state, const std::string& parameters) {
     for (const auto& argument : arguments) all += "\n    " + argument + ",";
     if (parameters.empty() && !all.empty()) all.pop_back();
     all += parameters;
-    if (pixel && PixelInfo(state).psEarlyZ && !PixelInfo(state).psAlphaToCoverage && !state.stageOutputs.contains("depth")) text += "[[early_fragment_tests]] ";
+    if (pixel && PixelInfo(state).psEarlyZ && !PixelInfo(state).psAlphaToCoverage && !PixelInfo(state).QuadSampleMaskPartial() && !state.stageOutputs.contains("depth")) text += "[[early_fragment_tests]] ";
     text += std::string(pixel ? "fragment" : "vertex") + " aps5_stage_out " + std::string(MslEntryPoint) + "(" + all + ")\n{\n";
     text += "    aps5_stage_out aps5_out = {};\n";
     if (state.stageOutputs.contains("mask")) text += "    aps5_out.mask = 0xffffffffu;\n";
@@ -540,6 +540,7 @@ std::string StageHeader(const State& state, const std::string& parameters) {
         const auto word = [&](std::uint32_t index) { return masks[index] == 0xffffu ? std::string("0xffffffffu") : U32(masks[index]); };
         text += "    const uint aps5_sample_masks[4] = {" + word(0u) + ", " + word(1u) + ", " + word(2u) + ", " + word(3u) + "};\n";
         text += "    const uint aps5_sample_mask = aps5_sample_masks[(uint(aps5_frag_coord.x) & 1u) | ((uint(aps5_frag_coord.y) & 1u) << 1u)];\n";
+        if (PixelInfo(state).psIteratesSamples) text += "    if (((aps5_sample_mask >> aps5_sample) & 1u) == 0u) {\n        discard_fragment();\n        return aps5_out;\n    }\n";
     }
     return text;
 }
