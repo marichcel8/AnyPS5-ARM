@@ -377,7 +377,6 @@ int ChangeStatus(int fd, Kind kind, int mask, int value, const char* function) {
     auto& status = *Materialize(fd).status;
     const int next = (status & ~mask) | (value & mask);
     const int changed = status ^ next;
-    if ((changed & Asynchronous) && (kind == Kind::Pipe || kind == Kind::Socket)) Unsupported(function, "O_ASYNC", kind, fd);
     ApplyHostStatus(fd, kind, changed, next, function);
     status = next;
     return 0;
