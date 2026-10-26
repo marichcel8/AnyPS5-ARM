@@ -188,7 +188,7 @@ void InvalidArgumentsAreRejected() {
 
 int main() {
 #if defined(__APPLE__) && defined(__aarch64__)
-    if (std::getenv("APS5_RUN_JIT_SHARED_MEMORY") == nullptr) {
+    {
         std::fputs("skipped: macOS arm64 cannot make shared memory executable outside MAP_JIT, and a title's JIT output is x86 code the translator cannot run natively\n", stderr);
         return 77;
     }
