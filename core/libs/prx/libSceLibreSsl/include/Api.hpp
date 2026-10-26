@@ -16,6 +16,11 @@ struct AesKey {
     std::int32_t rounds;
 };
 
+struct CryptoThreadId {
+    void* ptr;
+    std::uint64_t val;
+};
+
 struct Md4Context {
     std::uint32_t A, B, C, D;
     std::uint32_t Nl, Nh;
@@ -49,6 +54,17 @@ struct Sha512Context {
     std::uint64_t Nl, Nh;
     std::uint64_t data[16];
     std::uint32_t num, mdLength;
+};
+
+using StackCompare = int (APS5_VABI*)(const void*, const void*);
+using StackElementFree = void (APS5_VABI*)(void*);
+
+struct LibreSslStack {
+    int num;
+    char** data;
+    int sorted;
+    int numAlloc;
+    StackCompare comp;
 };
 
 extern "C" {
@@ -95,12 +111,12 @@ int APS5_VABI CMAC_Init_nid_postfix(void);
 int APS5_VABI CMAC_Update_nid_postfix(void);
 int APS5_VABI CONF_modules_free_nid_postfix(void);
 int APS5_VABI CONF_modules_load_file_nid_postfix(void);
-int APS5_VABI CRYPTO_THREADID_set_callback_nid_postfix(void);
-int APS5_VABI CRYPTO_THREADID_set_numeric_nid_postfix(void);
+int APS5_VABI CRYPTO_THREADID_set_callback_nid_postfix(void* callback);
+void APS5_VABI CRYPTO_THREADID_set_numeric_nid_postfix(CryptoThreadId* id, std::uint64_t value);
 int APS5_VABI CRYPTO_cleanup_all_ex_data_nid_postfix(void);
 int APS5_VABI CRYPTO_num_locks_nid_postfix(void);
-int APS5_VABI CRYPTO_set_add_lock_callback_nid_postfix(void);
-int APS5_VABI CRYPTO_set_locking_callback_nid_postfix(void);
+void APS5_VABI CRYPTO_set_add_lock_callback_nid_postfix(void* callback);
+void APS5_VABI CRYPTO_set_locking_callback_nid_postfix(void* callback);
 void APS5_VABI DES_ecb_encrypt_nid_postfix(const unsigned char* input, unsigned char* output, const unsigned char* schedule, int enc);
 int APS5_VABI DES_set_key_nid_postfix(const unsigned char* key, unsigned char* schedule);
 void APS5_VABI DES_set_odd_parity_nid_postfix(unsigned char* key);
@@ -410,10 +426,10 @@ int APS5_VABI sceLibreSslInit(void);
 int APS5_VABI sceLibreSslInitEx(void);
 int APS5_VABI sceLibreSslInitEx2(void);
 int APS5_VABI sceLibreSslTerm(void);
-int APS5_VABI sk_num_nid_postfix(void);
-int APS5_VABI sk_pop_nid_postfix(void);
-int APS5_VABI sk_pop_free_nid_postfix(void);
-int APS5_VABI sk_value_nid_postfix(void);
+int APS5_VABI sk_num_nid_postfix(const LibreSslStack* stack);
+void* APS5_VABI sk_pop_nid_postfix(LibreSslStack* stack);
+void APS5_VABI sk_pop_free_nid_postfix(LibreSslStack* stack, StackElementFree release);
+void* APS5_VABI sk_value_nid_postfix(const LibreSslStack* stack, int index);
 int APS5_VABI AES_set_encrypt_key_nid_postfix(const unsigned char* userKey, int bits, AesKey* key);
 int APS5_VABI AES_set_decrypt_key_nid_postfix(const unsigned char* userKey, int bits, AesKey* key);
 void APS5_VABI AES_encrypt_nid_postfix(const unsigned char* in, unsigned char* out, const AesKey* key);
