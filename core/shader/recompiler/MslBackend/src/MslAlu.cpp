@@ -1,4 +1,5 @@
 #include "MslState.hpp"
+#include "MetalAbi.hpp"
 #include <algorithm>
 
 namespace ShaderRecompiler::Msl {
@@ -57,18 +58,26 @@ std::string GuestIndex() {
     return "(aps5_index + (aps5_index & ~31u) + " + U32(CurrentHalf() * 32u) + ")";
 }
 
+std::string GroupOffset(State& state, std::uint32_t component) {
+    if (state.program.Resources().stage != IrShaderStage::Compute || component >= PipelineSpecialization::WorkgroupOffsetWords) return "0u";
+    return StageConstant(state, PipelineSpecialization::WorkgroupOffsetBase + component, 0u);
+}
+
 std::string Builtin(State& state, const IrValue& inst) {
     const auto kind = static_cast<StageInputKind>(ImmediateValue(inst, 0));
     const auto component = ImmediateValue(inst, 1);
     switch (kind) {
     case StageInputKind::WorkgroupId:
         state.features |= WorkgroupId;
-        return "aps5_group." + Component(component);
+        return "(aps5_group." + Component(component) + " + " + GroupOffset(state, component) + ")";
     case StageInputKind::LocalInvocationId:
     case StageInputKind::GlobalInvocationId: {
         if (state.lanes == 1u) {
             state.features |= kind == StageInputKind::LocalInvocationId ? LocalId : GlobalId;
-            return std::string(kind == StageInputKind::LocalInvocationId ? "aps5_local." : "aps5_global.") + Component(component);
+            if (kind == StageInputKind::LocalInvocationId) return "aps5_local." + Component(component);
+            const auto* compute = state.input.compute;
+            const auto size = compute != nullptr && component < 3u ? std::max(compute->threadsNum[component], 1u) : 1u;
+            return "(aps5_global." + Component(component) + " + " + GroupOffset(state, component) + " * " + U32(size) + ")";
         }
         const auto* workgroup = state.input.compute;
         if (workgroup == nullptr || component >= 3u) Fail(inst, "needs the workgroup size");
@@ -79,7 +88,7 @@ std::string Builtin(State& state, const IrValue& inst) {
         const auto local = "((" + GuestIndex() + " / " + U32(divisor) + ") % " + U32(size) + ")";
         if (kind == StageInputKind::LocalInvocationId) return local;
         state.features |= WorkgroupId;
-        return "(" + local + " + aps5_group." + Component(component) + " * " + U32(size) + ")";
+        return "(" + local + " + (aps5_group." + Component(component) + " + " + GroupOffset(state, component) + ") * " + U32(size) + ")";
     }
     case StageInputKind::LocalInvocationIndex:
         state.features |= LocalIndex;
