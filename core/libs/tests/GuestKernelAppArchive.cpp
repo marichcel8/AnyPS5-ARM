@@ -136,6 +136,7 @@ void ConcurrentArchiveDirectoryEntries() {
                 const int bytes = sceKernelGetdirentries(directory, record.data(), static_cast<int>(record.size()), &base);
                 if (bytes == 0) break;
                 if (bytes != static_cast<int>(record.size()) || base < 0 || record[7] == 0) {
+                    std::fprintf(stderr, "getdirentries: bytes %d, base %lld, name length %d\n", bytes, static_cast<long long>(base), static_cast<int>(record[7]));
                     failures.fetch_add(1, std::memory_order_relaxed);
                     break;
                 }
