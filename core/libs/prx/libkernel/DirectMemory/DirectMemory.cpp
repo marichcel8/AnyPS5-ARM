@@ -247,10 +247,21 @@ void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment)
     throw std::runtime_error("Hinted mmap kept racing with other mappings");
 }
 #elif defined(__APPLE__)
+// macOS arm64 refuses executable host pages outside MAP_JIT regions (KERN_PROTECTION_FAILURE); guest code there is
+// translated, so a mapping that asked for them is made without.
+kern_return_t MachMap(mach_vm_address_t* address, size_t len, mach_vm_offset_t mask, int flags, int prot) {
+    auto result = mach_vm_map(mach_task_self(), address, len, mask, flags, MEMORY_OBJECT_NULL, 0, FALSE, prot, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+#ifdef __aarch64__
+    if (result == KERN_PROTECTION_FAILURE && (prot & PROT_EXEC) != 0)
+        result = mach_vm_map(mach_task_self(), address, len, mask, flags, MEMORY_OBJECT_NULL, 0, FALSE, prot & ~PROT_EXEC, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+#endif
+    return result;
+}
+
 // The kernel searches for an anywhere allocation from the address passed in, and the mask aligns it.
 void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment) {
     auto address = static_cast<mach_vm_address_t>(start);
-    const auto result = mach_vm_map(mach_task_self(), &address, len, alignment - 1, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE, prot, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+    const auto result = MachMap(&address, len, alignment - 1, VM_FLAGS_ANYWHERE, prot);
     if (result != KERN_SUCCESS) throw std::runtime_error(std::string("Hinted mach_vm_map failed: ") + mach_error_string(result));
     if (address < start) {
         mach_vm_deallocate(mach_task_self(), address, len);
@@ -262,7 +273,7 @@ void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment)
 // MAP_FIXED_NOREPLACE: a fixed mach_vm_map without VM_FLAGS_OVERWRITE refuses an occupied range.
 void* MapFixedNoReplace(void* addr, size_t len, int prot) {
     auto address = reinterpret_cast<mach_vm_address_t>(addr);
-    const auto result = mach_vm_map(mach_task_self(), &address, len, 0, VM_FLAGS_FIXED, MEMORY_OBJECT_NULL, 0, FALSE, prot, VM_PROT_ALL, VM_INHERIT_DEFAULT);
+    const auto result = MachMap(&address, len, 0, VM_FLAGS_FIXED, prot);
     if (result == KERN_NO_SPACE) {
         errno = EEXIST;
         return MAP_FAILED;
