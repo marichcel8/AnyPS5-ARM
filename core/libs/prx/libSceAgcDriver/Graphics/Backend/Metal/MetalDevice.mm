@@ -2,6 +2,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Execution/include/DisplayFormat.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Pm4.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/Device.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/GuestRegistry.hpp"
 #include "prx/libSceAgcDriver/Graphics/Metal/MetalCompiler.hpp"
@@ -806,6 +807,9 @@ struct VulkanDevice::State {
     std::vector<HostImport> imports;
     std::vector<Metal::NativeBuffer> staged;
     std::vector<WriteBack> writeBacks;
+    bool gdsStageOpen = false;
+    bool gdsInFlight = false;
+    Metal::NativeBuffer gdsStage;
     std::map<std::uint64_t, Completion> completions;
     std::shared_ptr<Waker> waker;
     std::thread completer;
@@ -1210,6 +1214,7 @@ struct VulkanDevice::State {
             completion.submitted = std::chrono::steady_clock::now();
             ++flushes;
             completion.writeBacks = std::move(writeBacks);
+            gdsStageOpen = false;
             completion.staged = std::move(staged);
             writeBacks.clear();
             staged.clear();
@@ -2008,6 +2013,27 @@ struct VulkanDevice::State {
                 map[TableAbi::HeaderElementBase] = 0;
                 break;
             }
+            case ShaderRecompiler::DescriptorRole::Gds:
+                if (binding.count != 1 || !binding.guestDescriptor.empty()) throw std::runtime_error("AGC graphics: invalid GDS descriptor contract");
+                if (!gdsStageOpen) {
+                    if (gdsInFlight) {
+                        drain(lastSerial);
+                        gdsInFlight = false;
+                    }
+                    gdsStage = device->NewSharedBuffer(Pm4::GdsBytes, "AnyPS5 GDS");
+                    if (!gdsStage) throw std::runtime_error("AGC graphics: Metal GDS buffer could not be allocated");
+                    std::memcpy(gdsStage.contents, reinterpret_cast<const void*>(Pm4::GdsAddress()), Pm4::GdsBytes);
+                    staged.push_back(gdsStage);
+                    writeBacks.push_back({reinterpret_cast<void*>(Pm4::GdsAddress()), gdsStage.contents, Pm4::GdsBytes});
+                    noteWrite(Pm4::GdsAddress(), Pm4::GdsBytes);
+                    gdsStageOpen = true;
+                    gdsInFlight = true;
+                }
+                resolvedBy = "staged";
+                slots[SlotIndex(BufferSlot::Gds)] = gdsStage.gpuAddress;
+                if (Trace()) std::fprintf(stderr, "[metal] gds 0x%llx+0x%zx through %s -> 0x%llx\n", static_cast<unsigned long long>(Pm4::GdsAddress()), Pm4::GdsBytes, resolvedBy, static_cast<unsigned long long>(slots[SlotIndex(BufferSlot::Gds)]));
+                bindLap(1);
+                break;
             case ShaderRecompiler::DescriptorRole::BdaPagetable:
                 break;
             case ShaderRecompiler::DescriptorRole::FaultBuffer:

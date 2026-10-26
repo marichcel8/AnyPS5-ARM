@@ -226,7 +226,7 @@ bool EmitReadFirstLane(State& state, const IrValue& inst) {
 }
 
 bool IsCrossLane(IrOpcode opcode) {
-    return opcode == IrOpcode::Ballot || opcode == IrOpcode::ReadLane || opcode == IrOpcode::ReadFirstLane;
+    return opcode == IrOpcode::Ballot || opcode == IrOpcode::ReadLane || opcode == IrOpcode::ReadFirstLane || IsAppendConsume(opcode);
 }
 
 std::string HalfArg(State& state, const IrValue& inst, std::size_t index, std::uint32_t half) {
@@ -257,6 +257,12 @@ bool EmitWave(State& state, const IrValue& inst) {
         return true;
     case IrOpcode::WriteLane:
         Define(state, inst, "(" + Arg(state, inst, 1) + " & " + U32(state.lanes == 2u ? 63u : 31u) + ") == " + WaveLane(state) + " ? " + Arg(state, inst, 0) + " : " + Arg(state, inst, 2));
+        return true;
+    case IrOpcode::DataAppend:
+    case IrOpcode::DataConsume:
+    case IrOpcode::DataOrderedCount:
+    case IrOpcode::DataOrderedSwap:
+        EmitAppendConsume(state, inst);
         return true;
     case IrOpcode::Ballot: return EmitBallot(state, inst);
     case IrOpcode::ReadLane: return EmitReadLane(state, inst);

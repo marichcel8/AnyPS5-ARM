@@ -42,7 +42,8 @@ enum Feature : std::uint32_t {
     Dot2 = 1u << 26u,
     Atomic64 = 1u << 27u,
     UpdateTable = 1u << 28u,
-    Tables = 1u << 29u
+    Tables = 1u << 29u,
+    Gds = 1u << 30u
 };
 
 enum : std::uint8_t {
@@ -110,6 +111,8 @@ bool EmitAlu(State& state, const IrValue& inst);
 bool EmitMemory(State& state, const IrValue& inst);
 bool EmitWave(State& state, const IrValue& inst);
 bool IsCrossLane(IrOpcode opcode);
+bool IsAppendConsume(IrOpcode opcode);
+void EmitAppendConsume(State& state, const IrValue& inst);
 std::string WaveLane(State& state);
 std::string WaveAny(State& state, const std::string& zero, const std::string& one);
 std::string HalfArg(State& state, const IrValue& inst, std::size_t index, std::uint32_t half);

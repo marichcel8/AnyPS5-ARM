@@ -257,6 +257,7 @@ std::string Parameters(const State& state) {
     if (has(PushData)) parameters.push_back("constant uint* aps5_push [[buffer(" + slot(MetalAbi::BufferSlot::PushConstants) + ")]]");
     if (has(Bda)) parameters.push_back("device const aps5_bda_header* aps5_bda_table [[buffer(" + slot(MetalAbi::BufferSlot::BdaPagetable) + ")]]");
     if (has(Fault)) parameters.push_back("device atomic_uint* aps5_fault_buffer [[buffer(" + slot(MetalAbi::BufferSlot::FaultBuffer) + ")]]");
+    if (has(Gds)) parameters.push_back("device atomic_uint* aps5_gds [[buffer(" + slot(MetalAbi::BufferSlot::Gds) + ")]]");
     if (has(FlattenedSrt)) parameters.push_back("device const uint* aps5_srt [[buffer(" + slot(MetalAbi::BufferSlot::FlattenedSrt) + ")]]");
     if (has(GuestBuffers)) parameters.push_back("device const aps5_guest_buffer* aps5_buffers [[buffer(" + slot(MetalAbi::BufferSlot::GuestBuffers) + ")]]");
     if (has(Images)) parameters.push_back("device const ulong* aps5_images [[buffer(" + slot(MetalAbi::BufferSlot::GuestImages) + ")]]");
