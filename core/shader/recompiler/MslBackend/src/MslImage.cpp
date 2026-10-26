@@ -1130,6 +1130,24 @@ bool EmitImage(State& state, const IrValue& inst) {
         if (mode.packedFormat == IrBufferFormat::Fmask8_S2_F1) throw MslUnsupported("MSL backend: " + std::string(name) + " reads FMASK, which is not emitted");
         if (mode.srgbDecode) throw MslUnsupported("MSL backend: " + std::string(name) + " decodes an sRGB image in the shader, which is not emitted");
         if (mode.table != NoTable && ShapeOf(mode.dimension).multisampled) throw MslUnsupported("MSL backend: " + std::string(name) + " reads a multisampled image through an image table, which is not emitted");
+        if (mode.constantSwizzle) {
+            if (opcode != IrOpcode::ImageSampleRaw && opcode != IrOpcode::ImageGatherRaw) throw MslUnsupported("MSL backend: " + std::string(name) + " reads an image with a constant channel swizzle, which is not emitted");
+            const bool isFloat = mode.numericClass == IrTextureNumericClass::Float;
+            const bool isSint = mode.numericClass == IrTextureNumericClass::Sint;
+            const bool gather = opcode == IrOpcode::ImageGatherRaw;
+            const auto gatherDmask = EffectiveDmask(mem);
+            if (gather && gatherDmask != 1u && gatherDmask != 2u && gatherDmask != 4u && gatherDmask != 8u) Fail(inst, "gathers a dmask that selects several components");
+            std::string channels;
+            for (std::uint32_t channel = 0; channel < 4u; ++channel) {
+                const auto source = gather ? DmaskComponent(inst, gatherDmask, 0u) : channel;
+                const auto selector = Constant(state, PipelineSpecialization::ImageBase + mem.resource * PipelineSpecialization::ImageWords + 1u + source, source + 4u);
+                channels += std::string(channel ? ", " : "") + "(" + selector + " == 1u ? " + (isFloat ? "1.0f" : isSint ? "1" : "1u") + " : " + (isFloat ? "0.0f" : isSint ? "0" : "0u") + ")";
+            }
+            const std::string vector = std::string(isFloat ? "float4(" : isSint ? "int4(" : "uint4(") + channels + ")";
+            Access constantAccess{state, inst, mem, mode, *address, 0u, nullptr};
+            Line(state, result + " = " + ResultVector(constantAccess, vector, mode.numericClass, false, gather) + ";");
+            return;
+        }
         const auto kind = DescriptorBindingForImage(mode);
         const auto element = mode.table != NoTable ? 0u : ElementOf(state, kind, mem.resource);
         const auto sampled = [&](Access& access, const std::string& texture) {
