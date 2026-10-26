@@ -1392,6 +1392,7 @@ struct VulkanDevice::State {
         descriptor.label = @"AnyPS5 guest sampler";
         id<MTLSamplerState> state = [native newSamplerStateWithDescriptor:descriptor];
         if (state == nil) throw std::runtime_error("AGC graphics: Metal sampler state could not be created");
+        if (Trace()) std::fprintf(stderr, "[metal] sampler state: min %d mag %d mip %d point %d unnormalized %d aniso %d lod %.2f..%.2f\n", static_cast<int>(descriptor.minFilter), static_cast<int>(descriptor.magFilter), static_cast<int>(descriptor.mipFilter), point ? 1 : 0, unnormalized ? 1 : 0, static_cast<int>(descriptor.maxAnisotropy), descriptor.lodMinClamp, descriptor.lodMaxClamp);
         samplers.emplace(key, state);
         return state.gpuResourceID._impl;
     }
