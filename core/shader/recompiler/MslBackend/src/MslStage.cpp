@@ -30,6 +30,14 @@ const ShaderVertexInputInfo& VertexInfo(const State& state) {
     return *state.input.vertex;
 }
 
+float PointSizeFloor(const ShaderVertexInputInfo& vertex) {
+    return std::max(vertex.pointSizeMin, std::numeric_limits<float>::min());
+}
+
+std::string FloatBits(float value) {
+    return "as_type<float>(" + std::to_string(std::bit_cast<std::uint32_t>(value)) + "u)";
+}
+
 std::string Swizzle(std::uint32_t component) {
     static constexpr std::string_view Names[4] = {"x", "y", "z", "w"};
     if (component >= 4u) Fail("component index is out of range");
@@ -257,7 +265,9 @@ void AuxPosition(State& state, const std::string& data, const ExportInfo& exp) {
         if (output.viewport) Line(state, "aps5_out.viewport = extract_bits(" + raw + ", 16u, 4u);");
         if (output.layer || output.viewport) continue;
         if (output.pointSize) {
-            Line(state, "aps5_out.point_size = as_type<float>(" + raw + ");");
+            const auto size = "as_type<float>(" + raw + ")";
+            if (vertex.pointList) Line(state, "aps5_out.point_size = clamp(" + size + ", " + FloatBits(PointSizeFloor(vertex)) + ", " + FloatBits(vertex.pointSizeMax) + ");");
+            else Line(state, "aps5_out.point_size = " + size + ";");
             continue;
         }
         if (output.cullDistance != NoDistance) throw MslUnsupported("MSL backend: cull distances have no Metal equivalent (section S7)");
@@ -344,6 +354,7 @@ void DeclareVertexOutputs(State& state) {
         default: Fail("a vertex program declares a pixel output");
         }
     }
+    if (state.input.vertex != nullptr && state.input.vertex->pointList) Output(state, "point_size", "float point_size [[point_size]]");
     Output(state, "position", "float4 position [[position]]");
     if (position) {
         state.zeroClip = clips;
@@ -496,6 +507,12 @@ std::string StageHeader(const State& state, const std::string& parameters) {
     text += std::string(pixel ? "fragment" : "vertex") + " aps5_stage_out " + std::string(MslEntryPoint) + "(" + all + ")\n{\n";
     text += "    aps5_stage_out aps5_out = {};\n";
     if (state.stageOutputs.contains("mask")) text += "    aps5_out.mask = 0xffffffffu;\n";
+    if (state.stageOutputs.contains("point_size") && state.input.vertex != nullptr && state.input.vertex->pointList) {
+        const auto& vertex = *state.input.vertex;
+        const bool fromVertex = (vertex.paClVsOutCntl & (1u << 16u)) != 0u;
+        const auto size = fromVertex ? std::clamp(vertex.pointSize, PointSizeFloor(vertex), vertex.pointSizeMax) : vertex.pointSize;
+        text += "    aps5_out.point_size = " + FloatBits(size) + ";\n";
+    }
     if (state.validMask) text += "    bool aps5_valid = true;\n";
     return text;
 }
