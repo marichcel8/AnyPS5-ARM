@@ -870,9 +870,33 @@ struct VulkanDevice::State {
         return &imports.back();
     }
 
+    // Per path (snapshot, window, import, staged) call count and time, for APS5_METAL_CPU_PROFILE; the settle step is counted separately.
+    std::array<std::uint64_t, 4> resolveNs{};
+    std::array<std::uint64_t, 4> resolveCalls{};
+    std::uint64_t settleNs = 0;
+
     std::uint64_t resolve(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots, const CachedSurface* self = nullptr, bool settle = true) {
+        if (!cpuProfileEnabled()) return resolveRange(address, bytes, writable, snapshots, self, settle);
+        const auto begin = std::chrono::steady_clock::now();
+        resolvedBy = "";
+        const auto result = resolveRange(address, bytes, writable, snapshots, self, settle);
+        const auto ns = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count());
+        const std::string_view path = resolvedBy;
+        const std::size_t index = path == "snapshot" ? 0u : path == "window" ? 1u : path == "import" ? 2u : 3u;
+        if (!path.empty()) {
+            resolveNs[index] += ns;
+            ++resolveCalls[index];
+        }
+        return result;
+    }
+
+    std::uint64_t resolveRange(std::uint64_t address, std::uint64_t bytes, bool writable, std::span<const Graphics::GuestMemorySnapshot> snapshots, const CachedSurface* self, bool settle) {
         if (address == 0 || bytes == 0) return 0;
-        if (settle) writebackOverlapping(address, bytes, self);
+        if (settle) {
+            const auto settleAt = cpuProfileEnabled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+            writebackOverlapping(address, bytes, self);
+            if (cpuProfileEnabled()) settleNs += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - settleAt).count());
+        }
         if (!writable) {
             for (const auto& snapshot : snapshots) {
                 if (address >= snapshot.address && bytes <= snapshot.bytes.size() && address - snapshot.address <= snapshot.bytes.size() - bytes) {
@@ -1471,6 +1495,12 @@ struct VulkanDevice::State {
             std::fprintf(stderr, "[metal] cpu per draw over %llu draws: lock wait %.2f us, pipeline %.2f us, stage binding %.2f us, surfaces %.2f us, uploads+pass %.2f us, encode %.2f us, bookkeeping %.2f us\n", static_cast<unsigned long long>(drawPhaseDraws), per(0), per(1), per(2), per(3), per(4), per(5), per(6));
             const auto bind = [&](std::size_t phase) { return static_cast<double>(bindPhaseNs[phase]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
             std::fprintf(stderr, "[metal] cpu per draw inside stage binding: prelude %.2f us, image decode+loop %.2f us, plus surfaceFor %.2f us, resolve %.2f us, view %.2f us, buffers %.2f us, samplers %.2f us, tables %.2f us, epilogue+bda %.2f us\n", bind(0), bind(2) + bind(6), bind(7), bind(8), bind(9), bind(1), bind(3), bind(4), bind(5));
+            const auto path = [&](std::size_t index) { return static_cast<double>(resolveNs[index]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
+            const auto calls = [&](std::size_t index) { return static_cast<double>(resolveCalls[index]) / static_cast<double>(drawPhaseDraws); };
+            std::fprintf(stderr, "[metal] resolve per draw: snapshot %.2f us (%.2f calls), window %.2f us (%.2f calls), import %.2f us (%.2f calls), staged %.2f us (%.2f calls), settle %.2f us\n", path(0), calls(0), path(1), calls(1), path(2), calls(2), path(3), calls(3), static_cast<double>(settleNs) / static_cast<double>(drawPhaseDraws) / 1000.0);
+            resolveNs = {};
+            resolveCalls = {};
+            settleNs = 0;
             drawPhaseNs = {};
             bindPhaseNs = {};
             drawPhaseDraws = 0;
