@@ -1304,6 +1304,7 @@ struct VulkanDevice::State {
         }
         if (!written && descriptorSwizzle) view.swizzle = Metal::ViewSwizzle(resource.format, {resource.dstSelX, resource.dstSelY, resource.dstSelZ, resource.dstSelW});
         else if (!written) view.swizzle = Metal::ViewSwizzle(resource.format, {4, 5, 6, 7});
+        if (Trace()) std::fprintf(stderr, "[metal] image view: format %u surface pixel %u view pixel %u numeric %d kind %u slices %u\n", static_cast<unsigned>(resource.format), static_cast<unsigned>(surface.texture.pixelFormat), static_cast<unsigned>(view.pixelFormat), numeric ? static_cast<int>(*numeric) : -1, static_cast<unsigned>(view.kind), view.sliceCount);
         return viewOf(surface, view).resourceId;
     }
 
@@ -1440,7 +1441,9 @@ struct VulkanDevice::State {
             case ShaderRecompiler::DescriptorRole::GuestImages: {
                 if (binding.guestDescriptor.size() != static_cast<std::size_t>(binding.count) * 8u) throw std::runtime_error("AGC graphics: guest image descriptor must contain eight DWORDs per element");
                 for (std::uint32_t element = 0; element < binding.count; ++element) {
-                    imageEntries.emplace_back(ShaderRecompiler::MetalAbi::GuestImageIndex(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), element), image(binding, element, snapshots, uses));
+                    const auto index = ShaderRecompiler::MetalAbi::GuestImageIndex(binding.binding % static_cast<std::uint32_t>(ShaderRecompiler::RuntimeAbi::Binding::Count), element);
+                    if (Trace()) std::fprintf(stderr, "[metal] image binding %u element %u -> table index 0x%x\n", binding.binding, element, index);
+                    imageEntries.emplace_back(index, image(binding, element, snapshots, uses));
                 }
                 break;
             }
