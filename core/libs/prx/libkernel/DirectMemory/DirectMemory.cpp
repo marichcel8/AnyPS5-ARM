@@ -247,8 +247,6 @@ void* MapAtOrAbove(std::uintptr_t start, size_t len, int prot, size_t alignment)
     throw std::runtime_error("Hinted mmap kept racing with other mappings");
 }
 #elif defined(__APPLE__)
-// macOS arm64 refuses executable host pages outside MAP_JIT regions (KERN_PROTECTION_FAILURE); guest code there is
-// translated, so a mapping that asked for them is made without.
 kern_return_t MachMap(mach_vm_address_t* address, size_t len, mach_vm_offset_t mask, int flags, int prot) {
     auto result = mach_vm_map(mach_task_self(), address, len, mask, flags, MEMORY_OBJECT_NULL, 0, FALSE, prot, VM_PROT_ALL, VM_INHERIT_DEFAULT);
 #ifdef __aarch64__
