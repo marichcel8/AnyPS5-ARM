@@ -349,6 +349,8 @@ bool IntegerFormat(Metal::PixelFormat format) {
 struct SamplerUse {
     std::uint32_t integer = 0;
     std::uint32_t other = 0;
+    std::uint32_t singleLevel = 0;
+    std::uint32_t mipmapped = 0;
 };
 
 SamplerUse SamplerUseOf(const ShaderRecompiler::DescriptorBinding& binding) {
@@ -365,6 +367,7 @@ SamplerUse SamplerUseOf(const ShaderRecompiler::DescriptorBinding& binding) {
         }
         if (!integer && empty) continue;
         (integer ? use.integer : use.other) |= binding.imageSamplers[element];
+        if (!empty) (Graphics::DescriptorSingleLevel(words) ? use.singleLevel : use.mipmapped) |= binding.imageSamplers[element];
     }
     return use;
 }
@@ -1403,8 +1406,8 @@ struct VulkanDevice::State {
         }
     }
 
-    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, bool point) {
-        const std::span<const std::uint32_t> words(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u);
+    std::uint64_t sampler(const ShaderRecompiler::DescriptorBinding& binding, std::uint32_t element, bool point, const std::array<std::uint32_t, 4>* override = nullptr) {
+        const std::span<const std::uint32_t> words = override != nullptr ? std::span<const std::uint32_t>(*override) : std::span<const std::uint32_t>(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u);
         const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
         const bool integerBorder = element < binding.samplerIntegerBorder.size() && binding.samplerIntegerBorder[element];
         const bool compare = element < binding.samplerDepthCompare.size() && binding.samplerDepthCompare[element];
@@ -1452,11 +1455,15 @@ struct VulkanDevice::State {
         std::vector<std::uint32_t> map;
         std::uint32_t otherSamplers = 0;
         std::uint32_t integerSamplers = 0;
+        std::uint32_t singleLevelSamplers = 0;
+        std::uint32_t mipmappedSamplers = 0;
         for (const auto& binding : shader.bindings) {
             const auto use = SamplerUseOf(binding);
             pointSamplers |= use.integer;
             integerSamplers |= use.integer;
             otherSamplers |= use.other;
+            singleLevelSamplers |= use.singleLevel;
+            mipmappedSamplers |= use.mipmapped;
         }
         pointSamplers &= ~otherSamplers;
         for (const auto& binding : shader.bindings) {
@@ -1496,7 +1503,9 @@ struct VulkanDevice::State {
                 std::vector<ShaderRecompiler::MetalAbi::ResourceIdEntry> entries(std::max<std::uint32_t>(binding.count, 1u), {0});
                 for (std::uint32_t element = 0; element < binding.count; ++element) {
                     const bool point = element < 32u && ((pointSamplers >> element) & 1u) != 0u;
-                    entries[element].resourceId = sampler(binding, element, point);
+                    std::optional<std::array<std::uint32_t, 4>> words;
+                    if (element < 32u) words = Graphics::SingleLevelSamplerWords(std::span<const std::uint32_t, 4>(binding.guestDescriptor.data() + static_cast<std::size_t>(element) * 4u, 4u), ((singleLevelSamplers >> element) & 1u) != 0u, ((mipmappedSamplers >> element) & 1u) != 0u);
+                    entries[element].resourceId = sampler(binding, element, point, words ? &*words : nullptr);
                     if (Trace()) std::fprintf(stderr, "[metal] sampler %u.%u: point %u, words %08x %08x %08x %08x, integer mask %x, other mask %x\n", binding.binding, element, point ? 1u : 0u, binding.guestDescriptor[element * 4u], binding.guestDescriptor[element * 4u + 1u], binding.guestDescriptor[element * 4u + 2u], binding.guestDescriptor[element * 4u + 3u], integerSamplers, otherSamplers);
                 }
                 slots[SlotIndex(BufferSlot::GuestSamplers)] = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
