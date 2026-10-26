@@ -24,6 +24,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -203,8 +204,11 @@ struct Server {
         mbedtls_net_init(&client);
         mbedtls_ssl_context ssl;
         mbedtls_ssl_init(&ssl);
-        if (mbedtls_net_accept(&listener, &client, nullptr, 0, nullptr) != 0 || mbedtls_ssl_setup(&ssl, &config) != 0) {
-            failure = "server accept or setup failed";
+        const int accepted = mbedtls_net_accept(&listener, &client, nullptr, 0, nullptr);
+        const int acceptErrno = errno;
+        const int setup = accepted == 0 ? mbedtls_ssl_setup(&ssl, &config) : 0;
+        if (accepted != 0 || setup != 0) {
+            failure = "server accept or setup failed, accept -" + std::to_string(-accepted) + " errno " + std::to_string(acceptErrno) + ", setup -" + std::to_string(-setup);
         } else if (mode == Serve::Alert) {
             Alert(client);
         } else {
