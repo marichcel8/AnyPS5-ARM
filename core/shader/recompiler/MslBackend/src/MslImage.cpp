@@ -435,7 +435,7 @@ std::string ResultVector(Access& access, const std::string& value, IrTextureNume
                 packed[word] = "((" + Bits(low, valueClass) + " & 0xffffu) | ((" + Bits(high, valueClass) + " & 0xffffu) << 16u))";
             } else {
                 state.features |= Half;
-                packed[word] = "(aps5_f32_to_f16(" + low + ") | (aps5_f32_to_f16(" + high + ") << 16u))";
+                packed[word] = "(aps5_f32_to_f16(as_type<uint>(" + low + ")) | (aps5_f32_to_f16(as_type<uint>(" + high + ")) << 16u))";
             }
         }
         return "uint4(" + packed[0] + ", " + packed[1] + ", " + packed[2] + ", " + packed[3] + ")";
@@ -853,7 +853,7 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     const bool gather = access.inst.Opcode() == IrOpcode::ImageGatherRaw;
     if (shape.multisampled) throw MslUnsupported("MSL backend: multisampled images cannot be sampled");
     const auto conversion = ConversionFormat(image);
-    if (conversion.format != IrBufferFormat::Invalid && !gather) throw MslUnsupported("MSL backend: sampling a converted image needs filtering in the shader and is not emitted");
+    if (conversion.format != IrBufferFormat::Invalid && !gather && NormalizedConversion(conversion)) throw MslUnsupported("MSL backend: sampling a converted unorm or float image needs filtering in the shader and is not emitted");
     const auto layout = LayoutOf(mem);
     const bool dref = HasFlag(mem, RdnaImageSampleFlagCompare);
     if (dref && (image.emulatedCompare & EmulatedCompare::Enabled) != 0u) throw MslUnsupported("MSL backend: depth comparison of a color texture is emulated in the shader and is not emitted");
@@ -932,6 +932,7 @@ void EmitSampling(Access& access, const SamplerParts& parts, const std::string& 
     const auto assign = [&](const std::string& sampled) {
         const auto expression = (state.target.experiment & MslExperimentNoSample) != 0u && !gather ? std::string("float4(0.5f)") : sampled;
         if (gather && conversion.format != IrBufferFormat::Invalid) Line(state, result + " = " + ResultVector(access, UnpackGather(access, expression), IrTextureNumericClass::Uint, false, true) + ";");
+        else if (conversion.format != IrBufferFormat::Invalid) Line(state, result + " = " + ResultVector(access, UnpackTexel(access, expression), IrTextureNumericClass::Uint, false, false) + ";");
         else Line(state, result + " = " + ResultVector(access, expression, image.numericClass, dref && !gather, gather) + ";");
     };
 
