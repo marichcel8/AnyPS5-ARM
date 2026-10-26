@@ -1146,7 +1146,10 @@ struct VulkanDevice::State {
         if (!fault) return;
         auto* record = static_cast<ShaderRecompiler::BdaAbi::Fault*>(fault.contents);
         if (record->state != ShaderRecompiler::BdaAbi::FaultState::Ready) return;
-        std::fprintf(stderr, "[metal] shader fault reason %u at 0x%llx (%u bytes, stage %u, instruction %u)\n", static_cast<unsigned>(record->reason), static_cast<unsigned long long>(record->address), record->bytes, record->stage, record->instruction);
+        const auto address = static_cast<unsigned long long>(record->address);
+        if (record->reason == ShaderRecompiler::BdaAbi::FaultReason::UnlinkedCall) std::fprintf(stderr, "[metal] shader stage %u called address 0x%llx at program counter 0x%x, which no linked callee of that call matches\n", record->stage, address, static_cast<unsigned>(record->instruction));
+        else if (record->reason == ShaderRecompiler::BdaAbi::FaultReason::WindowLaneSpill) std::fprintf(stderr, "[metal] shader stage %u: a relative write stored %u in lane %llu of vector window slot %llu, which holds a scalar spilled with v_writelane_b32 that a later v_readlane_b32 was replaced with\n", record->stage, record->bytes, address >> 32u, address & 0xffffffffu);
+        else std::fprintf(stderr, "[metal] BDA access failed: address=0x%llx instruction=0x%x bytes=%u stage=%u reason=%u\n", address, static_cast<unsigned>(record->instruction), record->bytes, record->stage, static_cast<unsigned>(record->reason));
         std::memset(fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
     }
 
