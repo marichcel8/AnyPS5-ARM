@@ -488,6 +488,10 @@ std::string ResultVector(Access& access, const std::string& value, IrTextureNume
         } else {
             components[index] = Bits(scalar(index), valueClass);
         }
+        if (access.image.depthBits && !dref && !gather) {
+            const auto selector = RegisterSelector(access, index);
+            components[index] = "(" + selector + " == 4u ? " + components[index] + " : ((" + selector + " == 1u || " + selector + " == 7u) ? 1u : 0u))";
+        }
     }
     return "uint4(" + components[0] + ", " + components[1] + ", " + components[2] + ", " + components[3] + ")";
 }
@@ -1178,7 +1182,7 @@ bool EmitImage(State& state, const IrValue& inst) {
         body(access, texture);
     };
     const auto emitBody = [&](const ImageResource& mode) {
-        if (mode.depthBits) throw MslUnsupported("MSL backend: " + std::string(name) + " reads the bits of a depth plane, which is not emitted");
+        if (mode.depthBits && mem.dataBits == 16u) throw MslUnsupported("MSL backend: " + std::string(name) + " reads depth bits as 16-bit results, which is not emitted");
         if (mode.packedFormat == IrBufferFormat::Fmask8_S2_F1) throw MslUnsupported("MSL backend: " + std::string(name) + " reads FMASK, which is not emitted");
         if (mode.srgbDecode) throw MslUnsupported("MSL backend: " + std::string(name) + " decodes an sRGB image in the shader, which is not emitted");
         if (mode.table != NoTable && ShapeOf(mode.dimension).multisampled) throw MslUnsupported("MSL backend: " + std::string(name) + " reads a multisampled image through an image table, which is not emitted");
