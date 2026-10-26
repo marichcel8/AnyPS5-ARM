@@ -245,6 +245,9 @@ static std::int32_t SpawnChild(const char* role) {
     std::error_code error;
     std::filesystem::copy_file(own, target, std::filesystem::copy_options::overwrite_existing, error);
     Check(!error);
+#ifdef __APPLE__
+    Check(std::system(("codesign --force --sign - '" + target.string() + "' >/dev/null 2>&1").c_str()) == 0);
+#endif
     const auto app0 = std::filesystem::current_path() / "app0";
     Check(std::filesystem::create_directories(app0) || std::filesystem::exists(app0));
     { std::ofstream file(app0 / "child.bin"); file << "child"; }
@@ -288,6 +291,8 @@ static void CheckSpawnedChild(const char* role, int expectedCode) {
     if (std::strcmp(role, "child-sleep") == 0)
         Check(waitpid_nid_postfix(processId, &status, 1) == 0);
     Check(waitpid_nid_postfix(processId, &status, 0) == processId);
+    if ((status & 0x7f) != 0 || ((status >> 8) & 0xff) != expectedCode)
+        std::fprintf(stderr, "posix_spawn child %s: status 0x%x, expected exit code %d\n", role, static_cast<unsigned>(status), expectedCode);
     Check((status & 0x7f) == 0 && ((status >> 8) & 0xff) == expectedCode);
     status = -1;
     Check(waitpid_nid_postfix(processId, &status, 0) == -1 && *__error_nid_postfix() == 10);

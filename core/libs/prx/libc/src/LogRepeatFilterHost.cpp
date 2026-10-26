@@ -44,12 +44,20 @@ struct Hook {
     int standard = 0;
 };
 
-std::mutex g_hookMutex;
-std::array<Hook, 4> g_hooks{};
+struct HookTable {
+    std::mutex mutex;
+    std::array<Hook, 4> hooks{};
+};
+
+HookTable& Hooks() {
+    static auto* table = new HookTable();
+    return *table;
+}
 
 Hook FindHook(void* cookie) {
-    const std::lock_guard lock(g_hookMutex);
-    for (const auto& hook : g_hooks)
+    auto& table = Hooks();
+    const std::lock_guard lock(table.mutex);
+    for (const auto& hook : table.hooks)
         if (hook.file == cookie) return hook;
     return {};
 }
@@ -99,8 +107,9 @@ void LogRepeatFilterWrite_nid_no_patch(int standard, int descriptor, const void*
 void LogRepeatFilterHookStream_nid_no_patch(std::FILE* file, int standard) {
 #ifdef __APPLE__
     if (file == nullptr || file->_cookie != file || file->_write == nullptr || file->_write == FilteredStreamWrite) return;
-    const std::lock_guard lock(g_hookMutex);
-    for (auto& hook : g_hooks) {
+    auto& table = Hooks();
+    const std::lock_guard lock(table.mutex);
+    for (auto& hook : table.hooks) {
         if (hook.file != nullptr) continue;
         hook = {file, file->_write, standard};
         file->_write = FilteredStreamWrite;
@@ -114,8 +123,9 @@ void LogRepeatFilterHookStream_nid_no_patch(std::FILE* file, int standard) {
 
 void LogRepeatFilterUnhookStream_nid_no_patch(std::FILE* file) {
 #ifdef __APPLE__
-    const std::lock_guard lock(g_hookMutex);
-    for (auto& hook : g_hooks) {
+    auto& table = Hooks();
+    const std::lock_guard lock(table.mutex);
+    for (auto& hook : table.hooks) {
         if (hook.file != file) continue;
         if (file->_write == FilteredStreamWrite) file->_write = hook.original;
         hook = {};

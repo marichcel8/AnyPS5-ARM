@@ -262,6 +262,7 @@ function(add_shader_recompiler target runtimeTarget)
             BuildRectListShaders
             CaptureResources
             DebugProbeActive
+            DefaultShaderBackend
             DepthBitsTextureWidth
             EmulatedMeshSlots
             HashBytes
