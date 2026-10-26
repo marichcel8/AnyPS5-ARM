@@ -807,6 +807,7 @@ struct VulkanDevice::State {
     std::array<id<MTLTexture>, 4> nullTextures{};
     std::vector<CachedSurface*> dirtySurfaces;
     std::vector<DepthSurface*> dirtyDepths;
+    std::vector<std::pair<const float*, std::size_t>> depthProbes;
     std::map<DepthKey, DepthSurface> depthSurfaces;
     std::unique_ptr<Metal::PipelineCache> renderPipelines;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> stageSources;
@@ -1115,7 +1116,8 @@ struct VulkanDevice::State {
             const auto scratch = upload(bytes);
             [compute copyFromTexture:surface->texture sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(width, height, 1) toBuffer:(__bridge id<MTLBuffer>)scratch.buffer destinationOffset:scratch.offset destinationBytesPerRow:pitch destinationBytesPerImage:bytes];
             [compute barrierAfterEncoderStages:MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
-            if (Trace()) std::fprintf(stderr, "[metal] depth export: guest %016llx device %016llx, %ux%u, tile %u, format %u, bytes %llu\n", static_cast<unsigned long long>(surface->guestAddress), static_cast<unsigned long long>(surface->address), width, height, static_cast<unsigned>(surface->resource.tileMode), surface->resource.format, static_cast<unsigned long long>(surface->guestBytes));
+            if (Trace()) depthProbes.emplace_back(reinterpret_cast<const float*>(scratch.data), static_cast<std::size_t>(bytes / 4u));
+            if (Trace()) std::fprintf(stderr, "[metal] depth export: texture %p guest %016llx device %016llx, %ux%u, tile %u, format %u, bytes %llu\n", (__bridge void*)surface->texture, static_cast<unsigned long long>(surface->guestAddress), static_cast<unsigned long long>(surface->address), width, height, static_cast<unsigned>(surface->resource.tileMode), surface->resource.format, static_cast<unsigned long long>(surface->guestBytes));
             textures->EncodeLinearToTiled((__bridge void*)compute, surface->resource, surface->address, scratch.gpuAddress, pitch);
             [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
             cbMovedBytes += surface->guestBytes;
@@ -2106,7 +2108,7 @@ struct VulkanDevice::State {
     }
 
     void markDepthDirty(DepthSurface& depth, const Graphics::DepthTarget& target) {
-        if (Trace()) std::fprintf(stderr, "[metal] depth mark: address %016llx, %ux%u, format %lu, samples %u\n", static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
+        if (Trace()) std::fprintf(stderr, "[metal] depth mark: texture %p address %016llx, %ux%u, format %lu, samples %u\n", (__bridge void*)depth.texture, static_cast<unsigned long long>(target.address), target.extent.width, target.extent.height, static_cast<unsigned long>(depth.texture.pixelFormat), target.samples);
         if (depth.texture.pixelFormat != MTLPixelFormatDepth32Float || target.address == 0) return;
         try {
             const auto resource = Graphics::DecodeTextureResource(Graphics::DepthCopySourceWords(target));
@@ -2562,6 +2564,12 @@ auto VulkanDevice::WaitIdle() -> void {
     s.writebackDepths();
     s.flush();
     s.drain(s.lastSerial);
+    for (const auto& [data, count] : s.depthProbes) {
+        std::size_t nonzero = 0;
+        for (std::size_t index = 0; index < count; ++index) nonzero += data[index] != 0.0f;
+        std::fprintf(stderr, "[metal] depth export readback: first %f, %zu of %zu nonzero\n", data[0], nonzero, count);
+    }
+    s.depthProbes.clear();
 }
 
 auto VulkanDevice::PrepareForReplacement() -> void { WaitIdle(); }
