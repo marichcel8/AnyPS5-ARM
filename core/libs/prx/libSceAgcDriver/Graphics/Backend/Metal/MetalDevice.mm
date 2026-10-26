@@ -2197,6 +2197,7 @@ struct VulkanDevice::State {
 
     void importDepth(DepthSurface& depth, const Graphics::DepthTarget& target) {
         if (depth.dirty || (!depth.initialized && (depth.clearRequested || target.htileAddress != 0u))) return;
+        if (depth.initialized && depth.hasStencilPlane && !depth.stencilInitialized) return;
         const auto plane = depthPlane(depth, target);
         if (!plane) return;
         if (GuestMemory::Watched(target.address, plane->bytes)) {
