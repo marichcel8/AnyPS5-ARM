@@ -114,6 +114,11 @@ bool GpuScanout(const DisplayBuffer& buffer) {
     return !disabled && buffer.dccAddress == 0 && !DisplayHalfFloat(buffer.pixelFormat) && !DisplayPq(buffer.pixelFormat) && DisplayTexelBytes(buffer.pixelFormat) == 4u && buffer.tilingMode <= 1u;
 }
 
+bool cpuProfileEnabled() {
+    static const bool enabled = std::getenv("APS5_METAL_CPU_PROFILE") != nullptr;
+    return enabled;
+}
+
 bool gpuTimeEnabled() {
     static const bool enabled = std::getenv("APS5_METAL_GPU_TIME") != nullptr;
     return enabled;
@@ -663,6 +668,10 @@ struct VulkanDevice::State {
     std::uint32_t cbUploads = 0;
     std::uint64_t cbMovedBytes = 0;
     std::string cbLastDraw;
+    // Driver-thread time per draw phase (APS5_METAL_CPU_PROFILE): lock wait, pipeline lookup, stage binding, surface lookup, uploads and pass open, encoding, bookkeeping.
+    static constexpr std::size_t DrawPhases = 7;
+    std::array<std::uint64_t, DrawPhases> drawPhaseNs{};
+    std::uint64_t drawPhaseDraws = 0;
     std::uint64_t lastSerial = 0;
     const char* resolvedBy = "";
     std::vector<PendingWrite> pendingWrites;
@@ -1435,6 +1444,12 @@ struct VulkanDevice::State {
             NSProcessInfo* process = [NSProcessInfo processInfo];
             std::fprintf(stderr, "[metal] device state: thermal %ld, low power mode %d, allocated %.0f MB of %.0f MB recommended\n", static_cast<long>(process.thermalState), process.lowPowerModeEnabled ? 1 : 0, static_cast<double>(native.currentAllocatedSize) / 1048576.0, static_cast<double>(native.recommendedMaxWorkingSetSize) / 1048576.0);
         }
+        if (drawPhaseDraws != 0u) {
+            const auto per = [&](std::size_t phase) { return static_cast<double>(drawPhaseNs[phase]) / static_cast<double>(drawPhaseDraws) / 1000.0; };
+            std::fprintf(stderr, "[metal] cpu per draw over %llu draws: lock wait %.2f us, pipeline %.2f us, stage binding %.2f us, surfaces %.2f us, uploads+pass %.2f us, encode %.2f us, bookkeeping %.2f us\n", static_cast<unsigned long long>(drawPhaseDraws), per(0), per(1), per(2), per(3), per(4), per(5), per(6));
+            drawPhaseNs = {};
+            drawPhaseDraws = 0;
+        }
         const auto gpu = device->TakeGpuTime();
         if (gpu.enabled) std::fprintf(stderr, "[metal] gpu busy %.1f ms over %llu command buffers in %.1f s (%.1f %% of wall), longest %.2f ms (%s)\n", gpu.busyMs, static_cast<unsigned long long>(gpu.commandBuffers), seconds, seconds > 0.0 ? gpu.busyMs / (seconds * 10.0) : 0.0, gpu.maxMs, gpu.longestTag.c_str());
         flushes = 0;
@@ -1966,8 +1981,18 @@ struct VulkanDevice::State {
         if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection);
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) throw std::runtime_error("AGC graphics: multisampled Metal draws are not wired yet");
+        const bool profiling = cpuProfileEnabled();
+        auto phaseAt = profiling ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+        std::array<std::uint64_t, DrawPhases> phases{};
+        const auto lap = [&](std::size_t phase) {
+            if (!profiling) return;
+            const auto now = std::chrono::steady_clock::now();
+            phases[phase] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(now - phaseAt).count());
+            phaseAt = now;
+        };
         @autoreleasepool {
             std::lock_guard lock(mutex);
+            lap(0);
             const EncodingScope encoding;
             registry->Refresh();
             begin();
@@ -2010,12 +2035,14 @@ struct VulkanDevice::State {
                 vertexBuffers.push_back(resolved);
             }
             void* pipelineState = renderPipeline(request);
+            lap(1);
 
             std::array<std::uint64_t, ArgumentSlots> vertexSlots{};
             std::array<std::uint64_t, ArgumentSlots> fragmentSlots{};
             std::vector<ImageUse> uses;
             bindStage(*vertex->program, snapshots, vertexSlots, uses);
             if (fragment != nullptr) bindStage(*fragment->program, snapshots, fragmentSlots, uses);
+            lap(2);
 
             std::array<ColorAttachment, Metal::MaxColorAttachments> colors{};
             std::vector<std::pair<CachedSurface*, Graphics::GuestTextureResource>> targets;
@@ -2057,11 +2084,13 @@ struct VulkanDevice::State {
             }
             if (width == 0 || height == 0) return;
             key.push_back(static_cast<std::uint64_t>(width) | static_cast<std::uint64_t>(height) << 32u);
+            lap(3);
 
             if (depth != nullptr && graphics.depth && !(render != nil && key == passKey)) ScanHtile(*depth, *graphics.depth);
             const bool reuse = render != nil && key == passKey && (depth == nullptr || (depth->initialized && (!stencil || depth->stencilInitialized)));
-            std::vector<ImageUse> loads = uses;
+            std::vector<ImageUse> loads;
             if (!reuse) {
+                loads = uses;
                 for (auto& [surface, resource] : targets) {
                     if (surface->dirty) continue;
                     surface->resource = resource;
@@ -2070,13 +2099,15 @@ struct VulkanDevice::State {
                 }
             }
             if (!reuse || needsUpload(uses)) {
-                if (needsUpload(loads)) {
+                const auto& pending = reuse ? uses : loads;
+                if (needsUpload(pending)) {
                     auto compute = computeEncoder();
                     [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
-                    encodeUploads(compute, loads);
+                    encodeUploads(compute, pending);
                 }
                 openPass(colors, depth, graphics.depth ? &*graphics.depth : nullptr, stencil, width, height, std::move(key));
             }
+            lap(4);
 
             auto dynamic = translated.dynamic;
             dynamic.scissor.x = std::min(dynamic.scissor.x, passWidth);
@@ -2109,6 +2140,7 @@ struct VulkanDevice::State {
             } else {
                 [render drawPrimitives:primitive vertexStart:params.firstVertex vertexCount:params.indexCount instanceCount:params.instanceCount baseInstance:params.firstInstance];
             }
+            lap(5);
             for (auto& [surface, resource] : targets) {
                 surface->validEpoch = epoch;
                 surface->drawnFrame = scanoutFrames;
@@ -2127,6 +2159,11 @@ struct VulkanDevice::State {
                 cbLastDraw = text;
             }
             draws.fetch_add(1, std::memory_order_relaxed);
+            if (profiling) {
+                lap(6);
+                for (std::size_t phase = 0; phase < DrawPhases; ++phase) drawPhaseNs[phase] += phases[phase];
+                ++drawPhaseDraws;
+            }
         }
     }
 };
