@@ -534,6 +534,11 @@ struct VulkanDevice::State {
     std::uint64_t epoch = 1;
     std::uint32_t encodedDispatches = 0;
     std::uint64_t recordedSinceSubmit = 0;
+    std::uint32_t cbDraws = 0;
+    std::uint32_t cbPasses = 0;
+    std::uint32_t cbDispatches = 0;
+    std::uint32_t cbWritebacks = 0;
+    std::uint32_t cbScanouts = 0;
     std::uint64_t lastSerial = 0;
     const char* resolvedBy = "";
     std::vector<PendingWrite> pendingWrites;
@@ -802,6 +807,7 @@ struct VulkanDevice::State {
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         writebackSurfaces += surfaces.size();
+        cbWritebacks += static_cast<std::uint32_t>(surfaces.size());
         for (auto* surface : surfaces) {
             textures->EncodeWriteback((__bridge void*)compute, surface->texture, surface->resource, surface->address);
             surface->dirty = false;
@@ -834,6 +840,13 @@ struct VulkanDevice::State {
             endRender();
             endCompute();
             sync->EncodeLabels(open);
+            static const bool gpuTime = std::getenv("APS5_METAL_GPU_TIME") != nullptr;
+            if (gpuTime) {
+                char tag[96];
+                std::snprintf(tag, sizeof(tag), "draws %u, passes %u, dispatches %u, writebacks %u, scanouts %u", cbDraws, cbPasses, cbDispatches, cbWritebacks, cbScanouts);
+                device->TagNextSubmit(tag);
+            }
+            cbDraws = cbPasses = cbDispatches = cbWritebacks = cbScanouts = 0;
             const auto serial = sync->Submit(&open, 1);
             open = {};
             if (chunk != nullptr) sealing.push_back(chunk);
@@ -1164,6 +1177,7 @@ struct VulkanDevice::State {
         [compute setArgumentTable:scanoutTable];
         [compute dispatchThreads:MTLSizeMake(buffer.width, buffer.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
         ++encodedDispatches;
+        ++cbScanouts;
         flush(false);
         reap();
         presentAfter = lastSerial;
@@ -1191,6 +1205,7 @@ struct VulkanDevice::State {
         [compute setArgumentTable:scanoutTable];
         [compute dispatchThreads:MTLSizeMake(buffer.width, buffer.height, 1) threadsPerThreadgroup:MTLSizeMake(16, 8, 1)];
         ++encodedDispatches;
+        ++cbScanouts;
         flush();
         reap();
         presentAfter = lastSerial;
@@ -1243,7 +1258,7 @@ struct VulkanDevice::State {
         if (reportFrames != 0u) std::fprintf(stderr, "[metal] present per flip: %.2f ms Present call (paced %.2f ms, drawable wait %.2f ms), %.2f ms wait for scanout serial\n", presentMs[0] / static_cast<double>(reportFrames), presentMs[2] / static_cast<double>(reportFrames), presentMs[3] / static_cast<double>(reportFrames), presentMs[1] / static_cast<double>(reportFrames));
         std::fprintf(stderr, "[metal] flushes %llu, writeback surfaces %llu, submit-to-completion %.2f ms avg, %.2f ms max over %llu completions\n", static_cast<unsigned long long>(flushes), static_cast<unsigned long long>(writebackSurfaces), completedFlushes != 0u ? completionMsTotal / static_cast<double>(completedFlushes) : 0.0, completionMsMax, static_cast<unsigned long long>(completedFlushes));
         const auto gpu = device->TakeGpuTime();
-        if (gpu.enabled) std::fprintf(stderr, "[metal] gpu busy %.1f ms over %llu command buffers in %.1f s (%.1f %% of wall), longest %.2f ms\n", gpu.busyMs, static_cast<unsigned long long>(gpu.commandBuffers), seconds, seconds > 0.0 ? gpu.busyMs / (seconds * 10.0) : 0.0, gpu.maxMs);
+        if (gpu.enabled) std::fprintf(stderr, "[metal] gpu busy %.1f ms over %llu command buffers in %.1f s (%.1f %% of wall), longest %.2f ms (%s)\n", gpu.busyMs, static_cast<unsigned long long>(gpu.commandBuffers), seconds, seconds > 0.0 ? gpu.busyMs / (seconds * 10.0) : 0.0, gpu.maxMs, gpu.longestTag.c_str());
         flushes = 0;
         writebackSurfaces = 0;
         completedFlushes = 0;
@@ -1594,6 +1609,7 @@ struct VulkanDevice::State {
             }
             ++epoch;
             ++encodedDispatches;
+            ++cbDispatches;
             ++recordedSinceSubmit;
             dispatches.fetch_add(1, std::memory_order_relaxed);
         }
@@ -1669,6 +1685,7 @@ struct VulkanDevice::State {
         begin();
         endRender();
         endCompute();
+        ++cbPasses;
         MTL4RenderPassDescriptor* descriptor = [MTL4RenderPassDescriptor new];
         for (std::uint32_t index = 0; index < Metal::MaxColorAttachments; ++index) {
             if (colors[index].texture == nil) continue;
@@ -1900,6 +1917,7 @@ struct VulkanDevice::State {
                 dirtySurfaces.push_back(surface);
             }
             ++recordedSinceSubmit;
+            ++cbDraws;
             draws.fetch_add(1, std::memory_order_relaxed);
         }
     }

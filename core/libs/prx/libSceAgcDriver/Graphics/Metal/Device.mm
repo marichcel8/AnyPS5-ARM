@@ -12,6 +12,7 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace AgcDriver::Graphics::Metal {
@@ -62,6 +63,8 @@ struct Device::State final : WindowBackend {
     std::atomic<std::uint64_t> gpuBusyNs{0};
     std::atomic<std::uint64_t> gpuMaxNs{0};
     std::atomic<std::uint64_t> gpuBuffers{0};
+    std::mutex gpuTagMutex;
+    std::string gpuLongestTag;
     mutable std::mutex releaseMutex;
     std::deque<PendingRelease> releases;
     std::atomic<std::uint64_t> driverBytes{0};
@@ -273,13 +276,19 @@ bool GpuTimeEnabled() {
     return enabled;
 }
 
-MTL4CommitOptions* GpuTimeOptions(std::atomic<std::uint64_t>* busyNs, std::atomic<std::uint64_t>* maxNs, std::atomic<std::uint64_t>* buffers) {
+thread_local std::string submitTag;
+
+MTL4CommitOptions* GpuTimeOptions(std::atomic<std::uint64_t>* busyNs, std::atomic<std::uint64_t>* maxNs, std::atomic<std::uint64_t>* buffers, std::mutex* tagMutex, std::string* longestTag, std::string tag) {
     MTL4CommitOptions* options = [MTL4CommitOptions new];
     [options addFeedbackHandler:^(id<MTL4CommitFeedback> feedback) {
         const auto busy = static_cast<std::uint64_t>(std::max(0.0, feedback.GPUEndTime - feedback.GPUStartTime) * 1.0e9);
         busyNs->fetch_add(busy, std::memory_order_relaxed);
         buffers->fetch_add(1, std::memory_order_relaxed);
-        for (auto seen = maxNs->load(std::memory_order_relaxed); busy > seen && !maxNs->compare_exchange_weak(seen, busy, std::memory_order_relaxed);) {}
+        std::lock_guard lock(*tagMutex);
+        if (busy > maxNs->load(std::memory_order_relaxed)) {
+            maxNs->store(busy, std::memory_order_relaxed);
+            *longestTag = tag;
+        }
     }];
     return options;
 }
@@ -293,7 +302,7 @@ std::uint64_t Device::Submit(QueueKind queue, void* const* commandBuffers, std::
     std::uint64_t serial = 0;
     {
         std::lock_guard lock(s.submitMutex[index]);
-        MTL4CommitOptions* options = GpuTimeEnabled() ? GpuTimeOptions(&s.gpuBusyNs, &s.gpuMaxNs, &s.gpuBuffers) : nil;
+        MTL4CommitOptions* options = GpuTimeEnabled() ? GpuTimeOptions(&s.gpuBusyNs, &s.gpuMaxNs, &s.gpuBuffers, &s.gpuTagMutex, &s.gpuLongestTag, std::exchange(submitTag, std::string())) : nil;
         for (std::size_t first = 0; first < count; first += InlineCommits) {
             const auto chunk = std::min(InlineCommits, count - first);
             __unsafe_unretained id<MTL4CommandBuffer> list[InlineCommits];
@@ -341,7 +350,14 @@ GpuTimeReport Device::TakeGpuTime() {
     report.busyMs = static_cast<double>(s.gpuBusyNs.exchange(0, std::memory_order_relaxed)) / 1.0e6;
     report.maxMs = static_cast<double>(s.gpuMaxNs.exchange(0, std::memory_order_relaxed)) / 1.0e6;
     report.commandBuffers = s.gpuBuffers.exchange(0, std::memory_order_relaxed);
+    std::lock_guard lock(s.gpuTagMutex);
+    report.longestTag = std::move(s.gpuLongestTag);
+    s.gpuLongestTag.clear();
     return report;
+}
+
+void Device::TagNextSubmit(std::string tag) {
+    if (GpuTimeEnabled()) submitTag = std::move(tag);
 }
 
 std::uint64_t Device::SubmittedSerial(QueueKind queue) const {
