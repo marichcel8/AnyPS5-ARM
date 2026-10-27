@@ -1,7 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "Recompiler.hpp"
-#include "MslBackend/MslEmitter.hpp"
 #include "VulkanTestDevice.hpp"
 #include <algorithm>
 #include <array>
@@ -279,6 +278,10 @@ int main() {
             std::puts("skipped, the device has no VK_EXT_mesh_shader");
             return VulkanTestSkipped;
         }
+        if (ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Msl) {
+            std::puts("skipped, the MSL backend refuses wave64 mesh programs with lane operations and has no barycentric emulation");
+            return VulkanTestSkipped;
+        }
         if (device->DeviceName().starts_with("llvmpipe")) {
             std::puts("skipped, the device has no mesh shader compiler that handles these programs (llvmpipe)");
             return VulkanTestSkipped;
@@ -300,9 +303,6 @@ int main() {
         const auto vertexValues = CheckVertexValues();
         std::printf("mesh barycentric emulation tests passed: %u perspective and %u linear I/J pixels, %u raw vertex value pixels\n", smooth, noPerspective, vertexValues);
         return 0;
-    } catch (const ShaderRecompiler::MslUnsupported& error) {
-        std::printf("skipped, the MSL backend refuses the program: %s\n", error.what());
-        return VulkanTestSkipped;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
