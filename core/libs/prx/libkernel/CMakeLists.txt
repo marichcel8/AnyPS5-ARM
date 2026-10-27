@@ -90,6 +90,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
 if(APPLE)
     # The main-thread run loop the guest is started from (MainThreadMacOs.cpp).
     target_link_libraries(libkernel PRIVATE "-framework CoreFoundation")
+    target_link_options(libkernel PRIVATE LINKER:-no_deduplicate)
 endif()
 
 target_include_directories(libkernel PRIVATE ${LIBS_INCLUDE_DIR})

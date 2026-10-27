@@ -117,6 +117,9 @@ target_include_directories(libc PRIVATE
 )
 
 target_link_libraries(libc PRIVATE zarchive)
+if(APPLE)
+    target_link_options(libc PRIVATE LINKER:-no_deduplicate)
+endif()
 
 if(BUILD_TESTING)
     add_test_executable(guest_update_env_tests ${LIBS_INCLUDE_DIR}/tests/GuestUpdateEnv.cpp)
