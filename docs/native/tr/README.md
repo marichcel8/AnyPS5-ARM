@@ -69,6 +69,8 @@ python3 tools/translator/package_native_app.py \
 
 Hiçbir arm64 kütüphanenin sağlamadığı import'lar sonda listeleniyor; her biri kendi adını yazan ve çağrılırsa oyunu durduran bir stub'a bağlanıyor.
 
+Oyunun kendi prx modülleri (`sce_module`, `prx`) de çevriliyor ve orijinallerin yanına `<modül>.guest.prx` olarak yazılıyor. Oyunun sonradan başka bir klasörden yüklediği modüller (örneğin Unity'nin `Media/Plugins` klasörü) için `--module-dir Media/Plugins` gerekiyor; `--skip-sce-module` hepsini dışarıda bırakıyor.
+
 ## Çalıştırma
 
 Uygulamaya çift tıkla ya da terminalden başlat:
@@ -100,6 +102,7 @@ python3 tools/translator/tests/run_native_fixtures.py build-translator build-arm
 - `import`: GOT üzerinden `puts` ve `exit` çağıran elle hazırlanmış bir PS5 ELF'i.
 - `lifter-smoke`: tamsayı aritmetiği, bayraklar, kaydırmalar, bölme, özyineleme, dolaylı çağrılar.
 - `vector-smoke`: rastgele girdiler, NaN'ler ve sınır dışı değerlerle SSE/AVX2, FMA ve BMI; aynı C dosyasının Rosetta altında x86-64 olarak çalışmasıyla karşılaştırılıyor. Referans optimizasyonsuz derleniyor, çünkü Rosetta'nın kendisi bazı optimize AVX dizilerini yanlış hesaplıyor.
+- `module`, `tls-modules`: bir oyunun `sce_module` klasörü gibi paketlenen guest modülleri: bir modüle çağrılar, dinamik ve initial-exec TLS'i, unwind bilgisi ve bir modülün başka bir modüle açtığı TLS değişkeni, iki thread'de.
 
 ## Kısaca nasıl çalışıyor
 
@@ -113,7 +116,6 @@ Tasarım ayrıntıları, zor kısımlar ve plan: [NATIVE_ARM64.md](../../dev/NAT
 
 ## Bilinen sınırlar
 
-- Oyunun kendi getirdiği prx modülleri (`sce_module`) henüz çevrilmiyor. DOOM'un `libc.prx`'i sadece stub olduğu için orada fark etmiyor; çoğu ticari oyunun buna ihtiyacı var.
 - Henüz taşınmadı: `setjmp`/`longjmp`, fiber'lar, çevrilmiş kod içinden geçen C++ exception'ları, `getcontext`/`setcontext`, 80-bit `long double`. Bunlara gelindiğinde oyun açık bir mesajla duruyor.
 - x86'nın bellek sıralaması arm64'ünkünden güçlü. Çevirici henüz bariyer eklemiyor, bu yüzden x86 sıralamasına güvenen çok thread'li kod sorun çıkarabilir.
 - Yeni üretilen NaN'ler arm64'te pozitif, x86'da negatif; NaN'in işaretine bakan kod farklı davranabilir.

@@ -15,8 +15,8 @@ constexpr std::uint32_t PtDynamic = 2;
 constexpr std::uint32_t PtTls = 7;
 constexpr std::uint32_t PtGnuEhFrame = 0x6474e550;
 constexpr std::int64_t DtNull = 0, DtNeeded = 1, DtPltRelSz = 2, DtStrTab = 5, DtSymTab = 6, DtRela = 7, DtRelaSz = 8;
-constexpr std::int64_t DtInit = 12, DtStrSz = 10, DtJmpRel = 23, DtInitArray = 25, DtInitArraySz = 27;
-constexpr std::int64_t DtOsInit = 0x6000000c, DtOsInitArray = 0x60000019, DtOsInitArraySz = 0x6000001b;
+constexpr std::int64_t DtInit = 12, DtFini = 13, DtStrSz = 10, DtJmpRel = 23, DtInitArray = 25, DtFiniArray = 26, DtInitArraySz = 27, DtFiniArraySz = 28;
+constexpr std::int64_t DtOsInit = 0x6000000c, DtOsFini = 0x6000000d, DtOsInitArray = 0x60000019, DtOsFiniArray = 0x6000001a, DtOsInitArraySz = 0x6000001b, DtOsFiniArraySz = 0x6000001c;
 constexpr std::int64_t DtOsJmpRel = 0x61000029, DtOsPltRelSz = 0x6100002d, DtOsRela = 0x6100002f, DtOsRelaSz = 0x61000031;
 constexpr std::int64_t DtOsStrTab = 0x61000035, DtOsStrSz = 0x61000037, DtOsSymTab = 0x61000039, DtOsSymTabSz = 0x6100003f;
 
@@ -36,6 +36,7 @@ Elf::Elf(const std::filesystem::path& path) {
     bytes.assign(std::istreambuf_iterator<char>(file), {});
     if (bytes.size() < 64 || std::memcmp(bytes.data(), "\x7f" "ELF\x02\x01", 6) != 0) throw std::runtime_error("not a 64-bit little-endian ELF");
     if (Read<std::uint16_t>(bytes, 18) != 62) throw std::runtime_error("not an x86-64 ELF");
+    type = Read<std::uint16_t>(bytes, 16);
     entry = Read<std::uint64_t>(bytes, 24);
     const auto phoff = Read<std::uint64_t>(bytes, 32);
     const auto phentsize = Read<std::uint16_t>(bytes, 54);
@@ -85,6 +86,7 @@ Elf::Elf(const std::filesystem::path& path) {
         const auto name = Read<std::uint32_t>(bytes, at);
         symbol.name = name < stringsSize ? String(name) : std::string();
         symbol.info = Read<std::uint8_t>(bytes, at + 4);
+        symbol.visibility = Read<std::uint8_t>(bytes, at + 5) & 3;
         symbol.section = Read<std::uint16_t>(bytes, at + 6);
         symbol.value = Read<std::uint64_t>(bytes, at + 8);
         symbol.size = Read<std::uint64_t>(bytes, at + 16);
@@ -106,20 +108,35 @@ std::uint64_t Elf::ImageEnd() const {
 
 std::vector<std::uint64_t> Elf::InitFunctions() const {
     std::vector<std::uint64_t> functions;
-    if (HasTag(DtOsInit) || HasTag(DtInit)) functions.push_back(HasTag(DtOsInit) ? Tag(DtOsInit) : Tag(DtInit));
-    const auto array = HasTag(DtOsInitArray) ? Tag(DtOsInitArray) : Tag(DtInitArray);
-    const auto size = HasTag(DtOsInitArraySz) ? Tag(DtOsInitArraySz) : Tag(DtInitArraySz);
-    for (std::uint64_t at = 0; array != 0 && at + 8 <= size; at += 8) {
-        if (const auto* slot = At(array + at, 8)) {
-            std::uint64_t value;
-            std::memcpy(&value, slot, 8);
-            for (const auto& relocation : relocations) {
-                if (relocation.offset == array + at && relocation.type == 8) value = static_cast<std::uint64_t>(relocation.addend);
+    const auto found = Initializers();
+    for (const auto function : {found.init, found.fini}) {
+        if (function != 0) functions.push_back(function);
+    }
+    for (const auto [array, size] : {std::pair{found.initArray, found.initArraySize}, std::pair{found.finiArray, found.finiArraySize}}) {
+        for (std::uint64_t at = 0; array != 0 && at + 8 <= size; at += 8) {
+            if (const auto* slot = At(array + at, 8)) {
+                std::uint64_t value;
+                std::memcpy(&value, slot, 8);
+                for (const auto& relocation : relocations) {
+                    if (relocation.offset == array + at && relocation.type == 8) value = static_cast<std::uint64_t>(relocation.addend);
+                }
+                if (value != 0 && value != ~0ull) functions.push_back(value);
             }
-            if (value != 0 && value != ~0ull) functions.push_back(value);
         }
     }
     return functions;
+}
+
+ImageInitializers Elf::Initializers() const {
+    auto tag = [&](std::int64_t osTag, std::int64_t sysvTag) { return HasTag(osTag) ? Tag(osTag) : Tag(sysvTag); };
+    ImageInitializers found;
+    found.init = tag(DtOsInit, DtInit);
+    found.fini = tag(DtOsFini, DtFini);
+    found.initArray = tag(DtOsInitArray, DtInitArray);
+    found.initArraySize = found.initArray != 0 ? tag(DtOsInitArraySz, DtInitArraySz) : 0;
+    found.finiArray = tag(DtOsFiniArray, DtFiniArray);
+    found.finiArraySize = found.finiArray != 0 ? tag(DtOsFiniArraySz, DtFiniArraySz) : 0;
+    return found;
 }
 
 void Elf::ReadUnwindTable(std::uint64_t header) {

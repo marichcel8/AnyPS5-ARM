@@ -35,6 +35,9 @@ public:
     std::size_t FunctionSize(std::uint64_t entry) const;
     std::unique_ptr<llvm::Module> Lift(llvm::LLVMContext& context, const std::vector<std::uint64_t>& entries, bool first, bool shared, std::size_t promoteLimit, Statistics& stats) const;
     const Statistics& Stats() const { return stats; }
+    // The names the host libraries export: a stub module's exports that only return zero leave
+    // these to the host, as the relinker's macOS mode does.
+    void SetHostExports(std::set<std::string> names) { hostExports = std::move(names); }
 
     struct Program;
     struct Impl;
@@ -43,6 +46,7 @@ private:
     const Elf& elf;
     std::unique_ptr<Program> program;
     Statistics stats;
+    std::set<std::string> hostExports;
 };
 
 }
