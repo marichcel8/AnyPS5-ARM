@@ -401,6 +401,10 @@ std::size_t Count(const std::string& text, const std::string& needle) {
 
 }
 
+std::string_view VertexFetchText() {
+    return FetchText;
+}
+
 bool IsGeometry(IrShaderStage stage) {
     return stage == IrShaderStage::Local || stage == IrShaderStage::TessellationControl || stage == IrShaderStage::TessellationEvaluation || stage == IrShaderStage::Mesh;
 }

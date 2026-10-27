@@ -55,6 +55,13 @@ inline constexpr std::uint32_t MslGeometryLayoutFields = 13u;
 
 [[nodiscard]] std::optional<MslGeometryLayout> ParseMslGeometryLayout(std::string_view source);
 
+struct MslRectList {
+    std::string source;
+    std::uint32_t rectsPerGroup = 0;
+};
+
+[[nodiscard]] MslRectList BuildMslRectList(std::string_view vertex);
+
 }
 
 #endif

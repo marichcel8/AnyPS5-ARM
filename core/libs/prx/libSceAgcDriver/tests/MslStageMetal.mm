@@ -1,5 +1,6 @@
 #import <Metal/Metal.h>
 #include "MslStagePrograms.hpp"
+#include "MetalAbi.hpp"
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -133,6 +134,104 @@ Target Draw(id<MTLDevice> device, id<MTLCommandQueue> queue, const std::string& 
     return target;
 }
 
+Target ReadBack(id<MTLDevice> device, id<MTLCommandBuffer> commands, id<MTLTexture> color, id<MTLTexture> depth, const std::string& name) {
+    id<MTLBuffer> colorBytes = [device newBufferWithLength:Size * Size * 16u options:MTLResourceStorageModeShared];
+    id<MTLBuffer> depthBytes = [device newBufferWithLength:Size * Size * 4u options:MTLResourceStorageModeShared];
+    id<MTLBlitCommandEncoder> blit = [commands blitCommandEncoder];
+    [blit copyFromTexture:color sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(Size, Size, 1) toBuffer:colorBytes destinationOffset:0 destinationBytesPerRow:Size * 16u destinationBytesPerImage:Size * Size * 16u];
+    [blit copyFromTexture:depth sourceSlice:0 sourceLevel:0 sourceOrigin:MTLOriginMake(0, 0, 0) sourceSize:MTLSizeMake(Size, Size, 1) toBuffer:depthBytes destinationOffset:0 destinationBytesPerRow:Size * 4u destinationBytesPerImage:Size * Size * 4u];
+    [blit endEncoding];
+    [commands commit];
+    [commands waitUntilCompleted];
+    Require(commands.status == MTLCommandBufferStatusCompleted, name + ": the draw failed: " + Describe(commands.error));
+    Target target;
+    target.color.resize(Size * Size * 4u);
+    target.depth.resize(Size * Size);
+    std::memcpy(target.color.data(), colorBytes.contents, target.color.size() * sizeof(float));
+    std::memcpy(target.depth.data(), depthBytes.contents, target.depth.size() * sizeof(float));
+    return target;
+}
+
+Target DrawRectList(id<MTLDevice> device, id<MTLCommandQueue> queue, const std::string& name, id<MTLBuffer> vertices, id<MTLBuffer> indices, std::uint32_t rects, double& compileMs) {
+    const auto vertexResult = Recompile(MslStagePrograms::FetchVertexRequest(0x11000u));
+    const auto pixelResult = Recompile(MslStagePrograms::ConstantPixelRequest(0x22000u));
+    const auto rectList = BuildMslRectList(vertexResult.msl.Source());
+    MTLCompileOptions* options = [MTLCompileOptions new];
+    options.languageVersion = MTLLanguageVersion3_1;
+    if (@available(macOS 15.0, *)) {
+        options.languageVersion = MTLLanguageVersion3_2;
+        options.mathMode = MTLMathModeFast;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    NSError* error = nil;
+    id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:rectList.source.c_str()] options:options error:&error];
+    if (library == nil) {
+        std::fprintf(stderr, "%s\n", rectList.source.c_str());
+        throw std::runtime_error(name + ": the rect-list MSL source does not compile: " + Describe(error));
+    }
+    MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
+    for (const auto& constant : vertexResult.specialization) {
+        if (rectList.source.find("[[function_constant(" + std::to_string(constant.id) + ")]]") == std::string::npos) continue;
+        const std::uint32_t value = constant.value;
+        [values setConstantValue:&value type:MTLDataTypeUInt atIndex:constant.id];
+    }
+    const std::uint32_t format = static_cast<std::uint32_t>(MTLVertexFormatFloat4);
+    [values setConstantValue:&format type:MTLDataTypeUInt atIndex:MetalAbi::LocalFetchFormatConstant];
+    id<MTLFunction> mesh = [library newFunctionWithName:[NSString stringWithUTF8String:std::string(MslEntryPoint).c_str()] constantValues:values error:&error];
+    if (mesh == nil) {
+        std::fprintf(stderr, "%s\n", rectList.source.c_str());
+        throw std::runtime_error(name + ": the rect-list entry point does not specialize: " + Describe(error));
+    }
+    compileMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+
+    MTLMeshRenderPipelineDescriptor* descriptor = [MTLMeshRenderPipelineDescriptor new];
+    descriptor.meshFunction = mesh;
+    descriptor.fragmentFunction = Function(device, pixelResult, name + " pixel", compileMs);
+    descriptor.maxTotalThreadsPerMeshThreadgroup = rectList.rectsPerGroup * 3u;
+    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA32Float;
+    descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float;
+    id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithMeshDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
+    Require(pipeline != nil, name + ": the rect-list mesh pipeline does not build: " + Describe(error));
+
+    MTLDepthStencilDescriptor* depthDescriptor = [MTLDepthStencilDescriptor new];
+    depthDescriptor.depthCompareFunction = MTLCompareFunctionAlways;
+    depthDescriptor.depthWriteEnabled = YES;
+    id<MTLDepthStencilState> depthState = [device newDepthStencilStateWithDescriptor:depthDescriptor];
+    MTLTextureDescriptor* colorDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA32Float width:Size height:Size mipmapped:NO];
+    colorDescriptor.usage = MTLTextureUsageRenderTarget;
+    colorDescriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> color = [device newTextureWithDescriptor:colorDescriptor];
+    MTLTextureDescriptor* depthTextureDescriptor = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float width:Size height:Size mipmapped:NO];
+    depthTextureDescriptor.usage = MTLTextureUsageRenderTarget;
+    depthTextureDescriptor.storageMode = MTLStorageModePrivate;
+    id<MTLTexture> depth = [device newTextureWithDescriptor:depthTextureDescriptor];
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = color;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor = MTLClearColorMake(Clear, Clear, Clear, Clear);
+    pass.depthAttachment.texture = depth;
+    pass.depthAttachment.loadAction = MTLLoadActionClear;
+    pass.depthAttachment.storeAction = MTLStoreActionStore;
+    pass.depthAttachment.clearDepth = 1.0;
+
+    const MetalAbi::VertexFetchEntry fetch{vertices.gpuAddress, 16u, static_cast<std::uint32_t>(vertices.length / 16u)};
+    const MetalAbi::RectDrawParameters draw{indices != nil ? indices.gpuAddress : 0u, indices != nil ? 2u : 0u, rects, 0u, 0, 0u, 0u};
+    id<MTLCommandBuffer> commands = [queue commandBuffer];
+    id<MTLRenderCommandEncoder> encoder = [commands renderCommandEncoderWithDescriptor:pass];
+    [encoder setRenderPipelineState:pipeline];
+    [encoder setDepthStencilState:depthState];
+    [encoder setViewport:MTLViewport{0.0, 0.0, static_cast<double>(Size), static_cast<double>(Size), 0.0, 1.0}];
+    [encoder setMeshBytes:&fetch length:sizeof(fetch) atIndex:MetalAbi::VertexFetchSlot];
+    [encoder setMeshBytes:&draw length:sizeof(draw) atIndex:MetalAbi::GeometrySlot];
+    [encoder useResource:vertices usage:MTLResourceUsageRead stages:MTLRenderStageMesh];
+    if (indices != nil) [encoder useResource:indices usage:MTLResourceUsageRead stages:MTLRenderStageMesh];
+    const NSUInteger groups = (rects + rectList.rectsPerGroup - 1u) / rectList.rectsPerGroup;
+    [encoder drawMeshThreadgroups:MTLSizeMake(groups, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(rectList.rectsPerGroup * 3u, 1, 1)];
+    [encoder endEncoding];
+    return ReadBack(device, commands, color, depth, name);
+}
+
 void Expect(const Target& target, const std::string& name, const std::function<bool(std::uint32_t, std::uint32_t, std::array<float, 4>&, float&)>& expected) {
     for (std::uint32_t y = 0; y < Size; ++y) {
         for (std::uint32_t x = 0; x < Size; ++x) {
@@ -191,6 +290,32 @@ int main() {
                 return true;
             });
             std::printf("MslStageMetal: stage_in vertex attribute selected by function constants ok (Metal compile %.1f ms)\n", compileMs);
+
+            if ([device supportsFamily:MTLGPUFamilyApple7]) {
+                const float rects[] = {
+                    -1.0f, -1.0f, 0.25f, 1.0f, 0.0f, -1.0f, 0.25f, 1.0f, -1.0f, 0.0f, 0.25f, 1.0f,
+                    1.0f, 0.0f, 0.25f, 1.0f, 1.0f, -1.0f, 0.25f, 1.0f, 0.0f, -1.0f, 0.25f, 1.0f,
+                    1.0f, 0.0f, 0.25f, 1.0f, 0.0f, 1.0f, 0.25f, 1.0f, 1.0f, 1.0f, 0.25f, 1.0f,
+                    -0.9f, 0.1f, 0.25f, 1.0f, -0.1f, 0.5f, 0.25f, 1.0f, -0.5f, 0.9f, 0.25f, 1.0f,
+                };
+                const std::uint16_t order[] = {0u, 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 9u, 10u, 11u};
+                id<MTLBuffer> rectVertices = [device newBufferWithBytes:rects length:sizeof(rects) options:MTLResourceStorageModeShared];
+                id<MTLBuffer> rectIndices = [device newBufferWithBytes:order length:sizeof(order) options:MTLResourceStorageModeShared];
+                for (const bool indexed : {false, true}) {
+                    const std::string name = indexed ? "indexed rect list" : "rect list";
+                    compileMs = 0.0;
+                    const auto drawn = DrawRectList(device, queue, name, rectVertices, indexed ? rectIndices : nil, 4u, compileMs);
+                    Expect(drawn, name, [](std::uint32_t x, std::uint32_t y, std::array<float, 4>& color, float& depth) {
+                        if (x < Size / 2u && y >= Size / 2u) return false;
+                        color = {1.0f, 0.5f, 0.0f, 1.0f};
+                        depth = 0.25f;
+                        return true;
+                    });
+                    std::printf("MslStageMetal: %s fills three quadrants from corners at vertex 0, 1 and 2 and culls the skewed rectangle (Metal compile %.1f ms)\n", name.c_str(), compileMs);
+                }
+            } else {
+                std::puts("MslStageMetal: rect lists skipped, the device has no mesh shaders");
+            }
         } catch (const std::exception& error) {
             std::fprintf(stderr, "MslStageMetal: %s\n", error.what());
             return 1;
