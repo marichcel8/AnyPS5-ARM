@@ -151,7 +151,7 @@ int APS5_VABI feraiseexcept_nid_postfix(int exceptions) {
     const auto raised = static_cast<unsigned>(exceptions);
     if ((raised & ~Exceptions) != 0) throw std::invalid_argument("feraiseexcept: unsupported exception bits");
     ReplaceFlags(raised, raised);
-    asm volatile("fwait");
+    WaitForFlags();
     return 0;
 }
 
