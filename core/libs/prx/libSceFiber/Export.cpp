@@ -291,8 +291,6 @@ static void PinStack(const void*, std::uint64_t) {}
 
 static void UnpinStack(const void*, std::uint64_t) {}
 
-#else
-
 #elif defined(__aarch64__)
 
 extern "C" void Aps5FiberSwitchStack_nid_no_patch(void** save, void** load, Fiber* start);
