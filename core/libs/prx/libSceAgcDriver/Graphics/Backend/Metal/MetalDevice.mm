@@ -357,6 +357,9 @@ struct StageSource {
     std::vector<Metal::FunctionConstant> constants;
     std::optional<ShaderRecompiler::MslGeometryLayout> layout;
     std::uint32_t rects = 0;
+    std::uint32_t meshThreads = 0;
+    std::uint32_t payloadBytes = 0;
+    std::uint32_t meshGroups = 0;
 };
 
 struct DepthSurface {
@@ -755,6 +758,15 @@ Graphics::State RectListDrawState(const Graphics::State& graphics) {
     return adjusted;
 }
 
+Graphics::State TessellationDrawState(const Graphics::State& graphics) {
+    auto adjusted = graphics;
+    adjusted.stages.path = Graphics::ShaderPath::Vertex;
+    adjusted.rectList = false;
+    adjusted.primitiveRestart = false;
+    adjusted.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return adjusted;
+}
+
 Graphics::State MeshDrawState(const Graphics::State& graphics) {
     auto adjusted = graphics;
     adjusted.stages.path = Graphics::ShaderPath::Vertex;
@@ -864,10 +876,13 @@ std::vector<MTLSamplePosition> GuestSamplePositions(const Graphics::State& graph
 
 std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
     const bool meshPath = graphics.stages.mesh.has_value() && !graphics.stages.tessellation;
+    const bool tessellationPath = graphics.stages.tessellation.has_value();
     for (const auto& shader : shaders) {
         if (shader.stage == ShaderRecompiler::ShaderStage::Mesh && meshPath) continue;
-        if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex, mesh and pixel stages");
-        if (shader.stage != ShaderRecompiler::ShaderStage::Vertex) continue;
+        if (tessellationPath && (shader.stage == ShaderRecompiler::ShaderStage::TessellationControl || shader.stage == ShaderRecompiler::ShaderStage::TessellationEvaluation)) continue;
+        const bool fetches = shader.stage == ShaderRecompiler::ShaderStage::Vertex || (tessellationPath && shader.stage == ShaderRecompiler::ShaderStage::Local);
+        if (!fetches && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex, mesh, tessellation and pixel stages");
+        if (!fetches) continue;
         for (const auto& attribute : shader.program->vertexAttributes) {
             const auto format = Graphics::DecodeVertexFormat(attribute).format;
             if (NativeVertexFormat(format) == MTLVertexFormatInvalid) return "vertex format " + std::to_string(static_cast<int>(format)) + " has no Metal vertex format";
@@ -876,6 +891,8 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
     std::optional<Graphics::State> adjusted;
     if (meshPath) {
         adjusted = MeshDrawState(graphics);
+    } else if (tessellationPath) {
+        adjusted = TessellationDrawState(graphics);
     } else if (graphics.rectList) {
         adjusted = RectListDrawState(graphics);
     } else if (RewritesLastProvokingVertex(graphics, shaders)) {
@@ -918,7 +935,10 @@ ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device, bool presenting
     target.maxThreadsPerThreadgroup = static_cast<std::uint32_t>(std::max({threads.width, threads.height, threads.depth}));
     target.maxThreadgroupMemoryBytes = static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength);
     static const bool noMesh = std::getenv("APS5_METAL_NO_MESH") != nullptr;
-    if (!noMesh && [device supportsFamily:MTLGPUFamilyApple7]) target.mesh = ShaderRecompiler::MeshTargetLimits{{1024u, 1u, 1u}, 1024u, std::min<std::uint32_t>(target.maxThreadgroupMemoryBytes, 32768u), 256u, 512u, 128u, 32768u, 32u, 32u};
+    if (!noMesh && [device supportsFamily:MTLGPUFamilyApple7]) {
+        target.mesh = ShaderRecompiler::MeshTargetLimits{{1024u, 1u, 1u}, 1024u, std::min<std::uint32_t>(target.maxThreadgroupMemoryBytes, 32768u), 256u, 512u, 128u, 32768u, 32u, 32u};
+        target.tessellation = ShaderRecompiler::TessellationTargetLimits{32u, 128u, 128u, 120u, 4096u, 128u, 128u};
+    }
     static const bool exactFloat = std::getenv("APS5_EXACT_FLOAT") != nullptr;
     static const bool relaxedFloat = std::getenv("APS5_RELAXED_FLOAT") != nullptr;
     target.relaxedFloat = !exactFloat && (relaxedFloat || presenting);
@@ -1102,8 +1122,8 @@ struct VulkanDevice::State {
     std::set<std::uint64_t> stencilPlanes;
     std::unique_ptr<Metal::PipelineCache> renderPipelines;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> stageSources;
-    std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> rectSources;
-    std::unordered_map<ShaderRecompiler::PipelineIdentity, std::string, IdentityHash> rectFailures;
+    std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> wrappedSources;
+    std::unordered_map<ShaderRecompiler::PipelineIdentity, std::string, IdentityHash> wrappedFailures;
     std::unordered_map<Metal::CompileKey, std::shared_ptr<Metal::RenderPipeline>, Metal::CompileKeyHash> drawPipelines;
 
     void* window = nullptr;
@@ -1771,11 +1791,12 @@ struct VulkanDevice::State {
         std::memset(fault.contents, 0, ShaderRecompiler::BdaAbi::FaultBufferBytes);
     }
 
-    id<MTLComputePipelineState> pipeline(const ShaderRecompiler::RecompileResult& shader, const std::array<std::uint32_t, 3>& base = {}) {
+    id<MTLComputePipelineState> pipeline(const ShaderRecompiler::RecompileResult& shader, const std::array<std::uint32_t, 3>& base = {}, std::span<const Metal::FunctionConstant> extra = {}) {
         auto identity = shader.Identity();
         if (base != std::array<std::uint32_t, 3>{}) {
             for (const auto component : base) identity.low = (identity.low ^ (component + 0x9e3779b9u)) * 0x9e3779b97f4a7c15ull;
         }
+        for (const auto& constant : extra) identity.high = (identity.high ^ (static_cast<std::uint64_t>(constant.index) << 32u | constant.value)) * 0x9e3779b97f4a7c15ull;
         std::shared_ptr<Metal::CompileTicket> ticket;
         {
             std::lock_guard lock(pipelineMutex);
@@ -1796,6 +1817,9 @@ struct VulkanDevice::State {
                     auto value = constant.value;
                     if (ShaderRecompiler::PipelineSpecialization::IsWorkgroupOffset(constant.id)) value = base[constant.id - ShaderRecompiler::PipelineSpecialization::WorkgroupOffsetBase];
                     request.constants.push_back({constant.id, value, false});
+                }
+                for (const auto& constant : extra) {
+                    if (declared.contains(constant.index)) request.constants.push_back(constant);
                 }
                 request.label = "AnyPS5 guest compute";
                 request.priority = Metal::CompilePriority::Urgent;
@@ -2306,9 +2330,14 @@ struct VulkanDevice::State {
         return state.gpuResourceID._impl;
     }
 
-    void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses, const Graphics::State::DepthRemap* remap = nullptr, const std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4>* meshDraw = nullptr) {
+    void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses, const Graphics::State::DepthRemap* remap = nullptr, const std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4>* meshDraw = nullptr, const std::array<float, ShaderRecompiler::TessellationLevelPushBytes / 4>* levels = nullptr) {
         if (cpuProfileEnabled()) bindPhaseAt = std::chrono::steady_clock::now();
-        if (meshDraw != nullptr) {
+        if (levels != nullptr) {
+            std::vector<std::byte> block(std::max<std::size_t>(shader.pushConstants.size(), ShaderRecompiler::TessellationLevelPushOffsetBytes + ShaderRecompiler::TessellationLevelPushBytes), std::byte{0});
+            std::memcpy(block.data(), shader.pushConstants.data(), std::min<std::size_t>(shader.pushConstants.size(), ShaderRecompiler::TessellationLevelPushOffsetBytes));
+            std::memcpy(block.data() + ShaderRecompiler::TessellationLevelPushOffsetBytes, levels->data(), ShaderRecompiler::TessellationLevelPushBytes);
+            slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(block.data(), block.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
+        } else if (meshDraw != nullptr) {
             std::vector<std::byte> block(std::max<std::size_t>(shader.pushConstants.size(), ShaderRecompiler::MeshDrawPushOffsetBytes + ShaderRecompiler::MeshDrawPushBytes), std::byte{0});
             std::memcpy(block.data(), shader.pushConstants.data(), shader.pushConstants.size());
             std::memcpy(block.data() + ShaderRecompiler::MeshDrawPushOffsetBytes, meshDraw->data(), ShaderRecompiler::MeshDrawPushBytes);
@@ -2679,25 +2708,35 @@ struct VulkanDevice::State {
         return stageSources.emplace(identity, std::move(entry)).first->second;
     }
 
-    const StageSource& rectSource(const ShaderRecompiler::RecompileResult& shader) {
+    const StageSource& wrappedSource(const ShaderRecompiler::RecompileResult& shader, bool tessellation) {
         const auto identity = shader.Identity();
-        if (const auto found = rectSources.find(identity); found != rectSources.end()) return found->second;
-        if (const auto failed = rectFailures.find(identity); failed != rectFailures.end()) throw Graphics::UnrenderableDraw("AGC graphics: " + failed->second);
-        const auto& vertex = stageSource(shader);
+        if (const auto found = wrappedSources.find(identity); found != wrappedSources.end()) return found->second;
+        if (const auto failed = wrappedFailures.find(identity); failed != wrappedFailures.end()) throw Graphics::UnrenderableDraw("AGC graphics: " + failed->second);
+        const auto& stage = stageSource(shader);
         StageSource entry;
         try {
-            auto rect = ShaderRecompiler::BuildMslRectList(*vertex.source);
-            entry.source = std::make_shared<const std::string>(std::move(rect.source));
-            entry.rects = rect.rectsPerGroup;
+            if (tessellation) {
+                auto mesh = ShaderRecompiler::BuildMslTessellationMesh(*stage.source);
+                entry.source = std::make_shared<const std::string>(std::move(mesh.source));
+                entry.meshThreads = mesh.meshThreads;
+                entry.payloadBytes = mesh.payloadBytes;
+                entry.meshGroups = mesh.maxGroupsPerPatch;
+            } else {
+                auto rect = ShaderRecompiler::BuildMslRectList(*stage.source);
+                entry.source = std::make_shared<const std::string>(std::move(rect.source));
+                entry.rects = rect.rectsPerGroup;
+                entry.meshThreads = rect.rectsPerGroup * 3u;
+            }
         } catch (const std::exception& error) {
-            rectFailures.emplace(identity, error.what());
+            wrappedFailures.emplace(identity, error.what());
             throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + error.what());
         }
         static const bool dump = std::getenv("APS5_METAL_DUMP_MSL") != nullptr;
-        if (dump) std::fprintf(stderr, "[metal] msl rect list %016llx\n%s\n", static_cast<unsigned long long>(shader.msl.ContentHash().low), entry.source->c_str());
-        entry.key = Metal::CompileKeyBuilder(0x52454354ull).Add(vertex.key.low).Add(vertex.key.high).Finish();
-        entry.constants = vertex.constants;
-        return rectSources.emplace(identity, std::move(entry)).first->second;
+        if (dump) std::fprintf(stderr, "[metal] msl %s %016llx\n%s\n", tessellation ? "tessellation mesh" : "rect list", static_cast<unsigned long long>(shader.msl.ContentHash().low), entry.source->c_str());
+        entry.key = Metal::CompileKeyBuilder(tessellation ? 0x54455353ull : 0x52454354ull).Add(stage.key.low).Add(stage.key.high).Finish();
+        entry.constants = stage.constants;
+        entry.layout = stage.layout;
+        return wrappedSources.emplace(identity, std::move(entry)).first->second;
     }
 
     std::uint64_t rectArguments(const Pm4::DrawParameters& params, std::uint64_t records, std::uint32_t stride, std::uint64_t indices, std::uint32_t rects) {
@@ -2968,8 +3007,8 @@ struct VulkanDevice::State {
         id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)open.commands;
         render = [commands renderCommandEncoderWithDescriptor:descriptor];
         if (render == nil) throw std::runtime_error("AGC graphics: Metal render encoder could not be created");
-        [render barrierAfterQueueStages:MTLStageVertex | MTLStageFragment | MTLStageMesh | MTLStageDispatch | MTLStageBlit beforeStages:MTLStageVertex | MTLStageFragment | MTLStageMesh visibilityOptions:MTL4VisibilityOptionDevice];
-        [render setArgumentTable:vertexTable atStages:MTLRenderStageVertex | MTLRenderStageMesh];
+        [render barrierAfterQueueStages:MTLStageVertex | MTLStageFragment | MTLStageMesh | MTLStageDispatch | MTLStageBlit beforeStages:MTLStageVertex | MTLStageFragment | MTLStageObject | MTLStageMesh visibilityOptions:MTL4VisibilityOptionDevice];
+        [render setArgumentTable:vertexTable atStages:MTLRenderStageVertex | MTLRenderStageObject | MTLRenderStageMesh];
         [render setArgumentTable:fragmentTable atStages:MTLRenderStageFragment];
         boundPipeline = nullptr;
         boundDepthStencil = nullptr;
@@ -3076,6 +3115,58 @@ struct VulkanDevice::State {
         return address;
     }
 
+    std::uint64_t tessellate(const ShaderRecompiler::RecompileResult& local, const ShaderRecompiler::RecompileResult& hull, id<MTLComputePipelineState> localKernel, id<MTLComputePipelineState> hullKernel, const Graphics::State& graphics, const Pm4::DrawParameters& params, std::uint32_t patches, std::uint64_t fetchTable, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
+        const auto& layout = stageSource(hull).layout;
+        if (!layout || layout->kind != ShaderRecompiler::MslGeometryKind::Hull) throw std::runtime_error("AGC graphics: the Metal hull stage has no hull layout");
+        const auto& tess = *graphics.stages.tessellation;
+        const std::uint64_t patchInstances = static_cast<std::uint64_t>(patches) * params.instanceCount;
+        ShaderRecompiler::MetalAbi::GeometryParameters geometry{};
+        geometry.localRing = upload(patchInstances * tess.inputControlPoints * layout->LocalWords() * 4u).gpuAddress;
+        geometry.controlRing = upload(patchInstances * tess.outputControlPoints * std::max(layout->ControlWords(), 1u) * 4u).gpuAddress;
+        geometry.patchRing = upload(patchInstances * std::max(layout->PatchWords(), 1u) * 4u).gpuAddress;
+        geometry.factors = upload(patchInstances * ShaderRecompiler::MetalAbi::TessellationFactorHalves(tess.domain) * 2u).gpuAddress;
+        geometry.indices = params.indexed ? resolve(params.indexAddress, static_cast<std::uint64_t>(params.indexCount) * params.indexSize, false, snapshots, nullptr, false) : 0ull;
+        geometry.localWords = layout->LocalWords();
+        geometry.controlWords = layout->ControlWords();
+        geometry.patchWords = layout->PatchWords();
+        geometry.patchCount = patches;
+        geometry.instanceCount = params.instanceCount;
+        geometry.baseInstance = params.firstInstance;
+        geometry.firstIndex = params.indexed ? 0u : params.firstVertex;
+        geometry.baseVertex = params.indexed ? static_cast<std::int32_t>(params.firstVertex) : 0;
+        geometry.indexBytes = params.indexed ? params.indexSize : 0u;
+        const auto geometryAddress = uploadBytes(&geometry, sizeof(geometry));
+        std::array<std::uint64_t, ArgumentSlots> localSlots{};
+        std::array<std::uint64_t, ArgumentSlots> hullSlots{};
+        std::vector<ImageUse> uses;
+        bindStage(local, snapshots, localSlots, uses);
+        const std::array<float, ShaderRecompiler::TessellationLevelPushBytes / 4> levels{graphics.stages.minTessellationLevel, graphics.stages.maxTessellationLevel};
+        bindStage(hull, snapshots, hullSlots, uses, nullptr, nullptr, &levels);
+        if (std::any_of(uses.begin(), uses.end(), [](const ImageUse& use) { return use.written; })) throw Graphics::UnrenderableDraw("AGC graphics: Metal tessellation kernels that write images are not drawn");
+        auto compute = computeEncoder();
+        [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        if (needsUpload(uses)) {
+            encodeUploads(compute, uses);
+            [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        }
+        const auto run = [&](const std::array<std::uint64_t, ArgumentSlots>& slots, id<MTLComputePipelineState> state, MTLSize grid, MTLSize group) {
+            for (std::uint32_t slot = 0; slot < ArgumentSlots; ++slot) {
+                if (slots[slot] != 0) [table setAddress:slots[slot] atIndex:slot];
+            }
+            [table setAddress:geometryAddress atIndex:ShaderRecompiler::MetalAbi::GeometrySlot];
+            if (fetchTable != 0) [table setAddress:fetchTable atIndex:ShaderRecompiler::MetalAbi::VertexFetchSlot];
+            [compute setArgumentTable:table];
+            [compute setComputePipelineState:state];
+            [compute dispatchThreads:grid threadsPerThreadgroup:group];
+        };
+        run(localSlots, localKernel, MTLSizeMake(patchInstances * tess.inputControlPoints, 1, 1), MTLSizeMake(std::min<NSUInteger>(64u, localKernel.maxTotalThreadsPerThreadgroup), 1, 1));
+        [compute barrierAfterEncoderStages:MTLStageDispatch beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        run(hullSlots, hullKernel, MTLSizeMake(tess.outputControlPoints, patchInstances, 1), MTLSizeMake(tess.outputControlPoints, 1, 1));
+        encodedDispatches += 2u;
+        cbDispatches += 2u;
+        return geometryAddress;
+    }
+
     void draw(const Graphics::State& submitted, const Pm4::DrawParameters& submittedParams, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
         if (submitted.depthBias && submitted.depthBiasPerFace && (submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN)) {
             if (submitted.cullMode != VK_CULL_MODE_NONE) throw std::runtime_error("AGC graphics: per-face depth bias needs both faces rasterized");
@@ -3111,15 +3202,26 @@ struct VulkanDevice::State {
         const Graphics::CompiledShader* vertex = nullptr;
         const Graphics::CompiledShader* mesh = nullptr;
         const Graphics::CompiledShader* fragment = nullptr;
+        const Graphics::CompiledShader* local = nullptr;
+        const Graphics::CompiledShader* hull = nullptr;
+        const Graphics::CompiledShader* domain = nullptr;
         const bool meshPath = graphics.stages.mesh.has_value() && !graphics.stages.tessellation;
+        const bool tessellationPath = graphics.stages.tessellation.has_value();
         for (const auto& shader : shaders) {
             if (shader.stage == ShaderRecompiler::ShaderStage::Vertex) vertex = &shader;
             else if (shader.stage == ShaderRecompiler::ShaderStage::Mesh && meshPath) mesh = &shader;
             else if (shader.stage == ShaderRecompiler::ShaderStage::Fragment) fragment = &shader;
-            else throw std::runtime_error("AGC graphics: Metal draws support only vertex, mesh and pixel stages");
+            else if (shader.stage == ShaderRecompiler::ShaderStage::Local && tessellationPath) local = &shader;
+            else if (shader.stage == ShaderRecompiler::ShaderStage::TessellationControl && tessellationPath) hull = &shader;
+            else if (shader.stage == ShaderRecompiler::ShaderStage::TessellationEvaluation && tessellationPath) domain = &shader;
+            else throw std::runtime_error("AGC graphics: Metal draws support only vertex, mesh, tessellation and pixel stages");
         }
-        if (meshPath ? mesh == nullptr || vertex != nullptr : vertex == nullptr) throw std::runtime_error(meshPath ? "AGC graphics: Metal mesh draw has no single mesh stage" : "AGC graphics: Metal draw has no vertex stage");
-        const auto* front = mesh != nullptr ? mesh : vertex;
+        if (tessellationPath) {
+            if (local == nullptr || hull == nullptr || domain == nullptr || vertex != nullptr) throw std::runtime_error("AGC graphics: Metal tessellated draw needs one local, one hull and one domain stage and no vertex stage");
+        } else if (meshPath ? mesh == nullptr || vertex != nullptr : vertex == nullptr) {
+            throw std::runtime_error(meshPath ? "AGC graphics: Metal mesh draw has no single mesh stage" : "AGC graphics: Metal draw has no vertex stage");
+        }
+        const auto* front = mesh != nullptr ? mesh : domain != nullptr ? domain : vertex;
         std::uint32_t meshGroups = 0;
         if (mesh != nullptr) {
             const auto& config = *graphics.stages.mesh;
@@ -3133,9 +3235,26 @@ struct VulkanDevice::State {
                 if (meshGroups > MeshGroupLimit || params.instanceCount > MeshGroupLimit || static_cast<std::uint64_t>(meshGroups) * params.instanceCount > MeshGroupLimit) throw Graphics::UnrenderableDraw("AGC graphics: Metal mesh draw exceeds the threadgroup count limit");
             }
         }
-        const bool rectPath = mesh == nullptr && graphics.rectList;
+        const bool rectPath = mesh == nullptr && !tessellationPath && graphics.rectList;
         if (rectPath && !msl.mesh) throw Graphics::UnrenderableDraw("AGC graphics: Metal rect lists need mesh shaders (Apple7 or later without APS5_METAL_NO_MESH)");
-        const auto translated = Metal::TranslateState(mesh != nullptr ? MeshDrawState(graphics) : rectPath ? RectListDrawState(graphics) : graphics, HasFlatInputs(shaders));
+        if (tessellationPath && !msl.mesh) throw Graphics::UnrenderableDraw("AGC graphics: Metal tessellation needs mesh shaders (Apple7 or later without APS5_METAL_NO_MESH)");
+        if (tessellationPath && indirect != nullptr) throw Graphics::UnrenderableDraw("AGC graphics: Metal reads the patch count of a tessellated draw on the CPU, so indirect tessellated draws are not drawn");
+        id<MTLComputePipelineState> localKernel = nil;
+        id<MTLComputePipelineState> hullKernel = nil;
+        std::uint32_t patches = 0;
+        if (tessellationPath) {
+            const auto& tess = *graphics.stages.tessellation;
+            if (tess.inputControlPoints == 0u || tess.outputControlPoints == 0u) throw std::runtime_error("AGC graphics: Metal tessellated draw has no control points");
+            patches = params.indexCount / tess.inputControlPoints;
+            if (patches == 0u) return;
+            if (patches > MeshGroupLimit || params.instanceCount > MeshGroupLimit || static_cast<std::uint64_t>(patches) * params.instanceCount > MeshGroupLimit) throw Graphics::UnrenderableDraw("AGC graphics: Metal tessellated draw exceeds the threadgroup count limit");
+            if (local->program->workgroupMemoryDwords != 0u || hull->program->workgroupMemoryDwords != 0u) throw Graphics::UnrenderableDraw("AGC graphics: Metal tessellation kernels cannot use device-memory LDS");
+            std::vector<Metal::FunctionConstant> formats;
+            for (const auto& attribute : local->program->vertexAttributes) formats.push_back({ShaderRecompiler::MetalAbi::LocalFetchFormatConstant + attribute.location, static_cast<std::uint32_t>(NativeVertexFormat(Graphics::DecodeVertexFormat(attribute).format)), false});
+            localKernel = pipeline(*local->program, {}, formats);
+            hullKernel = pipeline(*hull->program);
+        }
+        const auto translated = Metal::TranslateState(mesh != nullptr ? MeshDrawState(graphics) : tessellationPath ? TessellationDrawState(graphics) : rectPath ? RectListDrawState(graphics) : graphics, HasFlatInputs(shaders));
         if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection + " (topology " + std::to_string(static_cast<int>(graphics.topology)) + ")");
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) {
@@ -3168,7 +3287,7 @@ struct VulkanDevice::State {
             bool meshRestart = false;
             if (mesh != nullptr) meshArgumentAddress = meshArguments(graphics, params, snapshots, meshRestart);
             else if (indirect != nullptr) indirectAddress = indirectArguments(*indirect, snapshots, indirectStride);
-            const auto& vertexSource = rectPath ? rectSource(*vertex->program) : stageSource(*front->program);
+            const auto& vertexSource = rectPath || tessellationPath ? wrappedSource(*front->program, tessellationPath) : stageSource(*front->program);
             const auto rectIndices = rectPath && params.indexed ? resolve(params.indexAddress, static_cast<std::uint64_t>(params.indexCount) * params.indexSize, false, snapshots, nullptr, false) : 0ull;
             std::uint64_t rectRecords = 0;
             std::uint32_t rectGroups = 0;
@@ -3182,16 +3301,22 @@ struct VulkanDevice::State {
             }
             Metal::RenderPipelineRequest request;
             request.state = translated.pipeline;
-            request.vertexLibrary = librarySource(vertexSource, mesh != nullptr ? "AnyPS5 guest mesh" : rectPath ? "AnyPS5 guest rect list" : "AnyPS5 guest vertex");
+            request.vertexLibrary = librarySource(vertexSource, mesh != nullptr ? "AnyPS5 guest mesh" : tessellationPath ? "AnyPS5 guest tessellation" : rectPath ? "AnyPS5 guest rect list" : "AnyPS5 guest vertex");
             request.vertexFunction = std::string(ShaderRecompiler::MslEntryPoint);
             request.vertexConstants = vertexSource.constants;
             if (mesh != nullptr) {
                 if (!vertexSource.layout || vertexSource.layout->kind != ShaderRecompiler::MslGeometryKind::Mesh || vertexSource.layout->meshThreads == 0u) throw std::runtime_error("AGC graphics: the Metal mesh stage has no mesh layout");
                 request.mesh = true;
                 request.meshThreads = vertexSource.layout->meshThreads;
-            } else if (rectPath) {
+            } else if (rectPath || tessellationPath) {
                 request.mesh = true;
-                request.meshThreads = vertexSource.rects * 3u;
+                request.meshThreads = vertexSource.meshThreads;
+            }
+            if (tessellationPath) {
+                request.objectFunction = std::string(ShaderRecompiler::MslTessellationObjectEntryPoint);
+                request.objectThreads = 1u;
+                request.payloadBytes = vertexSource.payloadBytes;
+                request.meshGroupsPerGrid = vertexSource.meshGroups;
             }
             if (fragment != nullptr) {
                 const auto& fragmentSource = stageSource(*fragment->program);
@@ -3211,7 +3336,9 @@ struct VulkanDevice::State {
                 std::uint32_t records;
             };
             std::vector<VertexFetch> vertexFetches;
-            for (const auto& attribute : mesh != nullptr ? std::span<const ShaderRecompiler::VertexAttribute>{} : std::span(vertex->program->vertexAttributes)) {
+            const auto* fetching = tessellationPath ? local : mesh != nullptr ? nullptr : vertex;
+            const bool fetchTablePath = rectPath || tessellationPath;
+            for (const auto& attribute : fetching == nullptr ? std::span<const ShaderRecompiler::VertexAttribute>{} : std::span(fetching->program->vertexAttributes)) {
                 const auto decoded = Graphics::DecodeVertexFormat(attribute);
                 const auto format = NativeVertexFormat(decoded.format);
                 if (format == MTLVertexFormatInvalid) throw std::runtime_error("AGC graphics: vertex format " + std::to_string(static_cast<int>(decoded.format)) + " has no Metal vertex format");
@@ -3220,11 +3347,11 @@ struct VulkanDevice::State {
                 const auto packed = (decoded.bytes + 3u) & ~3u;
                 if (rectPath) {
                     request.vertexConstants.push_back({ShaderRecompiler::MetalAbi::LocalFetchFormatConstant + attribute.location, static_cast<std::uint32_t>(format), false});
-                } else {
+                } else if (!tessellationPath) {
                     request.vertexAttributes.push_back({attribute.location, static_cast<std::uint32_t>(format), buffer, 0});
                 }
                 if (Graphics::NullVertexDescriptor(attribute) || Graphics::VertexFetchOutOfRange(attribute) || attribute.resource.fields[2] == 0u) {
-                    if (!rectPath) request.vertexBuffers.push_back({buffer, packed, Metal::VertexStep::Constant});
+                    if (!fetchTablePath) request.vertexBuffers.push_back({buffer, packed, Metal::VertexStep::Constant});
                     vertexFetches.push_back({0u, 0u, packed, false, attribute.location, 0u, 0x7fffffffu});
                     continue;
                 }
@@ -3233,7 +3360,7 @@ struct VulkanDevice::State {
                 const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
                 if (stride % 4u != 0u) throw std::runtime_error("AGC graphics: Metal vertex stride " + std::to_string(stride) + " is not a multiple of four");
                 const auto step = stride == 0u ? Metal::VertexStep::Constant : attribute.fetchIndex == 0u ? Metal::VertexStep::Vertex : Metal::VertexStep::Instance;
-                if (!rectPath) request.vertexBuffers.push_back({buffer, stride == 0u ? packed : stride, step});
+                if (!fetchTablePath) request.vertexBuffers.push_back({buffer, stride == 0u ? packed : stride, step});
                 const auto records = step == Metal::VertexStep::Constant ? 0x7fffffffu : std::min<std::uint32_t>(attribute.resource.fields[2], 0x7fffffffu) | (step == Metal::VertexStep::Instance ? ShaderRecompiler::MetalAbi::PerInstanceFetch : 0u);
                 vertexFetches.push_back({address, Graphics::VertexBufferExtent(attribute), packed, true, attribute.location, stride, records});
             }
@@ -3249,7 +3376,7 @@ struct VulkanDevice::State {
                 vertexBuffers.push_back(resolved);
             }
             std::uint64_t fetchTable = 0;
-            if (rectPath) {
+            if (fetchTablePath) {
                 std::vector<ShaderRecompiler::MetalAbi::VertexFetchEntry> entries;
                 for (std::size_t index = 0; index < vertexFetches.size(); ++index) {
                     const auto& fetch = vertexFetches[index];
@@ -3271,9 +3398,11 @@ struct VulkanDevice::State {
                 const std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4> words{params.indexCount, firstVertex, firstInstance, params.indexed ? params.indexSize | (meshRestart ? ShaderRecompiler::MeshIndexRestartTable : 0u) : 0u, static_cast<std::uint32_t>(meshArgumentAddress), static_cast<std::uint32_t>(meshArgumentAddress >> 32u)};
                 bindStage(*mesh->program, snapshots, vertexSlots, uses, nullptr, &words);
             } else {
-                bindStage(*vertex->program, snapshots, vertexSlots, uses, &graphics.depthRemap);
+                bindStage(*front->program, snapshots, vertexSlots, uses, &graphics.depthRemap);
             }
             if (fragment != nullptr) bindStage(*fragment->program, snapshots, fragmentSlots, uses);
+            std::uint64_t geometryAddress = 0;
+            if (tessellationPath) geometryAddress = tessellate(*local->program, *hull->program, localKernel, hullKernel, graphics, params, patches, fetchTable, snapshots);
             lap(2);
 
             std::array<ColorAttachment, Metal::MaxColorAttachments> colors{};
@@ -3409,6 +3538,9 @@ struct VulkanDevice::State {
                     [vertexTable setAddress:uploadBytes(&rect, sizeof(rect)) atIndex:ShaderRecompiler::MetalAbi::GeometrySlot];
                     [render drawMeshThreadgroups:MTLSizeMake(rectGroups, params.instanceCount, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:threads];
                 }
+            } else if (tessellationPath) {
+                [vertexTable setAddress:geometryAddress atIndex:ShaderRecompiler::MetalAbi::GeometrySlot];
+                [render drawMeshThreadgroups:MTLSizeMake(patches, params.instanceCount, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(request.meshThreads, 1, 1)];
             } else if (mesh != nullptr) {
                 ShaderRecompiler::MetalAbi::GeometryParameters geometry{};
                 geometry.meshArguments = meshArgumentAddress;
@@ -3492,7 +3624,7 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         s.registry->Refresh();
         NSError* error = nil;
         MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
-        descriptor.maxBufferBindCount = ShaderRecompiler::MetalAbi::WorkgroupMemorySlot + 1u;
+        descriptor.maxBufferBindCount = std::max(ShaderRecompiler::MetalAbi::WorkgroupMemorySlot, ShaderRecompiler::MetalAbi::VertexFetchSlot) + 1u;
         s.table = [s.native newArgumentTableWithDescriptor:descriptor error:&error];
         if (s.table == nil) throw std::runtime_error("AGC graphics: Metal argument table could not be created");
         descriptor.maxBufferBindCount = RenderSlots;

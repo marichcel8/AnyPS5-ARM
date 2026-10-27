@@ -92,6 +92,12 @@ CompileOutcome buildRender(MetalWorker& worker, const RenderPipelineRequest& req
         mesh.meshFunctionDescriptor = functionDescriptor(vertexLibrary, request.vertexFunction, request.vertexConstants);
         if (fragmentLibrary != nil) mesh.fragmentFunctionDescriptor = functionDescriptor(fragmentLibrary, request.fragmentFunction, request.fragmentConstants);
         mesh.maxTotalThreadsPerMeshThreadgroup = request.meshThreads;
+        if (!request.objectFunction.empty()) {
+            mesh.objectFunctionDescriptor = functionDescriptor(vertexLibrary, request.objectFunction, request.vertexConstants);
+            mesh.maxTotalThreadsPerObjectThreadgroup = request.objectThreads;
+            mesh.payloadMemoryLength = request.payloadBytes;
+            mesh.maxTotalThreadgroupsPerMeshGrid = request.meshGroupsPerGrid;
+        }
         mesh.rasterSampleCount = state.sampleCount;
         mesh.alphaToCoverageState = state.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
         mesh.rasterizationEnabled = state.rasterization;
@@ -218,6 +224,7 @@ CompileKey PipelineCache::RenderKey(const RenderPipelineRequest& request) {
     }
     request.state.AddTo(builder);
     if (request.mesh) builder.Add(0x4d455348ull).Add(request.meshThreads);
+    if (!request.objectFunction.empty()) builder.Add(0x4f424a54ull).AddString(request.objectFunction).Add(request.objectThreads).Add(request.payloadBytes).Add(request.meshGroupsPerGrid);
     builder.Add(static_cast<std::uint64_t>(request.vertexAttributes.size()));
     for (const auto& attribute : request.vertexAttributes) builder.Add(static_cast<std::uint64_t>(attribute.location) | static_cast<std::uint64_t>(attribute.format) << 8u | static_cast<std::uint64_t>(attribute.buffer) << 24u | static_cast<std::uint64_t>(attribute.offset) << 32u);
     for (const auto& buffer : request.vertexBuffers) builder.Add(static_cast<std::uint64_t>(buffer.buffer) | static_cast<std::uint64_t>(buffer.stride) << 8u | static_cast<std::uint64_t>(buffer.step) << 40u);
