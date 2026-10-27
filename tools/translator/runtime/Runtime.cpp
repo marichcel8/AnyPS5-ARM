@@ -134,8 +134,18 @@ struct Coroutine {
 };
 
 std::mutex contextLock;
-std::unordered_map<std::uint64_t, ContextRecord> contextRecords;
-std::unordered_map<std::uint64_t, Coroutine> coroutines;
+// The maps are built on first use and never destroyed: a guest module's initializer can run guest
+// code before this file's static initializers, and its finalizers after its destructors.
+std::unordered_map<std::uint64_t, ContextRecord>& ContextRecords() {
+    static auto* records = new std::unordered_map<std::uint64_t, ContextRecord>;
+    return *records;
+}
+
+std::unordered_map<std::uint64_t, Coroutine>& Coroutines() {
+    static auto* coroutines = new std::unordered_map<std::uint64_t, Coroutine>;
+    return *coroutines;
+}
+
 thread_local const UserUcontext* swapTarget = nullptr;
 
 // libc's exports with long double in their signature (libc/src/GuestX87.cpp), by address.
@@ -144,7 +154,10 @@ struct X87Export {
     const char* signature;
 };
 
-std::unordered_map<std::uint64_t, const char*> x87Exports;
+std::unordered_map<std::uint64_t, const char*>& X87Exports() {
+    static auto* exports = new std::unordered_map<std::uint64_t, const char*>;
+    return *exports;
+}
 
 // A guest stack per thread for sceKernelRaiseException handlers, and the GuestState they interrupted.
 constexpr std::size_t SignalStackBytes = 256u << 10;
@@ -487,7 +500,7 @@ GuestState* NewFiberState(std::uint64_t rsp) {
     if (guestSigprocmask != nullptr) guestSigprocmask(GuestSigSetmask, context->sigmask, nullptr);
     const auto& m = context->mcontext;
     std::unique_lock<std::mutex> guard(contextLock);
-    if (const auto found = contextRecords.find(reinterpret_cast<std::uint64_t>(context)); found != contextRecords.end() && found->second.rip == m.rip) {
+    if (const auto found = ContextRecords().find(reinterpret_cast<std::uint64_t>(context)); found != ContextRecords().end() && found->second.rip == m.rip) {
         const auto record = found->second;
         guard.unlock();
         LoadContext(record.state, m);
@@ -498,7 +511,7 @@ GuestState* NewFiberState(std::uint64_t rsp) {
     }
     if (ImageAt(m.rip) != nullptr) Fail("setcontext to a context without a live getcontext at", m.rip);
     const auto stack = reinterpret_cast<std::uint64_t>(context->stackPointer);
-    auto& coroutine = coroutines[stack];
+    auto& coroutine = Coroutines()[stack];
     const std::size_t bytes = (context->stackSize * 16 + (1u << 20) + 0x3fff) & ~std::size_t(0x3fff);
     if (coroutine.nativeStack != nullptr && coroutine.nativeBytes < bytes) {
         munmap(coroutine.nativeStack, coroutine.nativeBytes);
@@ -635,7 +648,7 @@ void InstallRedirect() {
         exports(&table, &count);
         for (std::size_t i = 0; i < count; ++i) {
             const auto& entry = static_cast<const X87Export*>(table)[i];
-            x87Exports.emplace(reinterpret_cast<std::uint64_t>(entry.function), entry.signature);
+            X87Exports().emplace(reinterpret_cast<std::uint64_t>(entry.function), entry.signature);
         }
     }
     if (auto* hooks = reinterpret_cast<void (*)(const void* (*)(const void*), int (*)(const void*, const void*, const void*, const void*))>(dlsym(RTLD_DEFAULT, "Aps5CallbackHooks_nid_no_patch")))
@@ -708,7 +721,7 @@ Capture aps5_prepare_capture(GuestState* state, std::uint64_t target) {
     }
     SaveContext(state, context);
     const std::lock_guard<std::mutex> guard(contextLock);
-    auto& record = contextRecords[reinterpret_cast<std::uint64_t>(context)];
+    auto& record = ContextRecords()[reinterpret_cast<std::uint64_t>(context)];
     record.state = state;
     record.bridged = Bridged();
     record.rip = context->mcontext.rip;
@@ -828,7 +841,7 @@ void aps5_call_impl(GuestState* state, std::uint64_t target) {
     auto* outer = Bridged();
     Bridged() = state;
     try {
-        if (const auto x87 = x87Exports.find(target); x87 != x87Exports.end()) CallX87(state, target, x87->second);
+        if (const auto x87 = X87Exports().find(target); x87 != X87Exports().end()) CallX87(state, target, x87->second);
         else aps5_host_bridge(state, target);
     } catch (const GuestResume&) {
         Bridged() = outer;
