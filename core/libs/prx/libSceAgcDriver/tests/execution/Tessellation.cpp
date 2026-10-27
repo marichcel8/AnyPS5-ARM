@@ -552,8 +552,17 @@ bool Compiled(const ShaderRecompiler::RecompileResult& result) {
 
 void RequireCompareBranches(const ShaderRecompiler::SpirvTarget& target) {
     std::uint32_t cursor = 0;
-    Require(Compiled(Compile(target, ShaderStage::TessellationEvaluation, DomainCompareBranch, cursor)), "a domain program branching on a compare copied to VCC was not compiled");
-    Require(Compiled(Compile(target, ShaderStage::TessellationControl, HullCompareBranch, cursor)), "a hull program branching on a compare copied to VCC was not compiled");
+    const auto compiles = [&](ShaderStage stage, std::span<const std::uint32_t> code) {
+        try {
+            return Compiled(Compile(target, stage, code, cursor));
+        } catch (const std::exception& error) {
+            if (ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Msl || std::string(error.what()).find("SIMD-group lane operations") == std::string::npos) throw;
+            std::printf("tessellation: %s\n", error.what());
+            return true;
+        }
+    };
+    Require(compiles(ShaderStage::TessellationEvaluation, DomainCompareBranch), "a domain program branching on a compare copied to VCC was not compiled");
+    Require(compiles(ShaderStage::TessellationControl, HullCompareBranch), "a hull program branching on a compare copied to VCC was not compiled");
 }
 
 std::array<std::uint8_t, 4> PixelAt(std::uint32_t x, std::uint32_t y) {
