@@ -341,7 +341,10 @@ static std::int64_t NativeTransferBuffer(int descriptor, void* buf, std::size_t 
             if (appended != -2) return appended;
         }
     }
-    return write ? ::_write(descriptor, buf, static_cast<unsigned int>(nbytes)) : ::_read(descriptor, buf, static_cast<unsigned int>(nbytes));
+    if (!write) return ::_read(descriptor, buf, static_cast<unsigned int>(nbytes));
+    const int result = ::_write(descriptor, buf, static_cast<unsigned int>(nbytes));
+    if (result < 0 && (_doserrno == ERROR_NO_DATA || _doserrno == ERROR_BROKEN_PIPE) && ::GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor))) == FILE_TYPE_PIPE) errno = EPIPE;
+    return result;
 }
 static std::int64_t NativeTransfer(int descriptor, void* buf, std::size_t nbytes, bool write) {
     const auto positioned = File::LockPositionedTransfer(descriptor);
@@ -772,6 +775,10 @@ int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
     if (NativeChmod(native, mode & 07777) != 0) return PosixResult(SceErrorFromErrno(errno == ENOENT ? NotFoundError_nid_no_patch(native) : errno));
     return 0;
+}
+
+int ChmodNative_nid_no_patch(const std::filesystem::path& native, int mode) {
+    return NativeChmod(native, mode);
 }
 
 int APS5_VABI chflags_nid_postfix(const char* path, std::uint64_t flags) {
@@ -1762,6 +1769,13 @@ int APS5_VABI sceKernelRmdir(const char* path) {
     std::error_code error;
     if (std::filesystem::is_symlink(native, error)) return SceErrorFromErrno(GUEST_ENOTDIR);
     if (const int failure = PathLookupFailure(error)) return failure;
+#ifdef _WIN32
+    const DWORD attributes = GetFileAttributesW(native.c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+        std::string junctionTarget;
+        if (File::WindowsSymbolicLink::ReadJunction(native, junctionTarget, "rmdir")) return SceErrorFromErrno(GUEST_ENOTDIR);
+    }
+#endif
     if (!std::filesystem::is_directory(native, error)) {
 #ifdef _WIN32
         if (File::WindowsSymbolicLinkLoop(WithoutTrailingSeparator(native).parent_path())) return SceKernelError(GUEST_ELOOP);

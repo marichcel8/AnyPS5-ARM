@@ -220,13 +220,30 @@ std::int64_t APS5_VABI sysconf_nid_postfix(int name) {
         case 1: // _SC_ARG_MAX
             result = 262144;
             break;
+        case 2: {
+            GuestResourceLimit limit{};
+            if (getrlimit_nid_postfix(7, &limit) == 0) {
+                result = limit.rlim_cur;
+            }
+            break;
+        }
         case 3: // _SC_CLK_TCK
             result = 128;
+            break;
+        case 4:
+            result = 1023;
             break;
         case 5: { // _SC_OPEN_MAX
             GuestResourceLimit limit{};
             if (getrlimit_nid_postfix(8, &limit) == 0) {
                 result = limit.rlim_cur;
+            }
+            break;
+        }
+        case 26: {
+            GuestResourceLimit limit{};
+            if (getrlimit_nid_postfix(8, &limit) == 0) {
+                result = std::min<std::int64_t>(limit.rlim_cur, 32767);
             }
             break;
         }
@@ -243,6 +260,12 @@ std::int64_t APS5_VABI sysconf_nid_postfix(int name) {
 #else
             result = ::sysconf(name == 57 ? _SC_NPROCESSORS_CONF : _SC_NPROCESSORS_ONLN);
 #endif
+            break;
+        case 72:
+            result = 255;
+            break;
+        case 73:
+            result = 33;
             break;
         case 121: { // _SC_PHYS_PAGES: report host physical capacity in guest pages
 #ifdef _WIN32
@@ -497,6 +520,38 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
         const std::uint64_t frequency = sceKernelGetTscFrequency();
         return CopyOut(&frequency, sizeof(frequency), oldValue, oldLength);
     }
+    if (std::strcmp(name, "machdep.upd_version") == 0) {
+        if (newValue != nullptr) {
+            *__error_nid_postfix() = 1;
+            return -1;
+        }
+        static constexpr std::uint32_t updVersion = 0;
+        return CopyOut(&updVersion, sizeof(updVersion), oldValue, oldLength);
+    }
+    if (std::strcmp(name, "machdep.curr_manumode") == 0) {
+        if (newValue != nullptr) {
+            *__error_nid_postfix() = 1;
+            return -1;
+        }
+        static constexpr int manumode = 0;
+        return CopyOut(&manumode, sizeof(manumode), oldValue, oldLength);
+    }
+    if (std::strcmp(name, "machdep.rcmgr_intdev") == 0) {
+        if (newValue != nullptr) {
+            *__error_nid_postfix() = 1;
+            return -1;
+        }
+        static constexpr int intdev = 0;
+        return CopyOut(&intdev, sizeof(intdev), oldValue, oldLength);
+    }
+    if (std::strcmp(name, "machdep.rcmgr_intdev_for_internal_libc") == 0) {
+        if (newValue != nullptr) {
+            *__error_nid_postfix() = 1;
+            return -1;
+        }
+        static constexpr int intdev = 0;
+        return CopyOut(&intdev, sizeof(intdev), oldValue, oldLength);
+    }
     if (std::strcmp(name, "hw.pagesize") == 0) {
         static constexpr int mib[] = {6, 7};
         return sysctl_nid_postfix(mib, 2, oldValue, oldLength, newValue, newLength);
@@ -550,6 +605,43 @@ int APS5_VABI sysKernelGetLowerLimitUpdVersion_nid_postfix(std::uint32_t* versio
     }
     *version = 0;
     return 0;
+}
+
+int APS5_VABI sysKernelGetUpdVersion_nid_postfix(std::uint32_t* version) {
+    if (version == nullptr) {
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
+    std::size_t length = sizeof(*version);
+    return sysctlbyname_nid_postfix("machdep.upd_version", version, &length, nullptr, 0);
+}
+
+int APS5_VABI sysKernelGetManufacturingMode_nid_postfix(void) {
+    int mode = 0;
+    std::size_t length = sizeof(mode);
+    if (sysctlbyname_nid_postfix("machdep.curr_manumode", &mode, &length, nullptr, 0) != 0) {
+        return -1;
+    }
+    return mode;
+}
+
+int APS5_VABI sysKernelGetIntdevModeForInternalLibc_nid_postfix(void) {
+    int mode = 0;
+    std::size_t length = sizeof(mode);
+    const int result = sysctlbyname_nid_postfix("machdep.rcmgr_intdev_for_internal_libc", &mode, &length, nullptr, 0);
+    if (result != 0) {
+        return result;
+    }
+    return mode;
+}
+
+int APS5_VABI sysKernelGetIntdevModeForRcmgr_nid_postfix(void) {
+    int mode = 0;
+    std::size_t length = sizeof(mode);
+    const int result = sysctlbyname_nid_postfix("machdep.rcmgr_intdev", &mode, &length, nullptr, 0);
+    if (result != 0) {
+        return result;
+    }
+    return mode;
 }
 
 int APS5_VABI sysctlnametomib_nid_postfix(const char* name, int* mib, std::size_t* size) {

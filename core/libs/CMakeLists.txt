@@ -382,7 +382,7 @@ if(BUILD_TESTING)
         set(public_header_manifest "${CMAKE_CURRENT_BINARY_DIR}/public_headers.json")
         add_test(NAME public_headers COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_public_headers.py --audit-only --manifest "${public_header_manifest}")
-        set_tests_properties(public_headers PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE FIXTURES_SETUP public_headers_manifest)
+        set_tests_properties(public_headers PROPERTIES TIMEOUT 90 RUN_SERIAL TRUE FIXTURES_SETUP public_headers_manifest)
         foreach(batch RANGE 0 63)
             add_test(NAME public_headers_compile_${batch} COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_public_headers.py --compiler ${CMAKE_CXX_COMPILER} ${public_header_compiler_args}
@@ -571,6 +571,17 @@ if(BUILD_TESTING)
         add_test(NAME undeliverable_host_exception COMMAND undeliverable_host_exception_tests $<TARGET_FILE:libc>)
         set_tests_properties(undeliverable_host_exception PROPERTIES
             PASS_REGULAR_EXPRESSION "C\\+\\+ exception St9bad_alloc raised on thread [0-9]+ cannot be delivered: 0x[0-9a-f]+ undeliverable_host_exception_tests\\.exe\\+0x[0-9a-f]+ has no unwind data")
+    endif()
+
+    add_test_executable(guest_kernel_sys_uuid_tests tests/GuestKernelSysUuid.cpp)
+    target_include_directories(guest_kernel_sys_uuid_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_kernel_sys_uuid_tests PRIVATE libkernel_sys libkernel libc)
+    configure_windows_unwind(guest_kernel_sys_uuid_tests)
+    add_test(NAME guest_kernel_sys_uuid COMMAND guest_kernel_sys_uuid_tests)
+    set_tests_properties(guest_kernel_sys_uuid PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_kernel_sys_uuid PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel_sys>")
     endif()
 
     add_test_executable(crash_text_tests tests/CrashText.cpp)

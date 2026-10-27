@@ -32,6 +32,15 @@ struct KernelAuthInfo {
 };
 static_assert(sizeof(KernelAuthInfo) == 0x88);
 
+struct GuestUuid {
+    std::uint32_t timeLow;
+    std::uint16_t timeMid;
+    std::uint16_t timeHiAndVersion;
+    std::uint8_t clockSeqHiAndReserved;
+    std::uint8_t clockSeqLow;
+    std::uint8_t node[6];
+};
+
 extern "C" {
 
 int APS5_VABI aio_read_nid_postfix(GuestAiocb* aiocb);
@@ -543,10 +552,6 @@ int APS5_VABI sigreturn_nid_postfix(void);
 int APS5_VABI statfs_nid_postfix(void);
 int APS5_VABI swapon_nid_postfix(void);
 int APS5_VABI symlinkat_nid_postfix(void);
-int APS5_VABI sysKernelGetIntdevModeForInternalLibc_nid_postfix(void);
-int APS5_VABI sysKernelGetIntdevModeForRcmgr_nid_postfix(void);
-int APS5_VABI sysKernelGetManufacturingMode_nid_postfix(void);
-int APS5_VABI sysKernelGetUpdVersion_nid_postfix(void);
 int APS5_VABI sysc_e00_nid_postfix(void);
 int APS5_VABI sysc_m00_nid_postfix(void);
 int APS5_VABI sysc_s00_nid_postfix(void);
@@ -554,7 +559,7 @@ int APS5_VABI tcgetsid_nid_postfix(void);
 int APS5_VABI tcsetsid_nid_postfix(void);
 int APS5_VABI unmount_nid_postfix(void);
 int APS5_VABI utrace_nid_postfix(void);
-int APS5_VABI uuidgen_nid_postfix(void);
+int APS5_VABI uuidgen_nid_postfix(GuestUuid* store, int count);
 int APS5_VABI vfork_nid_postfix(void);
 int APS5_VABI wait3_nid_postfix(void);
 int APS5_VABI wait4_nid_postfix(void);

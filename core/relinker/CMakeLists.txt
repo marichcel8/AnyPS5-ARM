@@ -315,11 +315,11 @@ if(BUILD_TESTING)
     add_test_executable(red_zone_framer_tests ${CMAKE_CURRENT_SOURCE_DIR}/codegen/tests/RedZoneFramerTests.cpp)
     target_link_libraries(red_zone_framer_tests PRIVATE relinker_core)
     add_test(NAME red_zone_framer COMMAND red_zone_framer_tests)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32) AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
         add_test_executable(red_zone_framer_execution_tests ${CMAKE_CURRENT_SOURCE_DIR}/codegen/tests/RedZoneFramerExecutionTests.cpp)
         target_link_libraries(red_zone_framer_execution_tests PRIVATE relinker_core)
         add_test(NAME red_zone_framer_execution COMMAND red_zone_framer_execution_tests)
-        set_tests_properties(red_zone_framer_execution PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
+        set_tests_properties(red_zone_framer_execution PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
     endif()
 
     add_test_executable(cli_args_tests
@@ -961,12 +961,6 @@ if(BUILD_TESTING)
         )
         add_test(NAME reloc_table_bounds COMMAND reloc_table_bounds_tests $<TARGET_FILE:relinker>)
     endif()
-
-    set(relinkerTestTemp ${CMAKE_CURRENT_BINARY_DIR}/test-temp)
-    file(MAKE_DIRECTORY ${relinkerTestTemp})
-    get_property(relinkerTests DIRECTORY PROPERTY TESTS)
-    set_property(TEST ${relinkerTests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
-        "TMPDIR=set:${relinkerTestTemp};TEMP=set:${relinkerTestTemp};TMP=set:${relinkerTestTemp}")
 endif()
 
 if(BUILD_TESTING AND Python3_Interpreter_FOUND)
@@ -976,4 +970,12 @@ if(BUILD_TESTING AND Python3_Interpreter_FOUND)
     add_test(NAME macos_guest_weak_imports COMMAND ${Python3_EXECUTABLE}
         ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_macos_guest_weak_imports.py $<TARGET_FILE:relinker>)
     set_property(TEST macos_guest_weak_imports APPEND PROPERTY LABELS relinker)
+endif()
+
+if(BUILD_TESTING)
+    set(relinkerTestTemp ${CMAKE_CURRENT_BINARY_DIR}/test-temp)
+    file(MAKE_DIRECTORY ${relinkerTestTemp})
+    get_property(relinkerTests DIRECTORY PROPERTY TESTS)
+    set_property(TEST ${relinkerTests} APPEND PROPERTY ENVIRONMENT_MODIFICATION
+        "TMPDIR=set:${relinkerTestTemp};TEMP=set:${relinkerTestTemp};TMP=set:${relinkerTestTemp};PYTHONUTF8=set:1")
 endif()

@@ -25,9 +25,11 @@
 #include "prx/libSceAgcDriver/Execution/include/DisplayFormat.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Execution/include/ShaderMemory.hpp"
+#include "prx/libc/include/Api.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
+#include "prx/libc/include/Shutdown.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include "ResidentPresent.hpp"
 #include "ImageTableAbi.hpp"
@@ -66,6 +68,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -9637,6 +9640,29 @@ void minLodTests(const Device& device, Recorder& recorder) {
     expectRed(sample(0x100, 0.0f, 1), unorm(1), "minimum LOD clamp: MIN_LOD at the view's base level reads its base level");
 }
 
+void failedCheckReportTests(const Device& device, Recorder& recorder) {
+    const auto& context = device.GetContext();
+    Require(Recorder::Active() == &recorder, "the failed check test needs the active recorder");
+    TextureDetiler detiler(context);
+    GuestTextureResource resource{};
+    resource.baseAddress = 0x100000;
+    resource.width = 64;
+    resource.height = 64;
+    resource.mipCount = 1;
+    resource.tileMode = TextureTileMode::kLinear;
+    resource.dimension = TextureDimension::k2D;
+    resource.format = 56;
+    resource.dstSelX = 4;
+    resource.dstSelY = 5;
+    resource.dstSelZ = 6;
+    resource.dstSelW = 7;
+    const std::vector<std::byte> snapshot(static_cast<std::size_t>(DescribeSurface(resource).guestBytes), std::byte{0x40});
+    const VkComponentMapping identity{VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
+    Texture texture(context, detiler, resource, identity, snapshot);
+    Require(recorder.Recording(), "a texture upload was not recorded into the open batch");
+    Require(false, "a failed check stopped the test with a texture upload in its open batch");
+}
+
 void singleCubeTests(const Device& device, Recorder& recorder) {
     auto context = device.GetContext();
     TextureDetiler detiler(context);
@@ -11444,7 +11470,23 @@ void Run(Context context) {
 #endif
 
 int main(int argc, char** argv) {
-    try {
+    _ZSt13set_terminatePFvvE_nid_postfix([] {
+        std::fflush(nullptr);
+        std::cout.flush();
+        if (const auto failure = std::current_exception()) {
+            try {
+                std::rethrow_exception(failure);
+            } catch (const std::exception& error) {
+                std::cerr << error.what() << '\n';
+            } catch (...) {
+                std::cerr << "terminated by an exception that is not a std::exception\n";
+            }
+        } else {
+            std::cerr << "terminated without an active exception\n";
+        }
+        LibcTerminate_nid_no_patch(1);
+    });
+    {
         if (argc == 2 && std::string_view(argv[1]) == "--collect-mapping-history-only") {
             if (!collectMappingHistoryTests()) return 77;
             std::cout << "collect mapping history tests passed\n";
@@ -11629,6 +11671,10 @@ int main(int argc, char** argv) {
             }
             tiledResolveTests(device, recorder);
             std::cout << "CB resolves into tiled targets tests passed\n";
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--failed-check-only") {
+            failedCheckReportTests(device, recorder);
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--cube-only") {
@@ -11968,8 +12014,5 @@ int main(int argc, char** argv) {
         recorder.Activate();
         std::cout << "Recorder read tracking and label tests passed\n";
         return 0;
-    } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
-        return 1;
     }
 }

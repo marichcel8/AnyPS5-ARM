@@ -972,6 +972,29 @@ int main() {
     std::filesystem::create_directory(root / "nonempty");
     { std::ofstream out(root / "nonempty" / "f.bin"); out << 'x'; }
     Require(unlinkat_nid_postfix(base, "nonempty", 0x800) == -1 && Error() == 66);
+#ifdef _WIN32
+    const auto fullJunctionTarget = root / "junction-full-target";
+    Require(std::filesystem::create_directory(fullJunctionTarget));
+    { std::ofstream out(fullJunctionTarget / "inside.txt"); out << 'x'; }
+    const auto fullJunctionCommand = L"cmd /c mklink /J \"" + (root / "junction-full").wstring() + L"\" \"" + std::filesystem::absolute(fullJunctionTarget).wstring() + L"\"";
+    Require(_wsystem(fullJunctionCommand.c_str()) == 0);
+    Require(unlinkat_nid_postfix(base, "junction-full", 0x800) == -1 && Error() == 20);
+    Require(std::filesystem::is_regular_file(fullJunctionTarget / "inside.txt"));
+    Require(unlinkat_nid_postfix(base, "junction-full", 0) == 0);
+    Require(!std::filesystem::exists(std::filesystem::symlink_status(root / "junction-full")));
+    Require(std::filesystem::is_regular_file(fullJunctionTarget / "inside.txt"));
+    Require(std::filesystem::remove(fullJunctionTarget / "inside.txt") && std::filesystem::remove(fullJunctionTarget));
+    { std::ofstream out(root / "symlink-target.bin"); out << 'x'; }
+    const int madeLink = symlink_nid_postfix("symlink-target.bin", (root / "symlink-file").string().c_str());
+    if (madeLink == 0) {
+        Require(unlinkat_nid_postfix(base, "symlink-file", 0) == 0);
+        Require(!std::filesystem::exists(std::filesystem::symlink_status(root / "symlink-file")));
+        Require(std::filesystem::is_regular_file(root / "symlink-target.bin"));
+        Require(std::filesystem::remove(root / "symlink-target.bin"));
+    } else {
+        Require(std::filesystem::remove(root / "symlink-target.bin"));
+    }
+#endif
     Require(unlinkat_nid_postfix(base, "nonempty/f.bin", 0) == 0 && !std::filesystem::exists(root / "nonempty" / "f.bin"));
     Require(unlinkat_nid_postfix(base, "nonempty", 0x800) == 0 && !std::filesystem::exists(root / "nonempty"));
     { std::ofstream out(root / "to_unlink.bin"); out << 'x'; }
@@ -1089,6 +1112,29 @@ int main() {
     Require((std::filesystem::status(modeFile).permissions() & std::filesystem::perms::all) == readable);
     Require(RemoveSymlink(modeLink));
 #endif
+    const auto chmodTarget = (root / "chmod-target.txt").string();
+    { std::ofstream file(chmodTarget); file << "x"; }
+    const auto chmodLink = (root / "chmod-link.txt").string();
+    const auto chmodDangling = (root / "chmod-dangling.txt").string();
+    const auto chmodLoopA = (root / "chmod-loop-a").string();
+    const auto chmodLoopB = (root / "chmod-loop-b").string();
+    if (symlink_nid_postfix("chmod-target.txt", chmodLink.c_str()) == 0) {
+        Require(symlink_nid_postfix("chmod-missing.txt", chmodDangling.c_str()) == 0);
+        Require(symlink_nid_postfix("chmod-loop-b", chmodLoopA.c_str()) == 0 && symlink_nid_postfix("chmod-loop-a", chmodLoopB.c_str()) == 0);
+        const auto writable = [&] {
+            FileStat linked{};
+            Require(stat_nid_postfix(chmodTarget.c_str(), &linked) == 0);
+            return (linked.st_mode & 0222) != 0;
+        };
+        Require(writable());
+        Require(fchmodat_nid_postfix(base, "chmod-link.txt", 0400, 0) == 0 && !writable());
+        Require(fchmodat_nid_postfix(-100, chmodLink.c_str(), 0600, 0) == 0 && writable());
+        Require(fchmodat_nid_postfix(base, "chmod-dangling.txt", 0600, 0) == -1 && Error() == 2);
+        Require(fchmodat_nid_postfix(-100, chmodDangling.c_str(), 0600, 0) == -1 && Error() == 2);
+        Require(fchmodat_nid_postfix(base, "chmod-loop-a", 0600, 0) == -1 && Error() == 62);
+        Require(fchmodat_nid_postfix(base, "chmod-link.txt/child", 0600, 0) == -1 && Error() == 20);
+        Require(RemoveSymlink(chmodLink) && RemoveSymlink(chmodDangling) && RemoveSymlink(chmodLoopA) && RemoveSymlink(chmodLoopB));
+    }
     Require(fchown_nid_postfix(base, 0, 0) == 0);
     Require(fchown_nid_postfix(base, 0xFFFFFFFFu, 0xFFFFFFFFu) == 0);
     Require(fchown_nid_postfix(base, 0, 0xFFFFFFFFu) == 0);

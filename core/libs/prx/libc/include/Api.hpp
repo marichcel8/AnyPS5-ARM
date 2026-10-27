@@ -476,6 +476,8 @@ int APS5_VABI tolower_nid_postfix(int c);
 void APS5_VABI _ZNSt8ios_baseD2Ev_nid_postfix(GuestLocale::IosBase* self);
 GuestLocale::IosBase* APS5_VABI SetStreamWidth(GuestLocale::IosBase* stream, std::int32_t width);
 StreamManipulator APS5_VABI _ZSt4setwi_nid_postfix(std::int32_t width);
+GuestLocale::IosBase* APS5_VABI SetStreamPrecision(GuestLocale::IosBase* stream, std::int32_t precision);
+StreamManipulator APS5_VABI _ZSt12setprecisioni_nid_postfix(std::int32_t precision);
 void APS5_VABI _ZNSt8ios_base7_AddstdEPS__nid_postfix(GuestLocale::IosBase* self);
 GuestLocale::Implementation* APS5_VABI _ZNSt6locale5_InitEv_nid_postfix();
 void APS5_VABI _ZNSt6locale5facet9_RegisterEv_nid_postfix(GuestLocale::Facet* self);

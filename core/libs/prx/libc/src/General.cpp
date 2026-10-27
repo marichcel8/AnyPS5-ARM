@@ -1049,6 +1049,9 @@ extern "C" int DuplicateHostDescriptor_nid_no_patch(int descriptor) {
 
 namespace {
 std::atomic<void (*)(const char*)> notImplementedObserver{nullptr};
+
+std::atomic<std::uint64_t> notImplementedCalls{0};
+
 }
 
 extern "C" void SetNotImplementedObserver_nid_no_patch(void (*observer)(const char* funcName)) {
@@ -1056,6 +1059,11 @@ extern "C" void SetNotImplementedObserver_nid_no_patch(void (*observer)(const ch
 }
 
 extern "C" [[noreturn]] void NotImplemented_nid_no_patch(const char* funcName) {
+    notImplementedCalls.fetch_add(1, std::memory_order_relaxed);
     if (const auto observer = notImplementedObserver.load()) observer(funcName);
     throw std::runtime_error(std::string(funcName) + " not implemented");
+}
+
+extern "C" std::uint64_t NotImplementedCalls_nid_no_patch() {
+    return notImplementedCalls.load(std::memory_order_relaxed);
 }

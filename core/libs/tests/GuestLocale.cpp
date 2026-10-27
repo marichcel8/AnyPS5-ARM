@@ -9,6 +9,7 @@
 #include <climits>
 #include <cstdint>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -75,12 +76,22 @@ static void CheckCodecvtWideVtableObject() {
 }
 
 static void CheckCollateVtableObject() {
-    for (std::uintptr_t& slot : _ZTVSt7collateIcE_nid_postfix) {
-        Require(slot == 0);
-        slot = 0x1111;
-        Require(slot == 0x1111);
-        slot = 0;
-    }
+    Require(_ZTVSt7collateIcE_nid_postfix[0] == 0 && _ZTVSt7collateIcE_nid_postfix[1] == 0);
+    for (std::size_t index = 2; index < std::size(_ZTVSt7collateIcE_nid_postfix); ++index) Require(_ZTVSt7collateIcE_nid_postfix[index] != 0);
+    const auto* vtable = reinterpret_cast<const GuestLocale::CollateVtable*>(&_ZTVSt7collateIcE_nid_postfix[2]);
+    GuestLocale::CollateFacet facet{};
+    facet.base.references = 0;
+    vtable->facet.destroy(&facet.base);
+    vtable->facet.retain(&facet.base);
+    Require(facet.base.references == 1);
+    Require(vtable->facet.release(&facet.base) == &facet.base && facet.base.references == 0);
+    Require(vtable->compare(&facet, "abc", "abc" + 3, "abd", "abd" + 3) < 0);
+    Require(vtable->compare(&facet, "abc", "abc" + 3, "abc", "abc" + 3) == 0);
+    Require(vtable->compare(&facet, "abd", "abd" + 3, "abc", "abc" + 3) > 0);
+    GuestLocale::String result{};
+    Require(vtable->transform(&result, &facet, "abc", "abc" + 3) == &result);
+    Require(result.size == 3 && result.capacity == 15 && std::memcmp(result.buffer, "abc", 3) == 0);
+    Require(vtable->hash(&facet, "abc", "abc" + 3) == -1792535898324117685LL);
 }
 
 static void CheckGuestCalls() {
@@ -208,6 +219,28 @@ static void CheckStreamWidth() {
     const auto reset = _ZSt4setwi_nid_postfix(0);
     reset.function(&object.stream, reset.argument);
     Require(object.stream.width == 0);
+    RequireException([&] { manipulator.function(nullptr, manipulator.argument); });
+}
+
+static void CheckStreamPrecision() {
+    struct GuardedStream {
+        std::uint64_t before = 0x12345678;
+        GuestLocale::IosBase stream{};
+        std::uint64_t after = 0x87654321;
+    } object;
+    object.stream.flags = 0x4000;
+    object.stream.width = 5;
+    const auto manipulator = _ZSt12setprecisioni_nid_postfix(12);
+    Require(manipulator.argument == 12 && manipulator.function != nullptr);
+    Require(manipulator.function(&object.stream, manipulator.argument) == &object.stream);
+    Require(object.stream.precision == 12 && object.stream.flags == 0x4000 && object.stream.width == 5);
+    Require(object.before == 0x12345678 && object.after == 0x87654321);
+    const auto zero = _ZSt12setprecisioni_nid_postfix(0);
+    zero.function(&object.stream, zero.argument);
+    Require(object.stream.precision == 0);
+    const auto negative = _ZSt12setprecisioni_nid_postfix(-3);
+    negative.function(&object.stream, negative.argument);
+    Require(object.stream.precision == -3);
     RequireException([&] { manipulator.function(nullptr, manipulator.argument); });
 }
 
@@ -381,6 +414,7 @@ int main() {
     CheckCharacterConversions();
     CheckStreamDestruction();
     CheckStreamWidth();
+    CheckStreamPrecision();
     CheckStandardStreams();
     CheckWideCaseTranslation();
     CheckInputFacetObjects();

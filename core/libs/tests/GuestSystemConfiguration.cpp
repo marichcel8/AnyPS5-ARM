@@ -18,7 +18,6 @@ static_assert(offsetof(SceKernelSystemSwVersion, versionString) == 0x08);
 static_assert(offsetof(SceKernelSystemSwVersion, version) == 0x24);
 static_assert(sizeof(SceKernelSystemSwVersion) == 0x28);
 extern "C" {
-
 extern char** environ_nid_postfix;
 }
 static void Require(bool value) { if (!value) std::abort(); }
@@ -553,6 +552,14 @@ static void CheckVersionLimits() {
     } update{0xaaaaaaaau, 0xaaaaaaaau};
     Require(sysKernelGetLowerLimitUpdVersion_nid_postfix(&update.version) == 0 && update.version == 0 && update.after == 0xaaaaaaaau);
     Require(sysKernelGetLowerLimitUpdVersion_nid_postfix(nullptr) == SCE_KERNEL_ERROR_EINVAL && *__error_nid_postfix() == 13);
+
+    update = {0xaaaaaaaau, 0xaaaaaaaau};
+    Require(sysKernelGetUpdVersion_nid_postfix(&update.version) == 0 && update.version == 0 && update.after == 0xaaaaaaaau);
+    Require(sysKernelGetUpdVersion_nid_postfix(nullptr) == SCE_KERNEL_ERROR_EINVAL && *__error_nid_postfix() == 13);
+
+    Require(sysKernelGetManufacturingMode_nid_postfix() == 0 && *__error_nid_postfix() == 13);
+    Require(sysKernelGetIntdevModeForInternalLibc_nid_postfix() == 0 && *__error_nid_postfix() == 13);
+    Require(sysKernelGetIntdevModeForRcmgr_nid_postfix() == 0 && *__error_nid_postfix() == 13);
 }
 static void CheckSystemSwVersion() {
     *__error_nid_postfix() = 13;
@@ -1001,6 +1008,17 @@ int main() {
     GuestResourceLimit nofileLimit{};
     Require(getrlimit_nid_postfix(8, &nofileLimit) == 0);
     Require(sysconf_nid_postfix(5) == nofileLimit.rlim_cur);
+    GuestResourceLimit nprocLimit{};
+    Require(getrlimit_nid_postfix(7, &nprocLimit) == 0);
+    Require(nprocLimit.rlim_cur == 1604);
+    Require(sysconf_nid_postfix(2) == nprocLimit.rlim_cur);
+    GuestResourceLimit stackLimit{};
+    Require(getrlimit_nid_postfix(3, &stackLimit) == 0);
+    Require(sysconf_nid_postfix(2) != stackLimit.rlim_cur);
+    Require(sysconf_nid_postfix(4) == 1023);
+    Require(sysconf_nid_postfix(26) == std::min<std::int64_t>(nofileLimit.rlim_cur, 32767));
+    Require(sysconf_nid_postfix(72) == 255);
+    Require(sysconf_nid_postfix(73) == 33);
     Require(sysconf_nid_postfix(47) == 0x4000);
     Require(sysconf_nid_postfix(56) == 1024);
     Require(getpagesize_nid_postfix() == sysconf_nid_postfix(47));

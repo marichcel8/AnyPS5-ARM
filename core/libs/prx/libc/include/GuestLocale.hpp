@@ -112,6 +112,8 @@ static_assert(offsetof(Implementation, facetCount) == 0x18);
 static_assert(offsetof(Implementation, transparent) == 0x24);
 static_assert(offsetof(Implementation, name) == 0x28);
 static_assert(offsetof(IosBase, state) == 0x10);
+static_assert(offsetof(IosBase, precision) == 0x1c);
+static_assert(offsetof(IosBase, width) == 0x20);
 static_assert(offsetof(IosBase, storage) == 0x28);
 static_assert(offsetof(IosBase, callbacks) == 0x30);
 static_assert(offsetof(IosBase, locale) == 0x38);
