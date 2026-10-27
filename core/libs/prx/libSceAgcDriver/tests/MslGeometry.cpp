@@ -24,6 +24,17 @@ std::string Check(const RecompileRequest& request, std::string_view name, std::i
     return source;
 }
 
+void CheckTessellationMesh(const std::string& domain, std::string_view name, std::initializer_list<std::string_view> markers) {
+    const auto wrapped = BuildMslTessellationMesh(domain);
+    for (const auto marker : {std::string_view("[[object]] void aps5_ts_object("), std::string_view("object_data aps5_ts_payload& aps5_ts_payload_out [[payload]]"), std::string_view("[[mesh]] void aps5_main("), std::string_view("static inline aps5_stage_out aps5_ts_domain("), std::string_view("aps5_mesh.set_vertex(aps5_ts_index, aps5_emit)"), std::string_view("aps5_ts_grid.set_threadgroups_per_grid(")}) {
+        Require(wrapped.source.find(marker) != std::string::npos, std::string(name) + ": the tessellation mesh source lacks " + std::string(marker) + "\n" + wrapped.source);
+    }
+    for (const auto marker : markers) Require(wrapped.source.find(marker) != std::string::npos, std::string(name) + ": the tessellation mesh source lacks " + std::string(marker) + "\n" + wrapped.source);
+    Require(wrapped.source.find("[[patch(") == std::string::npos && wrapped.source.find("[[position_in_patch]]") == std::string::npos, std::string(name) + ": the tessellation mesh source kept a post-tessellation vertex attribute");
+    Require(wrapped.meshThreads >= 3u && wrapped.meshThreads <= 128u && wrapped.payloadBytes >= 64u && wrapped.payloadBytes <= 16384u && wrapped.maxGroupsPerPatch <= 1024u, std::string(name) + ": the tessellation mesh limits are out of range");
+    if (std::getenv("APS5_PRINT_MSL") != nullptr) std::printf("// %s tessellation mesh\n%s\n", std::string(name).c_str(), wrapped.source.c_str());
+}
+
 MslGeometryLayout Layout(const std::string& source, std::string_view name, MslGeometryKind kind) {
     const auto layout = ParseMslGeometryLayout(source);
     Require(layout.has_value() && layout->kind == kind, std::string(name) + ": the source carries no geometry layout of its kind");
@@ -41,6 +52,14 @@ void CheckTriangles() {
     Require(localLayout.localStride != 0u && localLayout.localStride == hullLayout.localStride, "the local and hull programs disagree on the control point record");
     Require(hullLayout.controlStride != 0u && hullLayout.controlStride == domainLayout.controlStride, "the hull and domain programs disagree on the output control point record");
     Require(hullLayout.inputControlPoints == 3u && hullLayout.outputControlPoints == 3u && hullLayout.domain == 1u && hullLayout.partitioning == 2u && hullLayout.outputTopology == 2u, "the hull layout does not describe the patch");
+    CheckTessellationMesh(domain, "domain", {"constant uint aps5_ts_mode = 2u;", "constant uint aps5_ts_edges = 3u;", "constant bool aps5_ts_flip = false;", "aps5_ts_domain(aps5_geo.base_instance, aps5_geo, aps5_ts_in.instance, aps5_ts_in.patch_id, aps5_ts_c"});
+    bool refused = false;
+    try {
+        static_cast<void>(BuildMslTessellationMesh(hull));
+    } catch (const std::exception& error) {
+        refused = std::string(error.what()).find("cannot wrap this domain function") != std::string::npos;
+    }
+    Require(refused, "a hull kernel was wrapped as a tessellation mesh function");
 }
 
 void CheckQuads() {
@@ -48,6 +67,7 @@ void CheckQuads() {
     Check(Tessellation(ShaderStage::TessellationControl, QuadHullCode, QuadPatches), "quad hull", {"aps5_geo.factors[aps5_patch * 6u"});
     const auto domain = Check(Tessellation(ShaderStage::TessellationEvaluation, QuadDomainCode, QuadPatches), "quad domain", {"[[patch(quad, 0)]] vertex", "float2 aps5_tess_coord [[position_in_patch]]"});
     Require(Layout(domain, "quad domain", MslGeometryKind::Domain).domain == 2u, "the quad domain layout lost its domain");
+    CheckTessellationMesh(domain, "quad domain", {"constant uint aps5_ts_edges = 4u;", "constant uint aps5_ts_halves = 6u;", "constant bool aps5_ts_flip = true;", "aps5_ts_c.xy"});
 }
 
 void CheckMesh() {
@@ -75,6 +95,6 @@ int main() {
         std::fprintf(stderr, "MslGeometry: %s\n", error.what());
         return 1;
     }
-    std::puts("MslGeometry: local, hull and domain programs recompile to Metal tessellation kernels and a post-tessellation vertex function, mesh programs to Metal mesh functions");
+    std::puts("MslGeometry: local, hull and domain programs recompile to Metal tessellation kernels and a post-tessellation vertex function, mesh programs to Metal mesh functions, and domain functions wrap into object and mesh tessellators");
     return 0;
 }

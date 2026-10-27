@@ -191,6 +191,11 @@ std::string AttributeWord(State& state, const IrValue& inst) {
         return geo + ".control[(aps5_patch * " + U32(tess.outputControlPoints) + " + aps5_tid.x) * " + geo + ".control_words + " + Offset(raw, address, control) + "]";
     case TessellationAttribute::EvaluationInput:
         return geo + ".control[(aps5_patch * " + U32(tess.outputControlPoints) + " + " + Vertex(raw, address, control, tess.outputControlPoints) + ") * " + geo + ".control_words + " + Offset(raw, address, control) + "]";
+    case TessellationAttribute::ControlShared: {
+        const auto shared = Stride(metadata.tessellationSharedStride);
+        const auto point = inst.Opcode() == IrOpcode::SetTessellationAttribute ? std::string("aps5_tid.x") : Vertex(raw, address, shared, tess.outputControlPoints);
+        return "aps5_shared[(" + point + ") * " + U32((shared + 3u) / 4u) + " + " + Offset(raw, address, shared) + "]";
+    }
     case TessellationAttribute::PatchOutput:
     case TessellationAttribute::PatchInput: {
         const IrValue* resolved = raw.Resolve();
@@ -217,6 +222,7 @@ void RequireAttributeStage(State& state, const IrValue& inst) {
     case TessellationAttribute::InstanceInput:
     case TessellationAttribute::ControlOutput:
     case TessellationAttribute::PatchOutput:
+    case TessellationAttribute::ControlShared:
     case TessellationAttribute::Factor: valid = stage == IrShaderStage::TessellationControl; break;
     case TessellationAttribute::EvaluationInput:
     case TessellationAttribute::PatchInput: valid = stage == IrShaderStage::TessellationEvaluation; break;
@@ -591,6 +597,8 @@ std::string GeometryProgram(State& state, const std::string& prelude, const std:
             if (const auto culls = MeshCullDistances(state); culls != 0u) text += "    threadgroup float aps5_mesh_cull[" + std::to_string(mesh.maxVertices * culls) + "];\n";
         } else if (stage == IrShaderStage::TessellationEvaluation) {
             text += "    aps5_stage_out aps5_out = {};\n";
+        } else if (stage == IrShaderStage::TessellationControl && state.program.Metadata().tessellationSharedStride != 0u) {
+            text += "    threadgroup uint aps5_shared[" + std::to_string(Tess(state).outputControlPoints * ((Stride(state.program.Metadata().tessellationSharedStride) + 3u) / 4u)) + "];\n";
         }
         text += state.body;
         if (!state.body.ends_with(state.exit + "\n")) text += "    " + state.exit + "\n";

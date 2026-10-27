@@ -168,6 +168,8 @@ function(add_shader_recompiler target runtimeTarget)
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslStage.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslGeometry.cpp
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslRectList.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslTessellation.cpp
+            ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/MslBackend/src/MslWrap.cpp
 
             ${CMAKE_CURRENT_FUNCTION_LIST_DIR}/tests/DummyShaders.cpp
     )
