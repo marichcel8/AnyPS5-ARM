@@ -171,7 +171,7 @@ id<MTLRenderPipelineState> TessellationPipeline(id<MTLDevice> device, const Comp
     descriptor.tessellationFactorFormat = MTLTessellationFactorFormatHalf;
     descriptor.tessellationFactorStepFunction = MTLTessellationFactorStepFunctionPerPatch;
     descriptor.tessellationControlPointIndexType = MTLTessellationControlPointIndexTypeNone;
-    descriptor.tessellationOutputWindingOrder = domain.layout.outputTopology == 3u ? MTLWindingCounterClockwise : MTLWindingClockwise;
+    descriptor.tessellationOutputWindingOrder = domain.layout.outputTopology == 3u ? MTLWindingClockwise : MTLWindingCounterClockwise;
     NSError* error = nil;
     id<MTLRenderPipelineState> pipeline = [device newRenderPipelineStateWithDescriptor:descriptor error:&error];
     Require(pipeline != nil, name + ": the tessellation render pipeline does not build: " + Describe(error));
