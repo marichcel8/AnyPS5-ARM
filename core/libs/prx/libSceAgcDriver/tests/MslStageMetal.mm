@@ -306,7 +306,7 @@ int main() {
                     compileMs = 0.0;
                     const auto drawn = DrawRectList(device, queue, name, rectVertices, indexed ? rectIndices : nil, 4u, compileMs);
                     Expect(drawn, name, [](std::uint32_t x, std::uint32_t y, std::array<float, 4>& color, float& depth) {
-                        if (x < Size / 2u && y >= Size / 2u) return false;
+                        if (x < MslStagePrograms::TargetSize / 2u && y >= MslStagePrograms::TargetSize / 2u) return false;
                         color = {1.0f, 0.5f, 0.0f, 1.0f};
                         depth = 0.25f;
                         return true;

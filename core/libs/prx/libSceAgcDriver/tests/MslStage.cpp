@@ -87,7 +87,6 @@ void Rejected(const std::string& name, const std::function<void(RecompileRequest
 }
 
 void CheckUnsupported() {
-    Rejected("a quad pixel mask", [](RecompileRequest& request) { request.context.pixel->quadPixelMask = 0x7u; });
     Rejected("a primitive-ordered pixel shader", [](RecompileRequest& request) { request.context.pixel->orderedPixelShader = true; });
 }
 
