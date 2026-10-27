@@ -894,6 +894,23 @@ int aps5_guest_va_start(GuestVaList* list, void* saveArea, unsigned fixedGp, uns
     return 0;
 }
 
+void aps5_log_guest_stack(const char* why) {
+    const auto* state = Bridged();
+    if (state == nullptr) return;
+    const auto rsp = state->gpr[Rsp];
+    std::fprintf(stderr, "[guest-stack] %s, rsp 0x%" PRIx64 "\n", why, rsp);
+    unsigned printed = 0;
+    for (unsigned i = 0; i < 1024 && printed < 32; ++i) {
+        std::uint64_t value = 0;
+        std::memcpy(&value, reinterpret_cast<const void*>(rsp + i * 8), 8);
+        const auto* image = ImageAt(value);
+        if (image == nullptr) continue;
+        std::fprintf(stderr, "[guest-stack]   +0x%x %s+0x%" PRIx64 "\n", i * 8, image->name, value - image->base);
+        ++printed;
+    }
+    std::fflush(stderr);
+}
+
 [[noreturn]] void aps5_trap(GuestState* state, std::uint64_t address) {
     static_cast<void>(state);
     Fail("guest trap (ud2/int3) at", address);
