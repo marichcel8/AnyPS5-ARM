@@ -134,8 +134,6 @@ struct Coroutine {
 };
 
 std::mutex contextLock;
-// The maps are built on first use and never destroyed: a guest module's initializer can run guest
-// code before this file's static initializers, and its finalizers after its destructors.
 std::unordered_map<std::uint64_t, ContextRecord>& ContextRecords() {
     static auto* records = new std::unordered_map<std::uint64_t, ContextRecord>;
     return *records;
