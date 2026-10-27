@@ -96,7 +96,11 @@ TranslatedImage images[MaxImages];
 std::atomic<std::uint64_t> imageSizes[MaxImages];
 std::map<std::uint64_t, std::uint64_t>* earlierCounts[MaxImages];
 std::atomic<std::size_t> imageCount{0};
-std::mutex imagesLock;
+// Never destroyed: modules unregister from their static destructors, which run after this file's.
+std::mutex& ImagesLock() {
+    static auto* lock = new std::mutex;
+    return *lock;
+}
 
 const TranslatedImage* ImageAt(std::uint64_t address) {
     const auto count = imageCount.load(std::memory_order_acquire);
@@ -218,7 +222,7 @@ void WriteImageProfile(std::size_t index) {
 }
 
 void WriteProfiles() {
-    const std::lock_guard<std::mutex> guard(imagesLock);
+    const std::lock_guard<std::mutex> guard(ImagesLock());
     for (std::size_t i = 0; i < imageCount.load(std::memory_order_relaxed); ++i) {
         if (earlierCounts[i] != nullptr && imageSizes[i].load(std::memory_order_relaxed) != 0) WriteImageProfile(i);
     }
@@ -238,7 +242,7 @@ void StartProfile() {
 
 void Register(const TranslatedImage& image) {
     if (image.profilePath != nullptr) std::call_once(profileStarted, StartProfile);
-    const std::lock_guard<std::mutex> guard(imagesLock);
+    const std::lock_guard<std::mutex> guard(ImagesLock());
     const auto index = imageCount.load(std::memory_order_relaxed);
     if (index == MaxImages) Fail("too many translated images; cannot register", image.base);
     images[index] = image;
@@ -342,7 +346,7 @@ void aps5_register_image(const TranslatedImage* image) {
 }
 
 void aps5_unregister_image(std::uint64_t base) {
-    const std::lock_guard<std::mutex> guard(imagesLock);
+    const std::lock_guard<std::mutex> guard(ImagesLock());
     for (std::size_t i = 0; i < imageCount.load(std::memory_order_relaxed); ++i) {
         if (images[i].base != base || imageSizes[i].load(std::memory_order_relaxed) == 0) continue;
         if (earlierCounts[i] != nullptr) WriteImageProfile(i);
