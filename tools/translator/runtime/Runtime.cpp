@@ -894,8 +894,6 @@ int aps5_guest_va_start(GuestVaList* list, void* saveArea, unsigned fixedGp, uns
     return 0;
 }
 
-// Prints the guest return addresses found on the stack of the guest call running on this thread:
-// a scan of the stack for addresses in guest images, nearest the stack pointer first.
 void aps5_log_guest_stack(const char* why) {
     const auto* state = Bridged();
     if (state == nullptr) return;
