@@ -45,6 +45,7 @@
 #include "prx/libkernel/File/include/File.hpp"
 #include "prx/libkernel/File/include/RandomDevice.hpp"
 #include "prx/libkernel/File/include/SharedMemory.hpp"
+#include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libkernel/Time/include/TimedWait.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 #include "prx/libkernel/Socket/include/SocketConnect.hpp"
@@ -309,13 +310,12 @@ int AddressLengthError(const void* input, std::uint32_t length) {
     if (length < 2) return 22;
     return input ? 0 : 14;
 }
-bool Address(int family, const void* input, std::uint32_t length, sockaddr_storage& native, socklen_t& size, bool lengthFirst = false) {
+bool Address(int family, const void* input, std::uint32_t length, sockaddr_storage& native, socklen_t& size) {
     if (const int error = AddressLengthError(input, length)) { Fail(error); return false; }
     const auto* bytes = static_cast<const unsigned char*>(input);
     const bool wrongLength = (family == 2 && length != 16) || (family == 28 && length != 28);
-    if (lengthFirst && wrongLength) { Fail(22); return false; }
-    if (family == 2 && bytes[1] != 2) { Fail(47); return false; }
     if (wrongLength) { Fail(22); return false; }
+    if (family == 2 && bytes[1] != 2) { Fail(47); return false; }
     if (family == 2) {
         auto& v4 = reinterpret_cast<sockaddr_in&>(native);
         v4.sin_family = AF_INET;
@@ -771,7 +771,7 @@ bool GuestSockets::PipeReady(int descriptor, short events, short& revents) {
 #endif
 
 namespace {
-int DuplicateSocket_nid_no_patch(int descriptor, int minimum, bool closeOnExec) {
+int DuplicateSocket_nid_no_patch(int descriptor, int minimum) {
     if (minimum < 0) return Fail(22);
     std::lock_guard lock(socketsMutex);
     const auto found = sockets.find(descriptor);
@@ -780,8 +780,7 @@ int DuplicateSocket_nid_no_patch(int descriptor, int minimum, bool closeOnExec) 
     if (duplicate < 0) return -1;
     try {
         sockets.insert_or_assign(duplicate, found->second);
-        if (closeOnExec) closeOnExecDescriptors.insert(duplicate);
-        else closeOnExecDescriptors.erase(duplicate);
+        closeOnExecDescriptors.erase(duplicate);
     } catch (const std::bad_alloc&) {
         sockets.erase(duplicate);
         ReleaseNumber(duplicate);
@@ -792,7 +791,7 @@ int DuplicateSocket_nid_no_patch(int descriptor, int minimum, bool closeOnExec) 
 }
 
 int GuestSockets::Duplicate(int descriptor) {
-    return DuplicateSocket_nid_no_patch(descriptor, 0, false);
+    return DuplicateSocket_nid_no_patch(descriptor, 0);
 }
 
 int GuestSockets::DuplicateTo(int descriptor, int target) {
@@ -1226,12 +1225,10 @@ int APS5_VABI fcntl_nid_postfix(int descriptor, int command, ...) {
         }
         return File::Fcntl(descriptor, command, argument);
     }
-    if (command == 0 || command == 17) return DuplicateSocket_nid_no_patch(descriptor, static_cast<int>(argument), command == 17);
-    if (command == 10 || command == 18) {
-        const int duplicate = dup2_nid_postfix(descriptor, static_cast<int>(argument));
-        if (duplicate >= 0 && command == 18) fcntl_nid_postfix(duplicate, 2, 1);
-        return duplicate;
-    }
+    if (command == 0) return DuplicateSocket_nid_no_patch(descriptor, static_cast<int>(argument));
+    if (command == 17) return Fail(45);
+    if (command == 10) return dup2_nid_postfix(descriptor, static_cast<int>(argument));
+    if (command == 18) return DuplicateSocket_nid_no_patch(descriptor, 0);
     const auto socket = Lookup(descriptor);
     if (!socket) return -1;
     std::lock_guard lock(socket->modeMutex);
@@ -1298,7 +1295,11 @@ int APS5_VABI getsockopt_nid_postfix(int descriptor, int level, int option,
     if (!socket) return -1;
     if (level != 0xffff && level != 0 && level != 6 && level != 41) return Fail(22);
     if (!length) return Fail(22);
-    if (!value) *length = 0;
+    if (!value) {
+        const GuestArena::HostWrite lengthOutput(length, sizeof(*length));
+        if (!lengthOutput.Open()) return Fail(14);
+        *length = 0;
+    }
     std::lock_guard lock(socket->modeMutex);
     const auto native = static_cast<std::uintptr_t>(socket->value);
     const int error = level == 0    ? GuestSockets::GetIpLevelOption(socket->options, socket->family == 2, socket->type == 2, option, value, length)
@@ -1615,7 +1616,7 @@ std::int64_t APS5_VABI sendto_nid_postfix(int descriptor, const void* buffer, st
     } else {
         sockaddr_storage native{};
         socklen_t size;
-        if (!Address(socket->family, address, addressLength, native, size, true)) return -1;
+        if (!Address(socket->family, address, addressLength, native, size)) return -1;
         if (const auto answered = ZeroPortSend(*socket, native, length); answered != NotAnswered) return answered;
         result = static_cast<int>(::sendto(socket->value, static_cast<const char*>(buffer), static_cast<int>(length), SocketSendFlags(*socket, flags),
             reinterpret_cast<sockaddr*>(&native), size));
@@ -1776,6 +1777,31 @@ static bool WriteGuest(void* destination, const void* source, std::size_t bytes)
     return true;
 #endif
 }
+static std::vector<unsigned char> ArrivalTimestamps(const Socket& socket, int keptFlags) {
+    std::vector<unsigned char> records;
+    if (socket.type != 2 || (socket.family != 2 && socket.family != 28)) return records;
+    const bool binary = socket.family == 2 && (keptFlags & 0x2000) != 0;
+    const bool micro = (keptFlags & 0x400) != 0;
+    if (!binary && !micro) return records;
+    KernelTimespec now{};
+    if (clock_gettime_nid_postfix(0, &now) != 0) throw std::runtime_error("recvmsg: reading CLOCK_REALTIME for the arrival time failed");
+    const auto append = [&records](int type, std::int64_t seconds, std::uint64_t fraction) {
+        constexpr std::uint32_t length = 32;
+        constexpr int level = 0xffff;
+        const auto at = records.size();
+        records.resize(at + length);
+        std::memcpy(records.data() + at, &length, sizeof(length));
+        std::memcpy(records.data() + at + 4, &level, sizeof(level));
+        std::memcpy(records.data() + at + 8, &type, sizeof(type));
+        std::memcpy(records.data() + at + 16, &seconds, sizeof(seconds));
+        std::memcpy(records.data() + at + 24, &fraction, sizeof(fraction));
+    };
+    const auto seconds = static_cast<std::int64_t>(now.tv_sec);
+    const auto nanoseconds = static_cast<std::uint64_t>(now.tv_nsec);
+    if (binary) append(4, seconds, nanoseconds * 18446744073ull);
+    if (micro) append(2, seconds, nanoseconds / 1000);
+    return records;
+}
 std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message, int flags) {
     GuestMsghdr header{};
     if (!message || !ReadGuest(&header, message, sizeof(header))) return Fail(14);
@@ -1798,6 +1824,7 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
     sockaddr_storage native{};
     socklen_t size = 0;
     std::int64_t received = 0;
+    std::vector<unsigned char> stamps;
     if (total != 0 || socket->type == 1 || ReadableNow(*socket)) {
         size = sizeof(native);
         if (const int waited = WaitForTransfer(*socket, false, flags)) return Fail(waited);
@@ -1810,6 +1837,14 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
 #else
             return Fail(NativeError());
 #endif
+        }
+        if (header.control) {
+            int keptFlags = 0;
+            {
+                std::lock_guard lock(socket->modeMutex);
+                keptFlags = socket->options.keptFlags;
+            }
+            stamps = ArrivalTimestamps(*socket, keptFlags);
         }
     }
     header.flags = flags;
@@ -1836,7 +1871,11 @@ std::int64_t APS5_VABI recvmsg_nid_postfix(int descriptor, GuestMsghdr* message,
         if (!WriteGuest(header.name, address, header.nameLength)) return Fail(14);
         if (!WriteGuest(&message->nameLength, &header.nameLength, sizeof(header.nameLength))) return Fail(14);
     }
-    header.controlLength = 0;
+    const std::size_t controlCapacity = header.controlLength;
+    const std::size_t copied = std::min(stamps.size(), controlCapacity);
+    if (copied != 0 && !WriteGuest(header.control, stamps.data(), copied)) return Fail(14);
+    if (copied < stamps.size()) header.flags |= 0x20;
+    header.controlLength = static_cast<std::uint32_t>(copied);
     constexpr auto results = offsetof(GuestMsghdr, controlLength);
     if (!WriteGuest(reinterpret_cast<char*>(message) + results, reinterpret_cast<const char*>(&header) + results, sizeof(header) - results)) return Fail(14);
     return received;

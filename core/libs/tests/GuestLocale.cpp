@@ -12,10 +12,13 @@
 #include <iterator>
 #include <stdexcept>
 #include <thread>
+#include <limits>
+#include <string>
 #include <vector>
 
 extern "C" {
 extern GuestLocale::Implementation* _ZSt21_sceLibcClassicLocale_nid_postfix;
+extern std::uint64_t _ZNSt8numpunctIcE2idE_nid_postfix;
 
 extern std::uint64_t _ZNSt7num_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix;
 extern std::uint64_t _ZNSt8time_getIcSt19istreambuf_iteratorIcSt11char_traitsIcEEE2idE_nid_postfix;
@@ -327,6 +330,132 @@ static void CheckWideNumPutVtableObject() {
     }
 }
 
+struct TestStreambuf {
+    GuestLocale::Streambuf buffer;
+    std::string accepted;
+    int offered;
+    int capacity;
+};
+
+int APS5_VABI TestOverflow(GuestLocale::Streambuf* self, int character) {
+    auto* stream = reinterpret_cast<TestStreambuf*>(self);
+    ++stream->offered;
+    if (static_cast<int>(stream->accepted.size()) >= stream->capacity) return -1;
+    stream->accepted += static_cast<char>(character);
+    return character;
+}
+
+const GuestLocale::StreambufVtable g_testStreambufVtable{{}, TestOverflow};
+
+static void CheckTimePut() {
+    const GuestLocale::Implementation* locale = _ZSt21_sceLibcClassicLocale_nid_postfix;
+    GuestLocale::Facet* facet = nullptr;
+    Require(_ZNSt8time_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE7_GetcatEPPKNSt6locale5facetEPKS5__nid_postfix(&facet, &locale) == 5);
+    const auto put = reinterpret_cast<const GuestLocale::TimePutVtable*>(facet->vtable)->put;
+    GuestTm time{};
+    time.tm_year = 126;
+    time.tm_mon = 9;
+    time.tm_mday = 2;
+    time.tm_hour = 13;
+    time.tm_min = 5;
+    time.tm_sec = 9;
+    time.tm_wday = 5;
+    time.tm_yday = 274;
+    char storage[8];
+    char* next = storage;
+    char* end = storage + sizeof(storage);
+    TestStreambuf stream{{&g_testStreambufVtable, {}, &next, {}, &end}, {}, 0, 100};
+    GuestLocale::OutputIterator out = put(facet, {false, &stream.buffer}, nullptr, '*', &time, 'Y', 0);
+    Require(!out.failed && out.buffer == &stream.buffer && next == storage + 4 && std::memcmp(storage, "2026", 4) == 0 && stream.offered == 0);
+    out = put(facet, out, nullptr, '*', &time, 'c', 0);
+    Require(!out.failed && next == end && std::memcmp(storage + 4, "Fri ", 4) == 0 && stream.accepted == "Oct  2 13:05:09 2026");
+    stream.accepted.clear();
+    out = put(facet, out, nullptr, '*', &time, 'Y', 'E');
+    out = put(facet, out, nullptr, '*', &time, 'y', 'O');
+    out = put(facet, out, nullptr, '*', &time, '\0', 0);
+    out = put(facet, out, nullptr, '*', &time, 'k', 0);
+    Require(!out.failed && stream.accepted == "202626%%k");
+    stream.capacity = static_cast<int>(stream.accepted.size()) + 1;
+    stream.offered = 0;
+    out = put(facet, out, nullptr, '*', &time, 'T', 0);
+    Require(out.failed && stream.offered == 8 && stream.accepted == "202626%%k1");
+    next = nullptr;
+    stream.offered = 0;
+    out = put(facet, {false, &stream.buffer}, nullptr, '*', &time, 'H', 0);
+    Require(out.failed && stream.offered == 2);
+    out = put(facet, {false, nullptr}, nullptr, '*', &time, 'H', 0);
+    Require(out.failed && out.buffer == nullptr);
+    facet->vtable->deleteObject(facet);
+}
+
+GuestLocale::String* AssignShortString(GuestLocale::String* result, const char* text) {
+    *result = {};
+    result->size = std::strlen(text);
+    result->capacity = 15;
+    std::memcpy(result->buffer, text, result->size);
+    return result;
+}
+
+void APS5_VABI TestFacetNop(GuestLocale::Facet*) {}
+GuestLocale::Facet* APS5_VABI TestFacetRelease(GuestLocale::Facet*) { return nullptr; }
+char APS5_VABI TestDecimalPoint(const GuestLocale::NumpunctFacet*) { return ','; }
+char APS5_VABI TestThousandsSep(const GuestLocale::NumpunctFacet*) { return '.'; }
+GuestLocale::String* APS5_VABI TestGrouping(GuestLocale::String* result, const GuestLocale::NumpunctFacet*) { return AssignShortString(result, "\1\2"); }
+GuestLocale::String* APS5_VABI TestFalsename(GuestLocale::String* result, const GuestLocale::NumpunctFacet*) { return AssignShortString(result, "no"); }
+GuestLocale::String* APS5_VABI TestTruename(GuestLocale::String* result, const GuestLocale::NumpunctFacet*) { return AssignShortString(result, "yes"); }
+const GuestLocale::NumpunctVtable g_testNumpunctVtable{{TestFacetNop, TestFacetNop, TestFacetNop, TestFacetRelease}, TestDecimalPoint, TestThousandsSep, TestGrouping, TestFalsename, TestTruename};
+
+template<typename TPut>
+static std::string NumPut(TPut put, GuestLocale::Implementation** locale, std::int32_t flags, std::int32_t precision, std::int32_t width) {
+    char storage[64];
+    char* next = storage;
+    char* end = storage + sizeof(storage);
+    TestStreambuf stream{{&g_testStreambufVtable, {}, &next, {}, &end}, {}, 0, 0};
+    GuestLocale::IosBase ios{};
+    ios.flags = flags;
+    ios.precision = precision;
+    ios.width = width;
+    ios.locale = locale;
+    const GuestLocale::OutputIterator out = put(GuestLocale::OutputIterator{false, &stream.buffer}, &ios);
+    Require(!out.failed && out.buffer == &stream.buffer && ios.width == 0 && stream.offered == 0);
+    return std::string(storage, next);
+}
+
+static void CheckNumPut() {
+    GuestLocale::Implementation** classic = &_ZSt21_sceLibcClassicLocale_nid_postfix;
+    const GuestLocale::Implementation* locale = _ZSt21_sceLibcClassicLocale_nid_postfix;
+    GuestLocale::Facet* facet = nullptr;
+    Require(_ZNSt7num_putIcSt19ostreambuf_iteratorIcSt11char_traitsIcEEE7_GetcatEPPKNSt6locale5facetEPKS5__nid_postfix(&facet, &locale) == 4);
+    const auto* put = reinterpret_cast<const GuestLocale::NumPutVtable*>(facet->vtable);
+    const double infinity = std::numeric_limits<double>::infinity();
+    Require(NumPut([&](auto out, auto* ios) { return put->putLong(facet, out, ios, '*', -42); }, classic, 0x408, 6, 8) == "-*****42");
+    Require(NumPut([&](auto out, auto* ios) { return put->putLong(facet, out, ios, '*', 255); }, classic, 0x2c8, 6, 10) == "0X******FF");
+    Require(NumPut([&](auto out, auto* ios) { return put->putUnsignedLong(facet, out, ios, '*', std::numeric_limits<std::uint64_t>::max()); }, classic, 0x20, 6, 0) == "1777777777777777777777");
+    Require(NumPut([&](auto out, auto* ios) { return put->putLongLong(facet, out, ios, '*', std::numeric_limits<std::int64_t>::min()); }, classic, 0x2, 6, 25) == "-9223372036854775808*****");
+    Require(NumPut([&](auto out, auto* ios) { return put->putBool(facet, out, ios, '*', true); }, classic, 0x8002, 6, 7) == "true***");
+    Require(NumPut([&](auto out, auto* ios) { return put->putBool(facet, out, ios, '*', false); }, classic, 0, 6, 0) == "0");
+    Require(NumPut([&](auto out, auto* ios) { return put->putPointer(facet, out, ios, '*', reinterpret_cast<const void*>(0x1234)); }, classic, 0, 6, 6) == "**1234");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', 1234567.891); }, classic, 0, 6, 0) == "1.23457e+06");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', 1234567.891); }, classic, 0x1000, 2, 0) == "1234567.89");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', -0.000123); }, classic, 0xa00, 3, 12) == "**-1.230E-04");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', -1.5); }, classic, 0x1808, 6, 12) == "-***0x1.8p+0");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', 12345678901234.0); }, classic, 0x1000, 0, 0) == "12345678901234");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', -infinity); }, classic, 0x400, 6, 0) == "-inf");
+    Require(NumPut([&](auto out, auto* ios) { return put->putLongDouble(facet, out, ios, '*', -2.25L); }, classic, 0, 3, 0) == "-2.25");
+    RequireException([&] { NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', 1.0); }, classic, 0x1000, -45, 0); });
+    GuestLocale::Facet punct{&g_testNumpunctVtable.facet, 1, 0};
+    std::vector<GuestLocale::Facet*> facets(_ZNSt8numpunctIcE2idE_nid_postfix + 1);
+    facets.back() = &punct;
+    GuestLocale::Implementation custom{{nullptr, 1, 0}, facets.data(), facets.size(), 0, false, "C"};
+    GuestLocale::Implementation* customPointer = &custom;
+    Require(NumPut([&](auto out, auto* ios) { return put->putLong(facet, out, ios, '*', 1234567); }, &customPointer, 0, 6, 0) == "12.34.56.7");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', 1234567.5); }, &customPointer, 0x1000, 1, 0) == "12.34.56.7,5");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', infinity); }, &customPointer, 0x1000, 1, 0) == "inf");
+    Require(NumPut([&](auto out, auto* ios) { return put->putDouble(facet, out, ios, '*', -infinity); }, &customPointer, 0, 6, 0) == "-inf");
+    Require(NumPut([&](auto out, auto* ios) { return put->putBool(facet, out, ios, '*', true); }, &customPointer, 0x8000, 6, 5) == "**yes");
+    facet->vtable->deleteObject(facet);
+}
+
 static void CheckFacetGetcat() {
     const GuestLocale::Implementation* locale = _ZSt21_sceLibcClassicLocale_nid_postfix;
     GuestLocale::Facet* codecvt = nullptr;
@@ -429,6 +558,8 @@ int main() {
     _Locksyslock_nid_postfix();
     _Unlocksyslock_nid_postfix();
     _Unlocksyslock_nid_postfix();
+    CheckTimePut();
+    CheckNumPut();
 
     std::cout << "Guest locale checks passed\n";
 }

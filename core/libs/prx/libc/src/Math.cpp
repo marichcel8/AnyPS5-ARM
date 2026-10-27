@@ -1668,6 +1668,8 @@ int APS5_VABI feholdexcept_nid_postfix(GuestFloatingPointEnvironment* environmen
     return 0;
 }
 
+const GuestFloatingPointEnvironment __fe_dfl_env_nid_postfix {0xffff037fu, 0xffff0000u, 0xffffffffu, {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff}, 0x9fc0u};
+
 union SonyDconst {
     unsigned short _Word[8];
     float _Float;

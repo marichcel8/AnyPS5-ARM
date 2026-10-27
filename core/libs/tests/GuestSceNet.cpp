@@ -616,6 +616,42 @@ static void CheckDontWait() {
     Require(sceNetSocketClose(receiver) == 0 && sceNetSocketClose(sender) == 0);
 }
 
+static void CheckNoSignal() {
+    constexpr int NoSignal = 0x20000;
+    constexpr int DontWait = 0x80;
+    const int listener = sceNetSocket("nosignal-listener", 2, 1, 6);
+    Require(listener >= 0);
+    std::array<std::uint8_t, 16> address{16, 2, 0, 0, 127, 0, 0, 1};
+    Require(sceNetBind_nid_postfix(listener, address.data(), address.size()) == 0);
+    Require(sceNetListen(listener, 1) == 0);
+    std::uint32_t size = address.size();
+    Require(sceNetGetsockname(listener, address.data(), &size) == 0);
+    const int client = sceNetSocket("nosignal-client", 2, 1, 6);
+    Require(client >= 0);
+    Require(sceNetConnect(client, address.data(), address.size()) == 0);
+    const int accepted = sceNetAccept(listener, nullptr, nullptr);
+    Require(accepted >= 0);
+    char reply[] = "nosignal reply";
+    Require(sceNetSend(accepted, reply, 4, NoSignal) == 4);
+    Require(sceNetSendto(accepted, reply + 4, 4, NoSignal | DontWait, nullptr, 0) == 4);
+    NetIovec out[] = {{reply + 8, sizeof(reply) - 8}};
+    NetMsghdr message{nullptr, 0, out, 1, nullptr, 0, 0};
+    Require(sceNetSendmsg(accepted, &message, NoSignal) == static_cast<std::int64_t>(sizeof(reply) - 8));
+    char received[sizeof(reply)]{};
+    std::size_t total = 0;
+    while (total < sizeof(reply)) {
+        const auto count = sceNetRecv(client, received + total, sizeof(received) - total, 0);
+        Require(count > 0);
+        total += static_cast<std::size_t>(count);
+    }
+    Require(std::memcmp(received, reply, sizeof(reply)) == 0);
+    Require(Failed(sceNetSend(accepted, reply, 1, NoSignal | 0x2), 45));
+    Require(sceNetShutdown(accepted, 1) == 0);
+    Require(Failed(sceNetSend(accepted, reply, 1, NoSignal), 32));
+    Require(Failed(sceNetSendto(accepted, reply, 1, NoSignal, nullptr, 0), 32));
+    Require(sceNetSocketClose(client) == 0 && sceNetSocketClose(accepted) == 0 && sceNetSocketClose(listener) == 0);
+}
+
 static void CheckReceiveTimeout(int receiver, int sender, const std::array<std::uint8_t, 16>& address) {
     const KernelTimeval timeout{0, 50000};
     Require(sceNetSetsockopt(receiver, 0xffff, 0x1006, &timeout, sizeof(timeout)) == 0);
@@ -1934,6 +1970,7 @@ int main() {
     CheckIfFlags();
     CheckRejectedArguments();
     CheckDontWait();
+    CheckNoSignal();
     CheckAddressText(2, "127.0.0.1");
     CheckAddressText(2, "255.255.255.255");
     CheckAddressText(28, "::1");

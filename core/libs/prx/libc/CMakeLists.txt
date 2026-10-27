@@ -23,6 +23,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 
+    add_test_executable(guest_stream_purge_tests ${LIBS_INCLUDE_DIR}/tests/GuestStreamPurge.cpp)
+    target_include_directories(guest_stream_purge_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_stream_purge_tests PRIVATE libc)
+    configure_windows_unwind(guest_stream_purge_tests)
+    add_test(NAME guest_stream_purge COMMAND guest_stream_purge_tests)
+    set_tests_properties(guest_stream_purge PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(guest_stream_purge PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(guest_safe_error_tests ${LIBS_INCLUDE_DIR}/tests/GuestSafeErrors.cpp)
     target_include_directories(guest_safe_error_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_safe_error_tests PRIVATE libc)
@@ -71,6 +81,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FileLock.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/StdioExtras.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/StandardStreams.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/StreamPurge.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestAllocations.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestArena.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestStacks.cpp
@@ -142,6 +153,21 @@ endif()
 target_sources(libc PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/FloatingPoint.cpp)
 
 if(BUILD_TESTING)
+    add_test_executable(guest_raise_except_tests ${LIBS_INCLUDE_DIR}/tests/GuestRaiseExcept.cpp)
+    target_include_directories(guest_raise_except_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_raise_except_tests PRIVATE libc ${CMAKE_DL_LIBS})
+    configure_windows_unwind(guest_raise_except_tests)
+    add_test(NAME guest_raise_except COMMAND guest_raise_except_tests $<TARGET_FILE:libc>)
+    set(raiseExceptTests guest_raise_except)
+    foreach(exceptionBit RANGE 0 5)
+        add_test(NAME guest_raise_except_trap_${exceptionBit} COMMAND guest_raise_except_tests $<TARGET_FILE:libc> ${exceptionBit})
+        list(APPEND raiseExceptTests guest_raise_except_trap_${exceptionBit})
+    endforeach()
+    set_tests_properties(${raiseExceptTests} PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(${raiseExceptTests} PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     add_test_executable(guest_floating_point_tests ${LIBS_INCLUDE_DIR}/tests/GuestFloatingPoint.cpp)
     target_include_directories(guest_floating_point_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_floating_point_tests PRIVATE libc ${CMAKE_DL_LIBS})
@@ -859,6 +885,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_generic_category PROPERTIES TIMEOUT 10)
     if(WIN32)
         set_tests_properties(guest_generic_category PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_future_category_tests ${LIBS_INCLUDE_DIR}/tests/GuestFutureCategory.cpp)
+    target_include_directories(guest_future_category_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_future_category_tests PRIVATE libc)
+    configure_windows_unwind(guest_future_category_tests)
+    add_test(NAME guest_future_category COMMAND guest_future_category_tests)
+    set_tests_properties(guest_future_category PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(guest_future_category PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test(NAME guest_new_handler COMMAND guest_new_handler_tests)

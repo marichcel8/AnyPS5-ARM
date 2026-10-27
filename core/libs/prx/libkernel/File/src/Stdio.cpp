@@ -1890,7 +1890,7 @@ int APS5_VABI lutimes_nid_postfix(const char* path, const KernelTimeval* times) 
     path = copy.c_str();
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
-    if (NativeUtimes(native, times, false) != 0) return PosixResult(SceErrorFromErrno(errno));
+    if (NativeUtimes(native, times, false) != 0) return PosixResult(SceErrorFromErrno(errno == ENOENT ? NotFoundError_nid_no_patch(native) : errno));
     return 0;
 }
 

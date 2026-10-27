@@ -107,6 +107,25 @@ def macho_bytes_at(data, address, size):
 def main():
     relinker = Path(sys.argv[1]).resolve()
     with tempfile.TemporaryDirectory(prefix="anyps5-exec-tls-") as directory:
+        for section in (1, 0xff00, 0xfff1, 0xfff2, 0xffff):
+            for binding in (0, 1):
+                for kind in (DTPMOD64, DTPOFF64, TPOFF64):
+                    for flags, target in TARGETS.items():
+                        data = image([(0x1000, kind, TLS_SYMBOL, 0)])
+                        struct.pack_into("<BBH", data, 0x4900 + TLS_SYMBOL * 24 + 4, binding << 4 | 6, 0, section)
+                        name = f"tls-section-{target}-{section}-{binding}-{kind}"
+                        result, output = relink(relinker, directory, name, data, *flags)
+                        if section == 1 and kind == DTPMOD64 and target in ("windows", "macos"):
+                            assert result.returncode == 2 and "DTPMOD64 relocation is not supported" in result.stderr, (
+                                name, result.returncode, result.stderr)
+                            assert not output.exists(), name
+                        elif section == 1:
+                            assert result.returncode == 0 and output.exists(), (name, result.stderr)
+                        else:
+                            assert result.returncode == 2 and "Unsupported executable TLS symbol section" in result.stderr, (
+                                name, result.returncode, result.stderr)
+                            assert not output.exists(), name
+
         local = [(0x1000, TPOFF64, NULL, 4), (0x1008, DTPOFF64, NULL, 8), (0x1010, TPOFF64, TLS_SYMBOL, 2)]
         result, output = relink(relinker, directory, "linux", image(local + [(0x1018, DTPMOD64, NULL, 0),
                                                                               (0x1020, TPOFF64, IMPORTED, 0)]))

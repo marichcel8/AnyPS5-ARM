@@ -156,6 +156,20 @@ struct GuestVmEntry {
 };
 static_assert(offsetof(GuestVmEntry, start) == 8 && offsetof(GuestVmEntry, protection) == 56 && offsetof(GuestVmEntry, path) == 136 && sizeof(GuestVmEntry) == 144);
 
+struct GuestKinfoProc {
+    std::int32_t structSize;
+    std::int32_t layout;
+    unsigned char reserved0[64];
+    std::int32_t pid;
+    std::int32_t parentPid;
+    unsigned char reserved1[288];
+    std::int64_t flag;
+    unsigned char reserved2[71];
+    char command[20];
+    unsigned char reserved3[621];
+};
+static_assert(offsetof(GuestKinfoProc, pid) == 72 && offsetof(GuestKinfoProc, parentPid) == 76 && offsetof(GuestKinfoProc, flag) == 368 && offsetof(GuestKinfoProc, command) == 447 && sizeof(GuestKinfoProc) == 1088);
+
 std::vector<GuestVmEntry> GuestVmEntries() {
     std::vector<GuestVmEntry> entries;
 #ifdef __APPLE__
@@ -369,6 +383,26 @@ int APS5_VABI sysctl_nid_postfix(const int* name, std::uint32_t nameLength, void
         static constexpr char path[] = "/app0/eboot.bin";
         return CopyOut(path, sizeof(path), oldValue, oldLength);
     }
+    if (nameLength >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 1) {
+        if (newValue != nullptr) {
+            *__error_nid_postfix() = 1;
+            return -1;
+        }
+        if (nameLength != 4) {
+            *__error_nid_postfix() = 22;
+            return -1;
+        }
+        if (name[3] != getpid_nid_postfix()) {
+            *__error_nid_postfix() = 3;
+            return -1;
+        }
+        GuestKinfoProc process{};
+        process.structSize = sizeof(process);
+        process.pid = name[3];
+        process.parentPid = getppid_nid_postfix();
+        std::memcpy(process.command, "eboot.bin", sizeof("eboot.bin"));
+        return CopyOut(&process, sizeof(process), oldValue, oldLength);
+    }
     if (nameLength >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 35) {
         if (newValue != nullptr) {
             *__error_nid_postfix() = 1;
@@ -574,7 +608,7 @@ int APS5_VABI sysctlbyname_nid_postfix(const char* name, void* oldValue, std::si
 
 int APS5_VABI sceKernelGetSystemSwVersion_nid_postfix(SceKernelSystemSwVersion* version) {
     if (version == nullptr) {
-        return SCE_KERNEL_ERROR_EFAULT;
+        return 0;
     }
     std::memset(version->versionString, 0, sizeof(version->versionString));
     std::memcpy(version->versionString, "01.000.000", sizeof("01.000.000"));
