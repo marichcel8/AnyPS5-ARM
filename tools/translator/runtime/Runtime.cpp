@@ -149,6 +149,8 @@ struct X87Export {
 };
 
 std::unordered_map<std::uint64_t, const char*> x87Exports;
+std::uint64_t x87Low = ~std::uint64_t(0);
+std::uint64_t x87High = 0;
 
 // A guest stack per thread for sceKernelRaiseException handlers, and the GuestState they interrupted.
 constexpr std::size_t SignalStackBytes = 256u << 10;
@@ -602,6 +604,8 @@ void InstallRedirect() {
         for (std::size_t i = 0; i < count; ++i) {
             const auto& entry = static_cast<const X87Export*>(table)[i];
             x87Exports.emplace(reinterpret_cast<std::uint64_t>(entry.function), entry.signature);
+            x87Low = std::min(x87Low, reinterpret_cast<std::uint64_t>(entry.function));
+            x87High = std::max(x87High, reinterpret_cast<std::uint64_t>(entry.function));
         }
     }
     if (auto* hooks = reinterpret_cast<void (*)(const void* (*)(const void*), int (*)(const void*, const void*, const void*, const void*))>(dlsym(RTLD_DEFAULT, "Aps5CallbackHooks_nid_no_patch")))
@@ -762,7 +766,8 @@ void aps5_call_impl(GuestState* state, std::uint64_t target) {
     auto* outer = Bridged();
     Bridged() = state;
     try {
-        if (const auto x87 = x87Exports.find(target); x87 != x87Exports.end()) CallX87(state, target, x87->second);
+        const auto x87 = target - x87Low <= x87High - x87Low ? x87Exports.find(target) : x87Exports.end();
+        if (x87 != x87Exports.end()) CallX87(state, target, x87->second);
         else aps5_host_bridge(state, target);
     } catch (const GuestResume&) {
         Bridged() = outer;
