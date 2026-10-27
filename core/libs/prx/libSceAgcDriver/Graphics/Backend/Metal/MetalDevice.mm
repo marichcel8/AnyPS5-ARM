@@ -102,6 +102,56 @@ kernel void aps5_scanout_texture(constant uint& swapRedBlue [[buffer(0)]], textu
 }
 )";
 
+constexpr const char* IndirectSource = R"(#include <metal_stdlib>
+using namespace metal;
+struct IndirectRewrite {
+    uint count;
+    uint strideWords;
+    uint recordWords;
+    uint vertexWord;
+    uint instanceWord;
+    uint vertexValue;
+    uint instanceValue;
+    uint flags;
+};
+kernel void aps5_indirect_rewrite(device const uint* source [[buffer(0)]], device uint* target [[buffer(1)]], constant IndirectRewrite& p [[buffer(2)]], uint id [[thread_position_in_grid]]) {
+    if (id >= p.count) return;
+    device const uint* from = source + id * p.strideWords;
+    device uint* to = target + id * p.recordWords;
+    for (uint word = 0u; word < p.recordWords; ++word) to[word] = from[word];
+    if ((p.flags & 1u) != 0u) to[p.vertexWord] = p.vertexValue;
+    if ((p.flags & 2u) != 0u) to[p.instanceWord] = p.instanceValue;
+}
+struct MeshRules {
+    uint indexCount;
+    uint inputSize;
+    uint step;
+    uint primitivesPerGroup;
+    uint maxGroups;
+    uint maxInstances;
+    uint maxTotal;
+};
+kernel void aps5_mesh_arguments(device const uint* record [[buffer(0)]], device uint* arguments [[buffer(1)]], constant MeshRules& r [[buffer(2)]], uint id [[thread_position_in_grid]]) {
+    if (id != 0u) return;
+    const uint count = record[0];
+    const uint instances = record[1];
+    const uint first = record[2];
+    const uint effective = first < r.indexCount ? min(count, r.indexCount - first) : 0u;
+    uint groups = 0u;
+    if (effective >= r.inputSize && instances != 0u) {
+        groups = (effective - r.inputSize) / r.step / r.primitivesPerGroup + 1u;
+        if (groups > r.maxGroups || instances > r.maxInstances || groups > r.maxTotal / instances) groups = 0u;
+    }
+    arguments[0] = groups;
+    arguments[1] = groups != 0u ? instances : 0u;
+    arguments[2] = groups != 0u ? 1u : 0u;
+    arguments[3] = effective;
+    arguments[4] = first;
+}
+)";
+
+constexpr std::uint32_t MeshGroupLimit = (1u << 20u) - 1u;
+
 struct ScanoutParams {
     std::uint32_t width;
     std::uint32_t height;
@@ -270,6 +320,7 @@ struct StageSource {
     std::shared_ptr<const std::string> source;
     Metal::CompileKey key;
     std::vector<Metal::FunctionConstant> constants;
+    std::optional<ShaderRecompiler::MslGeometryLayout> layout;
 };
 
 struct DepthSurface {
@@ -661,6 +712,15 @@ bool RewritesLastProvokingVertex(const Graphics::State& graphics, std::span<cons
     return HasFlatInputs(shaders);
 }
 
+Graphics::State MeshDrawState(const Graphics::State& graphics) {
+    auto adjusted = graphics;
+    adjusted.stages.path = Graphics::ShaderPath::Vertex;
+    adjusted.rectList = false;
+    const auto size = graphics.stages.mesh->outputPrimitiveSize;
+    adjusted.topology = size == 1u ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : size == 2u ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return adjusted;
+}
+
 struct LastProvokingDraw {
     Graphics::State state;
     Pm4::DrawParameters draw;
@@ -760,8 +820,10 @@ std::vector<MTLSamplePosition> GuestSamplePositions(const Graphics::State& graph
 }
 
 std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::span<const Graphics::CompiledShader> shaders) {
+    const bool meshPath = graphics.stages.mesh.has_value() && !graphics.stages.tessellation;
     for (const auto& shader : shaders) {
-        if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex and pixel stages");
+        if (shader.stage == ShaderRecompiler::ShaderStage::Mesh && meshPath) continue;
+        if (shader.stage != ShaderRecompiler::ShaderStage::Vertex && shader.stage != ShaderRecompiler::ShaderStage::Fragment) return std::string("Metal draws support only vertex, mesh and pixel stages");
         if (shader.stage != ShaderRecompiler::ShaderStage::Vertex) continue;
         for (const auto& attribute : shader.program->vertexAttributes) {
             const auto format = Graphics::DecodeVertexFormat(attribute).format;
@@ -769,7 +831,9 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
         }
     }
     std::optional<Graphics::State> adjusted;
-    if (RewritesLastProvokingVertex(graphics, shaders)) {
+    if (meshPath) {
+        adjusted = MeshDrawState(graphics);
+    } else if (RewritesLastProvokingVertex(graphics, shaders)) {
         adjusted = graphics;
         adjusted->provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
     } else if (NeedsFanList(graphics)) {
@@ -808,6 +872,8 @@ ShaderRecompiler::MslTarget BuildMslTarget(id<MTLDevice> device, bool presenting
     target.maxThreadgroupSize = {static_cast<std::uint32_t>(threads.width), static_cast<std::uint32_t>(threads.height), static_cast<std::uint32_t>(threads.depth)};
     target.maxThreadsPerThreadgroup = static_cast<std::uint32_t>(std::max({threads.width, threads.height, threads.depth}));
     target.maxThreadgroupMemoryBytes = static_cast<std::uint32_t>(device.maxThreadgroupMemoryLength);
+    static const bool noMesh = std::getenv("APS5_METAL_NO_MESH") != nullptr;
+    if (!noMesh && [device supportsFamily:MTLGPUFamilyApple7]) target.mesh = ShaderRecompiler::MeshTargetLimits{{1024u, 1u, 1u}, 1024u, std::min<std::uint32_t>(target.maxThreadgroupMemoryBytes, 32768u), 256u, 512u, 128u, 32768u, 32u, 32u};
     static const bool exactFloat = std::getenv("APS5_EXACT_FLOAT") != nullptr;
     static const bool relaxedFloat = std::getenv("APS5_RELAXED_FLOAT") != nullptr;
     target.relaxedFloat = !exactFloat && (relaxedFloat || presenting);
@@ -1005,6 +1071,9 @@ struct VulkanDevice::State {
     id<MTLComputePipelineState> scanoutPipeline = nil;
     id<MTLComputePipelineState> scanoutTexturePipeline = nil;
     id<MTL4ArgumentTable> scanoutTable = nil;
+    id<MTLComputePipelineState> indirectRewritePipeline = nil;
+    id<MTLComputePipelineState> meshArgumentsPipeline = nil;
+    id<MTL4ArgumentTable> indirectTable = nil;
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
     std::uint64_t scanoutFrames = 1;
@@ -1303,7 +1372,7 @@ struct VulkanDevice::State {
         id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)open.commands;
         encoder = [commands computeCommandEncoder];
         if (encoder == nil) throw std::runtime_error("AGC graphics: Metal compute encoder could not be created");
-        [encoder barrierAfterQueueStages:MTLStageDispatch | MTLStageBlit | MTLStageVertex | MTLStageFragment beforeStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
+        [encoder barrierAfterQueueStages:MTLStageDispatch | MTLStageBlit | MTLStageVertex | MTLStageFragment | MTLStageMesh beforeStages:MTLStageDispatch | MTLStageBlit visibilityOptions:MTL4VisibilityOptionDevice];
         encodedDispatches = 0;
         return encoder;
     }
@@ -2189,9 +2258,14 @@ struct VulkanDevice::State {
         return state.gpuResourceID._impl;
     }
 
-    void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses, const Graphics::State::DepthRemap* remap = nullptr) {
+    void bindStage(const ShaderRecompiler::RecompileResult& shader, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::array<std::uint64_t, ArgumentSlots>& slots, std::vector<ImageUse>& uses, const Graphics::State::DepthRemap* remap = nullptr, const std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4>* meshDraw = nullptr) {
         if (cpuProfileEnabled()) bindPhaseAt = std::chrono::steady_clock::now();
-        if (remap != nullptr && remap->mode != 0u && shader.readsDepthRemapPush) {
+        if (meshDraw != nullptr) {
+            std::vector<std::byte> block(std::max<std::size_t>(shader.pushConstants.size(), ShaderRecompiler::MeshDrawPushOffsetBytes + ShaderRecompiler::MeshDrawPushBytes), std::byte{0});
+            std::memcpy(block.data(), shader.pushConstants.data(), shader.pushConstants.size());
+            std::memcpy(block.data() + ShaderRecompiler::MeshDrawPushOffsetBytes, meshDraw->data(), ShaderRecompiler::MeshDrawPushBytes);
+            slots[SlotIndex(BufferSlot::PushConstants)] = uploadBytes(block.data(), block.size(), ShaderRecompiler::MetalAbi::PushConstantBytes);
+        } else if (remap != nullptr && remap->mode != 0u && shader.readsDepthRemapPush) {
             std::vector<std::byte> block(std::max<std::size_t>(shader.pushConstants.size(), ShaderRecompiler::DepthRemapPushOffsetBytes + ShaderRecompiler::DepthRemapPushBytes), std::byte{0});
             std::memcpy(block.data(), shader.pushConstants.data(), shader.pushConstants.size());
             const std::array<float, ShaderRecompiler::DepthRemapPushBytes / 4> words{remap->scale, remap->offset};
@@ -2549,6 +2623,7 @@ struct VulkanDevice::State {
         if (dump) std::fprintf(stderr, "[metal] msl stage %016llx\n%s\n", static_cast<unsigned long long>(shader.msl.ContentHash().low), entry.source->c_str());
         const auto hash = shader.msl.ContentHash();
         entry.key = Metal::CompileKeyBuilder(0x4d534c47ull).Add(hash.low).Add(hash.high).Finish();
+        entry.layout = ShaderRecompiler::ParseMslGeometryLayout(*entry.source);
         const auto declared = DeclaredConstants(*entry.source);
         for (const auto& constant : shader.specialization) {
             if (declared.contains(constant.id)) entry.constants.push_back({constant.id, constant.value, false});
@@ -2815,8 +2890,8 @@ struct VulkanDevice::State {
         id<MTL4CommandBuffer> commands = (__bridge id<MTL4CommandBuffer>)open.commands;
         render = [commands renderCommandEncoderWithDescriptor:descriptor];
         if (render == nil) throw std::runtime_error("AGC graphics: Metal render encoder could not be created");
-        [render barrierAfterQueueStages:MTLStageVertex | MTLStageFragment | MTLStageDispatch | MTLStageBlit beforeStages:MTLStageVertex | MTLStageFragment visibilityOptions:MTL4VisibilityOptionDevice];
-        [render setArgumentTable:vertexTable atStages:MTLRenderStageVertex];
+        [render barrierAfterQueueStages:MTLStageVertex | MTLStageFragment | MTLStageMesh | MTLStageDispatch | MTLStageBlit beforeStages:MTLStageVertex | MTLStageFragment | MTLStageMesh visibilityOptions:MTL4VisibilityOptionDevice];
+        [render setArgumentTable:vertexTable atStages:MTLRenderStageVertex | MTLRenderStageMesh];
         [render setArgumentTable:fragmentTable atStages:MTLRenderStageFragment];
         boundPipeline = nullptr;
         boundDepthStencil = nullptr;
@@ -2848,6 +2923,79 @@ struct VulkanDevice::State {
         dynamicValid = true;
     }
 
+    void indirectKernels() {
+        if (indirectRewritePipeline != nil) return;
+        NSError* error = nil;
+        id<MTLLibrary> library = [native newLibraryWithSource:[NSString stringWithUTF8String:IndirectSource] options:nil error:&error];
+        id<MTLFunction> rewrite = library != nil ? [library newFunctionWithName:@"aps5_indirect_rewrite"] : nil;
+        id<MTLFunction> mesh = library != nil ? [library newFunctionWithName:@"aps5_mesh_arguments"] : nil;
+        if (rewrite == nil || mesh == nil) throw std::runtime_error(std::string("AGC graphics: Metal indirect draw kernels failed to compile: ") + (error.localizedDescription.UTF8String ?: ""));
+        meshArgumentsPipeline = [native newComputePipelineStateWithFunction:mesh error:&error];
+        id<MTLComputePipelineState> rewritePipeline = meshArgumentsPipeline != nil ? [native newComputePipelineStateWithFunction:rewrite error:&error] : nil;
+        if (rewritePipeline == nil) throw std::runtime_error(std::string("AGC graphics: Metal indirect draw pipelines failed to build: ") + (error.localizedDescription.UTF8String ?: ""));
+        MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
+        descriptor.maxBufferBindCount = 3;
+        indirectTable = [native newArgumentTableWithDescriptor:descriptor error:&error];
+        if (indirectTable == nil) throw std::runtime_error("AGC graphics: Metal indirect argument table could not be created");
+        indirectRewritePipeline = rewritePipeline;
+    }
+
+    void dispatchIndirectKernel(id<MTLComputePipelineState> pipeline, std::uint64_t source, std::uint64_t target, const void* params, std::size_t paramBytes, std::uint32_t threads) {
+        auto compute = computeEncoder();
+        [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
+        [indirectTable setAddress:source atIndex:0];
+        [indirectTable setAddress:target atIndex:1];
+        [indirectTable setAddress:uploadBytes(params, paramBytes) atIndex:2];
+        [compute setComputePipelineState:pipeline];
+        [compute setArgumentTable:indirectTable];
+        [compute dispatchThreads:MTLSizeMake(threads, 1, 1) threadsPerThreadgroup:MTLSizeMake(std::min<std::uint32_t>(threads, 64u), 1, 1)];
+        ++encodedDispatches;
+    }
+
+    std::uint64_t indirectArguments(const Pm4::DrawParameters::IndirectDraw& args, std::span<const Graphics::GuestMemorySnapshot> snapshots, std::uint32_t& stride) {
+        using Rule = Pm4::DrawParameters::IndirectDraw::Rule;
+        if (args.stride % 4u != 0u || args.stride < args.recordBytes) throw Graphics::UnrenderableDraw("AGC graphics: Metal indirect draw records are not dword-aligned (stride " + std::to_string(args.stride) + ")");
+        const auto source = resolve(args.arguments, args.RangeBytes(), false, snapshots);
+        if (source == 0 || source % 4u != 0u) throw Graphics::UnrenderableDraw("AGC graphics: Metal indirect draw records are not four-byte aligned");
+        stride = args.stride;
+        const bool vertexConstant = args.vertexRule == Rule::Constant;
+        const bool instanceConstant = args.instanceRule == Rule::Constant;
+        if (!vertexConstant && !instanceConstant) return source;
+        const struct {
+            std::uint32_t count, strideWords, recordWords, vertexWord, instanceWord, vertexValue, instanceValue, flags;
+        } params{args.count, args.stride / 4u, args.recordBytes / 4u, args.VertexDwordOffset() / 4u, args.InstanceDwordOffset() / 4u, args.vertexConstant, args.instanceConstant, (vertexConstant ? 1u : 0u) | (instanceConstant ? 2u : 0u)};
+        const auto target = uploadBytes(nullptr, 0, static_cast<std::size_t>(args.count) * args.recordBytes);
+        indirectKernels();
+        dispatchIndirectKernel(indirectRewritePipeline, source, target, &params, sizeof(params), args.count);
+        stride = args.recordBytes;
+        return target;
+    }
+
+    std::uint64_t meshArguments(const Graphics::State& graphics, const Pm4::DrawParameters& params, std::span<const Graphics::GuestMemorySnapshot> snapshots, bool& restart) {
+        const auto& mesh = *graphics.stages.mesh;
+        std::vector<std::uint32_t> words(ShaderRecompiler::MeshArgumentBytes / 4u, 0u);
+        words[ShaderRecompiler::MeshArgumentIndexCountDword] = params.indirect ? 0u : params.indexCount;
+        restart = false;
+        if (graphics.primitiveRestart && mesh.inputPrimitive == 6u && params.indexed && params.indexCount != 0u) {
+            const auto bytes = static_cast<std::size_t>(params.indexCount) * params.indexSize;
+            if (!GuestMemory::Accessible(reinterpret_cast<const void*>(params.indexAddress), bytes)) throw Graphics::UnrenderableDraw("AGC graphics: a Metal mesh strip with primitive restart reads an index buffer outside guest memory");
+            const auto table = Graphics::MeshRestartTable(std::span(reinterpret_cast<const std::byte*>(params.indexAddress), bytes), params.indexSize);
+            words.push_back(static_cast<std::uint32_t>(table.size()));
+            words.insert(words.end(), table.begin(), table.end());
+            restart = true;
+        }
+        const auto address = uploadBytes(words.data(), words.size() * sizeof(std::uint32_t));
+        if (!params.indirect) return address;
+        const auto& args = *params.indirect;
+        const auto record = resolve(args.arguments, args.recordBytes, false, snapshots);
+        if (record == 0 || record % 4u != 0u) throw Graphics::UnrenderableDraw("AGC graphics: Metal indirect mesh draw record is not four-byte aligned");
+        const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
+        const std::array<std::uint32_t, 7> rules{params.indexCount, inputSize, mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize, mesh.primitivesPerGroup, MeshGroupLimit, MeshGroupLimit, MeshGroupLimit};
+        indirectKernels();
+        dispatchIndirectKernel(meshArgumentsPipeline, record, address, rules.data(), sizeof(rules), 1u);
+        return address;
+    }
+
     void draw(const Graphics::State& submitted, const Pm4::DrawParameters& submittedParams, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) {
         if (submitted.depthBias && submitted.depthBiasPerFace && (submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST || submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP || submitted.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN)) {
             if (submitted.cullMode != VK_CULL_MODE_NONE) throw std::runtime_error("AGC graphics: per-face depth bias needs both faces rasterized");
@@ -2863,12 +3011,15 @@ struct VulkanDevice::State {
             draw(back, submittedParams, shaders, snapshots);
             return;
         }
-        if (submittedParams.indirect) throw std::runtime_error("AGC graphics: Metal indirect draws are not wired yet");
-        if (submittedParams.indexCount == 0 || submittedParams.instanceCount == 0) return;
+        const auto* indirect = submittedParams.indirect ? &*submittedParams.indirect : nullptr;
+        if (indirect != nullptr ? indirect->count == 0 : submittedParams.indexCount == 0 || submittedParams.instanceCount == 0) return;
+        if (indirect != nullptr && (indirect->countIndirect || (submittedParams.indexed && !indirect->indexLimitKnown))) throw Graphics::UnrenderableDraw("AGC graphics: Metal reads indirect draw records with a known count and index range only");
         if (Graphics::PartialSampleMask(submitted) && Graphics::UniformSampleMask(submitted) && Graphics::HostSampleMask(submitted) == 0u) return;
         if (submittedParams.indexed && submittedParams.indexSize != 2u && submittedParams.indexSize != 4u) throw std::runtime_error("AGC graphics: only uint16 and uint32 index buffers are supported");
         std::optional<LastProvokingDraw> provoking;
-        if (RewritesLastProvokingVertex(submitted, shaders)) {
+        if (indirect != nullptr && (RewritesLastProvokingVertex(submitted, shaders) || NeedsFanList(submitted))) {
+            throw Graphics::UnrenderableDraw("AGC graphics: a Metal indirect draw needs its index list rewritten on the CPU (fan or last provoking vertex)");
+        } else if (RewritesLastProvokingVertex(submitted, shaders)) {
             provoking = RewriteLastProvokingVertex(submitted, submittedParams);
             if (provoking->list.empty()) return;
         } else if (NeedsFanList(submitted)) {
@@ -2878,14 +3029,31 @@ struct VulkanDevice::State {
         const Graphics::State& graphics = provoking ? provoking->state : submitted;
         const Pm4::DrawParameters& params = provoking ? provoking->draw : submittedParams;
         const Graphics::CompiledShader* vertex = nullptr;
+        const Graphics::CompiledShader* mesh = nullptr;
         const Graphics::CompiledShader* fragment = nullptr;
+        const bool meshPath = graphics.stages.mesh.has_value() && !graphics.stages.tessellation;
         for (const auto& shader : shaders) {
             if (shader.stage == ShaderRecompiler::ShaderStage::Vertex) vertex = &shader;
+            else if (shader.stage == ShaderRecompiler::ShaderStage::Mesh && meshPath) mesh = &shader;
             else if (shader.stage == ShaderRecompiler::ShaderStage::Fragment) fragment = &shader;
-            else throw std::runtime_error("AGC graphics: Metal draws support only vertex and pixel stages");
+            else throw std::runtime_error("AGC graphics: Metal draws support only vertex, mesh and pixel stages");
         }
-        if (vertex == nullptr) throw std::runtime_error("AGC graphics: Metal draw has no vertex stage");
-        const auto translated = Metal::TranslateState(graphics, HasFlatInputs(shaders));
+        if (meshPath ? mesh == nullptr || vertex != nullptr : vertex == nullptr) throw std::runtime_error(meshPath ? "AGC graphics: Metal mesh draw has no single mesh stage" : "AGC graphics: Metal draw has no vertex stage");
+        const auto* front = mesh != nullptr ? mesh : vertex;
+        std::uint32_t meshGroups = 0;
+        if (mesh != nullptr) {
+            const auto& config = *graphics.stages.mesh;
+            const auto inputSize = config.inputPrimitive == 1 ? 1u : config.inputPrimitive == 2 ? 2u : 3u;
+            if (config.primitivesPerGroup == 0u) throw std::runtime_error("AGC graphics: mesh pipeline groups no primitive (zero primitives per group)");
+            if (((graphics.stages.registerValue >> 19u) & 3u) != 0u && params.indexed) throw Graphics::UnrenderableDraw("AGC graphics: indexed fast-launch draws are unsupported");
+            if (indirect == nullptr) {
+                if (params.indexCount < inputSize) return;
+                const auto step = config.inputPrimitive == 5 || config.inputPrimitive == 6 ? 1u : inputSize;
+                meshGroups = ((params.indexCount - inputSize) / step) / config.primitivesPerGroup + 1u;
+                if (meshGroups > MeshGroupLimit || params.instanceCount > MeshGroupLimit || static_cast<std::uint64_t>(meshGroups) * params.instanceCount > MeshGroupLimit) throw Graphics::UnrenderableDraw("AGC graphics: Metal mesh draw exceeds the threadgroup count limit");
+            }
+        }
+        const auto translated = mesh != nullptr ? Metal::TranslateState(MeshDrawState(graphics), HasFlatInputs(shaders)) : Metal::TranslateState(graphics, HasFlatInputs(shaders));
         if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection + " (topology " + std::to_string(static_cast<int>(graphics.topology)) + ")");
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) {
@@ -2912,12 +3080,23 @@ struct VulkanDevice::State {
             const EncodingScope encoding;
             registry->Refresh();
             begin();
+            std::uint64_t indirectAddress = 0;
+            std::uint32_t indirectStride = 0;
+            std::uint64_t meshArgumentAddress = 0;
+            bool meshRestart = false;
+            if (mesh != nullptr) meshArgumentAddress = meshArguments(graphics, params, snapshots, meshRestart);
+            else if (indirect != nullptr) indirectAddress = indirectArguments(*indirect, snapshots, indirectStride);
             Metal::RenderPipelineRequest request;
             request.state = translated.pipeline;
-            const auto& vertexSource = stageSource(*vertex->program);
-            request.vertexLibrary = librarySource(vertexSource, "AnyPS5 guest vertex");
+            const auto& vertexSource = stageSource(*front->program);
+            request.vertexLibrary = librarySource(vertexSource, mesh != nullptr ? "AnyPS5 guest mesh" : "AnyPS5 guest vertex");
             request.vertexFunction = std::string(ShaderRecompiler::MslEntryPoint);
             request.vertexConstants = vertexSource.constants;
+            if (mesh != nullptr) {
+                if (!vertexSource.layout || vertexSource.layout->kind != ShaderRecompiler::MslGeometryKind::Mesh || vertexSource.layout->meshThreads == 0u) throw std::runtime_error("AGC graphics: the Metal mesh stage has no mesh layout");
+                request.mesh = true;
+                request.meshThreads = vertexSource.layout->meshThreads;
+            }
             if (fragment != nullptr) {
                 const auto& fragmentSource = stageSource(*fragment->program);
                 request.fragmentLibrary = librarySource(fragmentSource, "AnyPS5 guest pixel");
@@ -2933,7 +3112,7 @@ struct VulkanDevice::State {
                 bool fetched;
             };
             std::vector<VertexFetch> vertexFetches;
-            for (const auto& attribute : vertex->program->vertexAttributes) {
+            for (const auto& attribute : mesh != nullptr ? std::span<const ShaderRecompiler::VertexAttribute>{} : std::span(vertex->program->vertexAttributes)) {
                 const auto decoded = Graphics::DecodeVertexFormat(attribute);
                 const auto format = NativeVertexFormat(decoded.format);
                 if (format == MTLVertexFormatInvalid) throw std::runtime_error("AGC graphics: vertex format " + std::to_string(static_cast<int>(decoded.format)) + " has no Metal vertex format");
@@ -2971,7 +3150,14 @@ struct VulkanDevice::State {
             std::array<std::uint64_t, ArgumentSlots> vertexSlots{};
             std::array<std::uint64_t, ArgumentSlots> fragmentSlots{};
             std::vector<ImageUse> uses;
-            bindStage(*vertex->program, snapshots, vertexSlots, uses, &graphics.depthRemap);
+            if (mesh != nullptr) {
+                const auto firstVertex = indirect != nullptr ? indirect->vertexConstant : params.firstVertex;
+                const auto firstInstance = indirect != nullptr ? indirect->instanceConstant : params.firstInstance;
+                const std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4> words{params.indexCount, firstVertex, firstInstance, params.indexed ? params.indexSize | (meshRestart ? ShaderRecompiler::MeshIndexRestartTable : 0u) : 0u, static_cast<std::uint32_t>(meshArgumentAddress), static_cast<std::uint32_t>(meshArgumentAddress >> 32u)};
+                bindStage(*mesh->program, snapshots, vertexSlots, uses, nullptr, &words);
+            } else {
+                bindStage(*vertex->program, snapshots, vertexSlots, uses, &graphics.depthRemap);
+            }
             if (fragment != nullptr) bindStage(*fragment->program, snapshots, fragmentSlots, uses);
             lap(2);
 
@@ -3094,7 +3280,24 @@ struct VulkanDevice::State {
             }
             for (std::size_t index = 0; index < vertexBuffers.size(); ++index) [vertexTable setAddress:vertexBuffers[index] atIndex:FirstVertexBuffer + index];
             const auto primitive = static_cast<MTLPrimitiveType>(translated.primitive);
-            if (params.indexed) {
+            if (mesh != nullptr) {
+                ShaderRecompiler::MetalAbi::GeometryParameters geometry{};
+                geometry.meshArguments = meshArgumentAddress;
+                geometry.instanceCount = params.instanceCount;
+                geometry.baseInstance = params.firstInstance;
+                [vertexTable setAddress:uploadBytes(&geometry, sizeof(geometry)) atIndex:ShaderRecompiler::MetalAbi::GeometrySlot];
+                const auto threads = MTLSizeMake(request.meshThreads, 1, 1);
+                if (indirect != nullptr) [render drawMeshThreadgroupsWithIndirectBuffer:meshArgumentAddress threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:threads];
+                else [render drawMeshThreadgroups:MTLSizeMake(meshGroups, params.instanceCount, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:threads];
+            } else if (indirect != nullptr) {
+                const auto bytes = static_cast<std::uint64_t>(params.indexCount) * params.indexSize;
+                const auto indices = params.indexed ? resolve(params.indexAddress, bytes, false, snapshots, nullptr, false) : 0ull;
+                for (std::uint32_t record = 0; record < indirect->count; ++record) {
+                    const auto arguments = indirectAddress + static_cast<std::uint64_t>(record) * indirectStride;
+                    if (params.indexed) [render drawIndexedPrimitives:primitive indexType:params.indexSize == 2u ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferLength:bytes indirectBuffer:arguments];
+                    else [render drawPrimitives:primitive indirectBuffer:arguments];
+                }
+            } else if (params.indexed) {
                 const auto bytes = static_cast<std::uint64_t>(params.indexCount) * params.indexSize;
                 const auto indices = provoking ? uploadBytes(provoking->list.data(), bytes, bytes) : resolve(params.indexAddress, bytes, false, snapshots, nullptr, false);
                 [render drawIndexedPrimitives:primitive indexCount:params.indexCount indexType:params.indexSize == 2u ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32 indexBuffer:indices indexBufferLength:bytes instanceCount:params.instanceCount baseVertex:static_cast<NSInteger>(params.firstVertex) baseInstance:params.firstInstance];
@@ -3117,7 +3320,7 @@ struct VulkanDevice::State {
             ++cbDraws;
             if (gpuTimeEnabled()) {
                 char text[320];
-                int used = std::snprintf(text, sizeof(text), "last draw: pass %ux%u, %u colors, depth %d, prim %u, %u indices x %u, viewport %.0fx%.0f, scissor %ux%u, vs %08llx ps %08llx, images", passWidth, passHeight, static_cast<unsigned>(targets.size()), depth != nullptr ? 1 : 0, static_cast<unsigned>(translated.primitive), params.indexCount, params.instanceCount, dynamic.viewport.width, dynamic.viewport.height, dynamic.scissor.width, dynamic.scissor.height, static_cast<unsigned long long>(vertex->program->msl.ContentHash().low & 0xffffffffull), static_cast<unsigned long long>(fragment != nullptr ? fragment->program->msl.ContentHash().low & 0xffffffffull : 0ull));
+                int used = std::snprintf(text, sizeof(text), "last draw: pass %ux%u, %u colors, depth %d, prim %u, %u indices x %u, viewport %.0fx%.0f, scissor %ux%u, vs %08llx ps %08llx, images", passWidth, passHeight, static_cast<unsigned>(targets.size()), depth != nullptr ? 1 : 0, static_cast<unsigned>(translated.primitive), params.indexCount, params.instanceCount, dynamic.viewport.width, dynamic.viewport.height, dynamic.scissor.width, dynamic.scissor.height, static_cast<unsigned long long>(front->program->msl.ContentHash().low & 0xffffffffull), static_cast<unsigned long long>(fragment != nullptr ? fragment->program->msl.ContentHash().low & 0xffffffffull : 0ull));
                 for (std::size_t index = 0; index < uses.size() && index < 6 && used > 0 && used < static_cast<int>(sizeof(text)); ++index) used += std::snprintf(text + used, sizeof(text) - static_cast<std::size_t>(used), " %ux%u", uses[index].resource.width, uses[index].resource.height);
                 cbLastDraw = text;
             }
@@ -3242,7 +3445,7 @@ auto VulkanDevice::WorkGroupCountLimit() const -> const std::uint32_t* { return 
 
 auto VulkanDevice::VendorId() const -> std::uint32_t { return 0x106b; }
 
-auto VulkanDevice::MeshShaders() const -> bool { return false; }
+auto VulkanDevice::MeshShaders() const -> bool { return state->msl.mesh.has_value(); }
 
 auto VulkanDevice::NormalizeUnobservedViewportDepth(Graphics::State&, const ShaderRecompiler::ShaderPixelStageInfo&) const -> bool { return false; }
 
@@ -3556,7 +3759,7 @@ auto VulkanDevice::ColorMetadataPass(const Graphics::ColorMetadataPass&) -> void
 
 auto VulkanDevice::DrawFromRecipe(const Graphics::State&, const Pm4::DrawParameters&, std::span<const Graphics::CompiledShader>, std::span<const Graphics::GuestMemorySnapshot>, const std::shared_ptr<const DrawRecipe>&, const DrawTraceContext*) -> RecipeOutcome { return RecipeOutcome::Rebuild; }
 
-auto VulkanDevice::DrawIndirectSupport() const -> IndirectDrawSupport { return {false, false, false}; }
+auto VulkanDevice::DrawIndirectSupport() const -> IndirectDrawSupport { return {true, false, false}; }
 
 auto VulkanDevice::EnqueueDraw(const Graphics::State& graphics, const Pm4::DrawParameters& draw, std::span<const Graphics::CompiledShader> shaders, std::span<const Graphics::GuestMemorySnapshot> snapshots) -> void {
     for (const auto& shader : shaders) ShaderRecompiler::RuntimeAbi::RequireVersion(shader.program->runtimeAbiVersion);
