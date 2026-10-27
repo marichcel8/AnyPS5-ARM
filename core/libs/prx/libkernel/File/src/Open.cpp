@@ -14,6 +14,7 @@
 #include "prx/libkernel/File/include/DescriptorControl.hpp"
 #include "prx/libkernel/File/include/FileLock.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
+#include "prx/libkernel/Socket/include/SocketPoll.hpp"
 #include "prx/libkernel/File/include/RandomDevice.hpp"
 #include "prx/libkernel/File/include/HostStreams.hpp"
 #include "prx/libkernel/File/include/ArchivedFile.hpp"
@@ -32,6 +33,7 @@
 #include <io.h>
 #include <sys/stat.h>
 #include <windows.h>
+#include "prx/libc/include/WindowsDescriptor.hpp"
 #include "prx/libkernel/File/include/WindowsSymbolicLink.hpp"
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
     const int access = nativeFlags & (_O_RDONLY | _O_WRONLY | _O_RDWR);
@@ -54,10 +56,11 @@ static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
     const auto positioned = File::LockPositionedTransfer(fd);
     const auto result = File::SeekSharedMemory_nid_no_patch(fd, offset, whence);
     if (result != -2) return result;
-    const auto position = ::_lseeki64(fd, offset, whence);
-    if (position < 0 || GetFileType(reinterpret_cast<HANDLE>(::_get_osfhandle(fd))) != FILE_TYPE_PIPE) return position;
-    errno = ESPIPE;
-    return -1;
+    if (GetFileType(WindowsDescriptorHandle_nid_no_patch(fd)) == FILE_TYPE_PIPE) {
+        errno = ESPIPE;
+        return -1;
+    }
+    return ::_lseeki64(fd, offset, whence);
 }
 static int NativeRead(int fd, void* buf, std::size_t n) {
     if (n > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
@@ -340,6 +343,8 @@ int OpenInDirectory_nid_no_patch(int directory, const char* path, int flags, std
 
 int APS5_VABI sceKernelClose(int d) {
     if (File::IsHostStream(d)) return SCE_KERNEL_ERROR_EPERM;
+    int socketError = 0;
+    if (KernelCloseSocket_nid_no_patch(d, &socketError)) return socketError == 0 ? 0 : SceKernelError(socketError);
     if (GuestSockets::IsOpen(d)) return GuestSockets::Close(d) == 0 ? 0 : SceKernelError(*__error_nid_postfix());
     EqueueDescriptorClosed(d);
 #ifdef _WIN32

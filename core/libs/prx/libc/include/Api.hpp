@@ -1052,6 +1052,7 @@ int APS5_VABI _Tss_delete_nid_postfix(int key);
 void* APS5_VABI _Tss_get_nid_postfix(int key);
 int APS5_VABI _Tss_set_nid_postfix(int key, void* value);
 int APS5_VABI _Thrd_equal_nid_postfix(void* first, void* second);
+int APS5_VABI _Thrd_lt_nid_postfix(void* first, void* second);
 void* APS5_VABI _Thrd_current_nid_postfix(void);
 int APS5_VABI _Mtx_current_owns_nid_postfix(void**);
 int APS5_VABI _ZNSt8__sce_v219_Mtx_init_with_nameEPP13pthread_mutexiPKc_nid_postfix(void** mutex, int type, const char* name);
@@ -1109,6 +1110,7 @@ std::size_t APS5_VABI __std_count_trivial_1_nid_postfix(const void* first, const
 std::size_t APS5_VABI __std_count_trivial_2_nid_postfix(const void* first, const void* last, std::uint16_t value);
 std::size_t APS5_VABI __std_count_trivial_4_nid_postfix(const void* first, const void* last, std::uint32_t value);
 std::size_t APS5_VABI __std_count_trivial_8_nid_postfix(const void* first, const void* last, std::uint64_t value);
+std::uint64_t APS5_VABI __std_min_8u_nid_postfix(const void* first, const void* last);
 const void* APS5_VABI __std_min_element_1_nid_postfix(const void* first, const void* last, bool isSigned);
 const void* APS5_VABI __std_min_element_2_nid_postfix(const void* first, const void* last, bool isSigned);
 const void* APS5_VABI __std_min_element_4_nid_postfix(const void* first, const void* last, bool isSigned);

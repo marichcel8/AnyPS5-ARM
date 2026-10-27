@@ -379,13 +379,6 @@ std::map<int, Sock> g_socks;
 std::set<int> g_epolls;
 using EpollRegistrations = std::map<int, std::shared_ptr<const NetEpollEvent>>;
 std::map<int, EpollRegistrations> g_epoll_socks;
-// Registrations of descriptors made by libkernel's socket(), which have no Sock here. The weak owner tells a
-// registration of a closed socket from one of a new socket that reuses its number.
-struct KernelEpollWatch {
-    std::weak_ptr<void> owner;
-    NativeSocket native;
-};
-std::map<int, std::map<int, KernelEpollWatch>> g_epoll_kernel_watches;
 std::set<int> g_epoll_aborted;
 std::map<int, std::size_t> g_pools;
 
@@ -547,10 +540,10 @@ int timeout_option(int optname) {
 }
 
 #ifdef _WIN32
-short closed_stream_events(int type, bool sendingShut, short native, short requested) {
-    if (type != NET_SOCK_STREAM || (native & (POLLHUP | POLLERR)) != POLLHUP) return native;
+short closed_stream_events(const Sock& socket, short native, short requested) {
+    if (socket.type != NET_SOCK_STREAM || (native & (POLLHUP | POLLERR)) != POLLHUP) return native;
     native = static_cast<short>(native | (requested & POLLRDNORM));
-    return sendingShut ? native : static_cast<short>(native & ~POLLHUP);
+    return socket.sending_shut ? native : static_cast<short>(native & ~POLLHUP);
 }
 #endif
 
@@ -958,7 +951,10 @@ const bool g_socketPollerRegistered = (KernelSetSocketPoller_nid_no_patch(&PollS
 bool CloseSocketForKernel(int descriptor, int* error) {
     {
         std::lock_guard lk(g_mutex);
-        if (g_socks.count(descriptor) == 0) return false;
+        if (g_socks.count(descriptor) == 0) {
+            for (auto& epoll : g_epoll_socks) epoll.second.erase(descriptor);
+            return false;
+        }
     }
     *error = sceNetSocketClose(descriptor) == 0 ? 0 : *errno_slot();
     return true;
@@ -2369,7 +2365,6 @@ int APS5_VABI sceNetEpollDestroy(int eid) {
         return fail(NET_EBADF);
     }
     g_epoll_socks.erase(eid);
-    g_epoll_kernel_watches.erase(eid);
     g_epoll_aborted.erase(eid);
     g_cv.NotifyAll();
     return 0;
@@ -2387,30 +2382,24 @@ int APS5_VABI sceNetEpollAbort(int eid, int flags) {
 }
 
 int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* event) {
-    KernelSocket kernel;
-    const bool kernelSocket = find_kernel_socket(id, kernel);
+    bool kernel = false;
+    {
+        std::lock_guard lk(g_mutex);
+        kernel = g_socks.count(id) == 0;
+    }
+    kernel = kernel && GuestSocketIsOpen_nid_no_patch(id);
     std::lock_guard lk(g_mutex);
     if (g_epolls.count(eid) == 0) {
         return fail(NET_EBADF);
     }
     if (op != NET_EPOLL_CTL_ADD && op != NET_EPOLL_CTL_MOD && op != NET_EPOLL_CTL_DEL) return fail(NET_EINVAL);
     if (op != NET_EPOLL_CTL_DEL && !event) return fail(NET_EINVAL);
-    const bool netSocket = g_socks.count(id) != 0;
-    if (!netSocket && !kernelSocket) return fail(NET_EBADF);
+    if (!kernel && g_socks.count(id) == 0) return fail(NET_EBADF);
     auto& registrations = g_epoll_socks[eid];
-    auto& kernelWatches = g_epoll_kernel_watches[eid];
-    const auto previous = kernelWatches.find(id);
-    if (previous != kernelWatches.end() && (netSocket || previous->second.owner.lock() != kernel.owner)) {
-        // The registered socket() descriptor was closed and its number now names another socket.
-        kernelWatches.erase(previous);
-        registrations.erase(id);
-    }
     if (op == NET_EPOLL_CTL_ADD) {
         if (registrations.count(id) != 0) return fail(NET_EADDRINUSE);
         registrations.emplace(id, std::make_shared<const NetEpollEvent>(*event));
-        if (!netSocket) kernelWatches.insert_or_assign(id, KernelEpollWatch{kernel.owner, kernel.native});
     } else if (op == NET_EPOLL_CTL_DEL) {
-        kernelWatches.erase(id);
         if (registrations.erase(id) == 0) return fail(NET_ENOENT);
     } else {
         auto registration = registrations.find(id);
@@ -2426,39 +2415,47 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
     struct Watch {
         int descriptor;
         std::shared_ptr<const NetEpollEvent> registration;
-        std::shared_ptr<void> owner;
-        NativeSocket native;
-        int type = 0;
-        bool sendingShut = false;
+        Sock socket;
+        std::shared_ptr<void> kernelOwner;
+        NativeSocket native = INVALID_NATIVE_SOCKET;
     };
     const auto deadline = timeout > 0
         ? std::chrono::steady_clock::now() + std::chrono::microseconds(timeout)
         : std::chrono::steady_clock::time_point::max();
     for (;;) {
         std::vector<Watch> watches;
+        std::vector<Watch> kernelWatches;
         {
             std::lock_guard lk(g_mutex);
             if (g_epolls.count(eid) == 0) return fail(NET_EBADF);
             if (g_epoll_aborted.erase(eid) != 0) return fail(NET_ECONNABORTED);
             const auto registration = g_epoll_socks.find(eid);
             if (registration != g_epoll_socks.end()) {
-                auto& kernelWatches = g_epoll_kernel_watches[eid];
-                std::vector<int> closed;
                 for (const auto& entry : registration->second) {
                     const auto socket = g_socks.find(entry.first);
-                    if (socket != g_socks.end()) {
-                        watches.push_back({entry.first, entry.second, socket->second.native, socket->second.native->value, socket->second.type, socket->second.sending_shut});
-                        continue;
-                    }
-                    const auto kernel = kernelWatches.find(entry.first);
-                    if (kernel == kernelWatches.end()) continue;
-                    if (auto owner = kernel->second.owner.lock()) watches.push_back({entry.first, entry.second, std::move(owner), kernel->second.native});
-                    else closed.push_back(entry.first);
+                    if (socket == g_socks.end()) kernelWatches.push_back({entry.first, entry.second, Sock{}, nullptr, INVALID_NATIVE_SOCKET});
+                    else watches.push_back({entry.first, entry.second, socket->second, nullptr, socket->second.native->value});
                 }
-                // A socket() descriptor closed while registered leaves its epoll, as a kernel descriptor does.
-                for (const int descriptor : closed) {
-                    registration->second.erase(descriptor);
-                    kernelWatches.erase(descriptor);
+            }
+        }
+        std::vector<Watch> closedWatches;
+        for (auto& watch : kernelWatches) {
+            std::uintptr_t native = 0;
+            if (KernelLookupSocketNative_nid_no_patch(watch.descriptor, &watch.kernelOwner, &native)) {
+                watch.native = static_cast<NativeSocket>(native);
+                watches.push_back(std::move(watch));
+            } else {
+                closedWatches.push_back(std::move(watch));
+            }
+        }
+        if (!closedWatches.empty()) {
+            std::lock_guard lk(g_mutex);
+            const auto registration = g_epoll_socks.find(eid);
+            if (registration != g_epoll_socks.end()) {
+                for (const auto& watch : closedWatches) {
+                    const auto entry = registration->second.find(watch.descriptor);
+                    if (entry != registration->second.end() && entry->second == watch.registration && g_socks.count(watch.descriptor) == 0)
+                        registration->second.erase(entry);
                 }
             }
         }
@@ -2499,7 +2496,8 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
 #ifdef _WIN32
         const int ready_count = WSAPoll(descriptors.data(), static_cast<ULONG>(descriptors.size()), wait_ms);
         for (std::size_t index = 0; index < descriptors.size(); ++index)
-            descriptors[index].revents = closed_stream_events(watches[index].type, watches[index].sendingShut, descriptors[index].revents, descriptors[index].events);
+            if (!watches[index].kernelOwner)
+                descriptors[index].revents = closed_stream_events(watches[index].socket, descriptors[index].revents, descriptors[index].events);
 #else
         const int ready_count = ::poll(descriptors.data(), descriptors.size(), wait_ms);
 #endif

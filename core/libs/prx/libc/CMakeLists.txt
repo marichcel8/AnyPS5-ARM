@@ -1288,7 +1288,7 @@ if(MINGW)
         add_test(NAME windows_crash_stack_words COMMAND windows_backtrace_report_tests fault)
         set_tests_properties(windows_crash_stack_words PROPERTIES TIMEOUT 20
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>;APS5_CRASH_STACK_BYTES=set:2048"
-            PASS_REGULAR_EXPRESSION "FATAL: unhandled exception 0xc0000005[^~]*stack words from rsp[^~]*data at stack words that point outside the stack[^~]*c0ffee0000000000 c0ffee0000000001 c0ffee0000000002 c0ffee0000000003 c0ffee0000000004 c0ffee0000000005 c0ffee0000000006 c0ffee0000000007")
+            PASS_REGULAR_EXPRESSION "FATAL: unhandled exception 0xc0000005.*stack words from rsp.*data at stack words that point outside the stack.*c0ffee0000000000 c0ffee0000000001 c0ffee0000000002 c0ffee0000000003 c0ffee0000000004 c0ffee0000000005 c0ffee0000000006 c0ffee0000000007")
         add_test(NAME windows_crash_without_stack_words COMMAND windows_backtrace_report_tests fault)
         set_tests_properties(windows_crash_without_stack_words PROPERTIES TIMEOUT 20
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>;APS5_CRASH_STACK_BYTES=unset:"

@@ -566,6 +566,27 @@ int APS5_VABI chroot_nid_postfix(const char* path) {
     throw std::runtime_error(std::string("chroot: changing the root directory to ") + path + " is not supported, the guest path resolver keeps a fixed root");
 }
 
+int APS5_VABI kldfind_nid_postfix(const char* file) {
+    std::string copy;
+    if (const int error = CopyPath(file, copy)) return static_cast<int>(Fail(error));
+    return static_cast<int>(Fail(GuestEnoent));
+}
+
+int APS5_VABI kldfirstmod_nid_postfix(int fileid) {
+    return static_cast<int>(Fail(GuestEnoent));
+}
+
+int APS5_VABI kldnext_nid_postfix(int fileid) {
+    if (fileid < 0) return static_cast<int>(Fail(GuestEnoent));
+    if (fileid == 0) return 0;
+    return static_cast<int>(Fail(GuestEnoent));
+}
+
+int APS5_VABI kldunload_nid_postfix(int fileid) {
+    (void)fileid;
+    return static_cast<int>(Fail(GuestEperm));
+}
+
 int APS5_VABI symlink_nid_postfix(const char* target, const char* created) {
     std::string targetCopy, createdCopy;
     if (const int error = CopyPath(target, targetCopy)) return static_cast<int>(Fail(error));

@@ -4652,7 +4652,9 @@ void GuestBufferMemory::dissolveSpace(bool resolve) {
     }
     if (resolve) {
         for (auto& region : merged) {
-            if (region.direct != nullptr) region.pending = true;
+            if (region.direct == nullptr) continue;
+            region.pending = true;
+            region.writable = region.writable || WritesOverlap(region.begin, static_cast<std::size_t>(region.end - region.begin));
         }
     }
     lease = space->lease;

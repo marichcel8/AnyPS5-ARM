@@ -1,6 +1,7 @@
 #include "prx/libkernel/Pthread/include/ThreadLifecycle.hpp"
 #include "prx/libkernel/Pthread/include/Cancel.hpp"
 #include "prx/libkernel/include/Api.hpp"
+#include "prx/libc/include/Api.hpp"
 #include "../include/Pthread.hpp"
 #include "../include/ThreadLifecycle.hpp"
 #include "../include/WindowsThreadLocal.hpp"
@@ -57,6 +58,7 @@ extern "C" bool IsInitialPthread_nid_no_patch() {
 
 static constexpr int SCE_OK = 0;
 static constexpr std::size_t GUEST_THREAD_NAME_CAPACITY = 32;
+static constexpr int GUEST_EINVAL = 22;
 
 static constexpr std::size_t HOST_STACK_MARGIN = 1u << 20;
 static constexpr int DETACH_DETACHED = 1;
@@ -1386,6 +1388,13 @@ void APS5_VABI scePthreadTestcancel() {
 
 int APS5_VABI scePthreadSetprio(Pthread thread, int prio) {
     if (!thread) return SCE_KERNEL_ERROR_EINVAL;
+    const auto live = LockLiveGuestThread(thread);
+    if (!live) return SCE_KERNEL_ERROR_ESRCH;
+    const auto level = static_cast<std::uint32_t>(prio) & 0xffffu;
+    if (!((level >= 256 && level <= 767) || (level >= 896 && level <= 959))) {
+        *__error_nid_postfix() = GUEST_EINVAL;
+        return SCE_KERNEL_ERROR_EINVAL;
+    }
     thread->priority.store(prio, std::memory_order_relaxed);
     return SCE_OK;
 }
