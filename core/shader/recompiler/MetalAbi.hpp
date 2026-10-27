@@ -90,6 +90,16 @@ struct VertexFetchEntry {
     std::uint32_t records;
 };
 
+struct RectDrawParameters {
+    std::uint64_t indices;
+    std::uint32_t indexBytes;
+    std::uint32_t rects;
+    std::uint32_t first;
+    std::int32_t baseVertex;
+    std::uint32_t baseInstance;
+    std::uint32_t reserved;
+};
+
 constexpr std::uint32_t TessellationFactorHalves(std::uint32_t domain) {
     return domain == 2u ? 6u : 4u;
 }
@@ -154,6 +164,7 @@ static_assert(offsetof(GuestBufferEntry, sizeBytes) == 8u);
 static_assert(SlotIndex(BufferSlot::Count) <= GeometrySlot && VertexFetchSlot < FirstVertexBufferSlot);
 static_assert(std::is_standard_layout_v<GeometryParameters> && sizeof(GeometryParameters) == 96u && offsetof(GeometryParameters, localWords) == 48u);
 static_assert(std::is_standard_layout_v<VertexFetchEntry> && sizeof(VertexFetchEntry) == 16u);
+static_assert(std::is_standard_layout_v<RectDrawParameters> && sizeof(RectDrawParameters) == 32u);
 
 }
 

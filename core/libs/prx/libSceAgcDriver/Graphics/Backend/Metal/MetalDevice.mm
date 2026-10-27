@@ -148,6 +148,41 @@ kernel void aps5_mesh_arguments(device const uint* record [[buffer(0)]], device 
     arguments[3] = effective;
     arguments[4] = first;
 }
+struct RectRules {
+    uint count;
+    uint strideWords;
+    uint indexed;
+    uint rectsPerGroup;
+    uint indexCount;
+    uint indexBytes;
+    uint indicesLow;
+    uint indicesHigh;
+    uint maxGroups;
+};
+kernel void aps5_rect_arguments(device const uint* records [[buffer(0)]], device uint* arguments [[buffer(1)]], constant RectRules& r [[buffer(2)]], uint id [[thread_position_in_grid]]) {
+    if (id >= r.count) return;
+    device const uint* record = records + id * r.strideWords;
+    device uint* to = arguments + id * 12u;
+    const uint count = record[0];
+    const uint instances = record[1];
+    const uint first = record[2];
+    const uint effective = r.indexed == 0u ? count : first < r.indexCount ? min(count, r.indexCount - first) : 0u;
+    const uint rects = effective / 3u;
+    uint groups = (rects + r.rectsPerGroup - 1u) / r.rectsPerGroup;
+    if (instances == 0u || groups > r.maxGroups || instances > r.maxGroups || groups > r.maxGroups / max(instances, 1u)) groups = 0u;
+    to[0] = groups;
+    to[1] = groups != 0u ? instances : 0u;
+    to[2] = groups != 0u ? 1u : 0u;
+    to[3] = 0u;
+    to[4] = r.indicesLow;
+    to[5] = r.indicesHigh;
+    to[6] = r.indexed != 0u ? r.indexBytes : 0u;
+    to[7] = rects;
+    to[8] = r.indexed != 0u ? first : 0u;
+    to[9] = r.indexed != 0u ? record[3] : first;
+    to[10] = r.indexed != 0u ? record[4] : record[3];
+    to[11] = 0u;
+}
 )";
 
 constexpr std::uint32_t MeshGroupLimit = (1u << 20u) - 1u;
@@ -321,6 +356,7 @@ struct StageSource {
     Metal::CompileKey key;
     std::vector<Metal::FunctionConstant> constants;
     std::optional<ShaderRecompiler::MslGeometryLayout> layout;
+    std::uint32_t rects = 0;
 };
 
 struct DepthSurface {
@@ -712,6 +748,13 @@ bool RewritesLastProvokingVertex(const Graphics::State& graphics, std::span<cons
     return HasFlatInputs(shaders);
 }
 
+Graphics::State RectListDrawState(const Graphics::State& graphics) {
+    auto adjusted = graphics;
+    adjusted.rectList = false;
+    adjusted.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    return adjusted;
+}
+
 Graphics::State MeshDrawState(const Graphics::State& graphics) {
     auto adjusted = graphics;
     adjusted.stages.path = Graphics::ShaderPath::Vertex;
@@ -833,6 +876,8 @@ std::optional<std::string> DrawRejection(const Graphics::State& graphics, std::s
     std::optional<Graphics::State> adjusted;
     if (meshPath) {
         adjusted = MeshDrawState(graphics);
+    } else if (graphics.rectList) {
+        adjusted = RectListDrawState(graphics);
     } else if (RewritesLastProvokingVertex(graphics, shaders)) {
         adjusted = graphics;
         adjusted->provokingVertexMode = VK_PROVOKING_VERTEX_MODE_FIRST_VERTEX_EXT;
@@ -1057,6 +1102,8 @@ struct VulkanDevice::State {
     std::set<std::uint64_t> stencilPlanes;
     std::unique_ptr<Metal::PipelineCache> renderPipelines;
     std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> stageSources;
+    std::unordered_map<ShaderRecompiler::PipelineIdentity, StageSource, IdentityHash> rectSources;
+    std::unordered_map<ShaderRecompiler::PipelineIdentity, std::string, IdentityHash> rectFailures;
     std::unordered_map<Metal::CompileKey, std::shared_ptr<Metal::RenderPipeline>, Metal::CompileKeyHash> drawPipelines;
 
     void* window = nullptr;
@@ -1073,6 +1120,7 @@ struct VulkanDevice::State {
     id<MTL4ArgumentTable> scanoutTable = nil;
     id<MTLComputePipelineState> indirectRewritePipeline = nil;
     id<MTLComputePipelineState> meshArgumentsPipeline = nil;
+    id<MTLComputePipelineState> rectArgumentsPipeline = nil;
     id<MTL4ArgumentTable> indirectTable = nil;
     std::chrono::steady_clock::time_point reportAt{};
     std::uint64_t reportFrames = 0;
@@ -2631,6 +2679,36 @@ struct VulkanDevice::State {
         return stageSources.emplace(identity, std::move(entry)).first->second;
     }
 
+    const StageSource& rectSource(const ShaderRecompiler::RecompileResult& shader) {
+        const auto identity = shader.Identity();
+        if (const auto found = rectSources.find(identity); found != rectSources.end()) return found->second;
+        if (const auto failed = rectFailures.find(identity); failed != rectFailures.end()) throw Graphics::UnrenderableDraw("AGC graphics: " + failed->second);
+        const auto& vertex = stageSource(shader);
+        StageSource entry;
+        try {
+            auto rect = ShaderRecompiler::BuildMslRectList(*vertex.source);
+            entry.source = std::make_shared<const std::string>(std::move(rect.source));
+            entry.rects = rect.rectsPerGroup;
+        } catch (const std::exception& error) {
+            rectFailures.emplace(identity, error.what());
+            throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + error.what());
+        }
+        static const bool dump = std::getenv("APS5_METAL_DUMP_MSL") != nullptr;
+        if (dump) std::fprintf(stderr, "[metal] msl rect list %016llx\n%s\n", static_cast<unsigned long long>(shader.msl.ContentHash().low), entry.source->c_str());
+        entry.key = Metal::CompileKeyBuilder(0x52454354ull).Add(vertex.key.low).Add(vertex.key.high).Finish();
+        entry.constants = vertex.constants;
+        return rectSources.emplace(identity, std::move(entry)).first->second;
+    }
+
+    std::uint64_t rectArguments(const Pm4::DrawParameters& params, std::uint64_t records, std::uint32_t stride, std::uint64_t indices, std::uint32_t rects) {
+        const auto& args = *params.indirect;
+        const std::array<std::uint32_t, 9> rules{args.count, stride / 4u, params.indexed ? 1u : 0u, rects, params.indexCount, params.indexSize, static_cast<std::uint32_t>(indices), static_cast<std::uint32_t>(indices >> 32u), MeshGroupLimit};
+        const auto target = uploadBytes(nullptr, 0, static_cast<std::size_t>(args.count) * 48u);
+        indirectKernels();
+        dispatchIndirectKernel(rectArgumentsPipeline, records, target, rules.data(), sizeof(rules), args.count);
+        return target;
+    }
+
     static Metal::LibrarySource librarySource(const StageSource& stage, const char* name) {
         Metal::LibrarySource library;
         library.key = stage.key;
@@ -2929,9 +3007,11 @@ struct VulkanDevice::State {
         id<MTLLibrary> library = [native newLibraryWithSource:[NSString stringWithUTF8String:IndirectSource] options:nil error:&error];
         id<MTLFunction> rewrite = library != nil ? [library newFunctionWithName:@"aps5_indirect_rewrite"] : nil;
         id<MTLFunction> mesh = library != nil ? [library newFunctionWithName:@"aps5_mesh_arguments"] : nil;
-        if (rewrite == nil || mesh == nil) throw std::runtime_error(std::string("AGC graphics: Metal indirect draw kernels failed to compile: ") + (error.localizedDescription.UTF8String ?: ""));
+        id<MTLFunction> rect = library != nil ? [library newFunctionWithName:@"aps5_rect_arguments"] : nil;
+        if (rewrite == nil || mesh == nil || rect == nil) throw std::runtime_error(std::string("AGC graphics: Metal indirect draw kernels failed to compile: ") + (error.localizedDescription.UTF8String ?: ""));
         meshArgumentsPipeline = [native newComputePipelineStateWithFunction:mesh error:&error];
-        id<MTLComputePipelineState> rewritePipeline = meshArgumentsPipeline != nil ? [native newComputePipelineStateWithFunction:rewrite error:&error] : nil;
+        rectArgumentsPipeline = meshArgumentsPipeline != nil ? [native newComputePipelineStateWithFunction:rect error:&error] : nil;
+        id<MTLComputePipelineState> rewritePipeline = rectArgumentsPipeline != nil ? [native newComputePipelineStateWithFunction:rewrite error:&error] : nil;
         if (rewritePipeline == nil) throw std::runtime_error(std::string("AGC graphics: Metal indirect draw pipelines failed to build: ") + (error.localizedDescription.UTF8String ?: ""));
         MTL4ArgumentTableDescriptor* descriptor = [MTL4ArgumentTableDescriptor new];
         descriptor.maxBufferBindCount = 3;
@@ -3053,7 +3133,9 @@ struct VulkanDevice::State {
                 if (meshGroups > MeshGroupLimit || params.instanceCount > MeshGroupLimit || static_cast<std::uint64_t>(meshGroups) * params.instanceCount > MeshGroupLimit) throw Graphics::UnrenderableDraw("AGC graphics: Metal mesh draw exceeds the threadgroup count limit");
             }
         }
-        const auto translated = mesh != nullptr ? Metal::TranslateState(MeshDrawState(graphics), HasFlatInputs(shaders)) : Metal::TranslateState(graphics, HasFlatInputs(shaders));
+        const bool rectPath = mesh == nullptr && graphics.rectList;
+        if (rectPath && !msl.mesh) throw Graphics::UnrenderableDraw("AGC graphics: Metal rect lists need mesh shaders (Apple7 or later without APS5_METAL_NO_MESH)");
+        const auto translated = Metal::TranslateState(mesh != nullptr ? MeshDrawState(graphics) : rectPath ? RectListDrawState(graphics) : graphics, HasFlatInputs(shaders));
         if (translated.rejection != nullptr) throw Graphics::UnrenderableDraw(std::string("AGC graphics: ") + translated.rejection + " (topology " + std::to_string(static_cast<int>(graphics.topology)) + ")");
         if (translated.cullsEverything) return;
         if (translated.pipeline.sampleCount > 1) {
@@ -3086,16 +3168,30 @@ struct VulkanDevice::State {
             bool meshRestart = false;
             if (mesh != nullptr) meshArgumentAddress = meshArguments(graphics, params, snapshots, meshRestart);
             else if (indirect != nullptr) indirectAddress = indirectArguments(*indirect, snapshots, indirectStride);
+            const auto& vertexSource = rectPath ? rectSource(*vertex->program) : stageSource(*front->program);
+            const auto rectIndices = rectPath && params.indexed ? resolve(params.indexAddress, static_cast<std::uint64_t>(params.indexCount) * params.indexSize, false, snapshots, nullptr, false) : 0ull;
+            std::uint64_t rectRecords = 0;
+            std::uint32_t rectGroups = 0;
+            if (rectPath && indirect != nullptr) {
+                rectRecords = rectArguments(params, indirectAddress, indirectStride, rectIndices, vertexSource.rects);
+            } else if (rectPath) {
+                const auto rects = params.indexCount / 3u;
+                if (rects == 0u) return;
+                rectGroups = (rects + vertexSource.rects - 1u) / vertexSource.rects;
+                if (rectGroups > MeshGroupLimit || params.instanceCount > MeshGroupLimit || static_cast<std::uint64_t>(rectGroups) * params.instanceCount > MeshGroupLimit) throw Graphics::UnrenderableDraw("AGC graphics: Metal rect-list draw exceeds the threadgroup count limit");
+            }
             Metal::RenderPipelineRequest request;
             request.state = translated.pipeline;
-            const auto& vertexSource = stageSource(*front->program);
-            request.vertexLibrary = librarySource(vertexSource, mesh != nullptr ? "AnyPS5 guest mesh" : "AnyPS5 guest vertex");
+            request.vertexLibrary = librarySource(vertexSource, mesh != nullptr ? "AnyPS5 guest mesh" : rectPath ? "AnyPS5 guest rect list" : "AnyPS5 guest vertex");
             request.vertexFunction = std::string(ShaderRecompiler::MslEntryPoint);
             request.vertexConstants = vertexSource.constants;
             if (mesh != nullptr) {
                 if (!vertexSource.layout || vertexSource.layout->kind != ShaderRecompiler::MslGeometryKind::Mesh || vertexSource.layout->meshThreads == 0u) throw std::runtime_error("AGC graphics: the Metal mesh stage has no mesh layout");
                 request.mesh = true;
                 request.meshThreads = vertexSource.layout->meshThreads;
+            } else if (rectPath) {
+                request.mesh = true;
+                request.meshThreads = vertexSource.rects * 3u;
             }
             if (fragment != nullptr) {
                 const auto& fragmentSource = stageSource(*fragment->program);
@@ -3110,6 +3206,9 @@ struct VulkanDevice::State {
                 std::uint64_t extent;
                 std::uint32_t packed;
                 bool fetched;
+                std::uint32_t location;
+                std::uint32_t stride;
+                std::uint32_t records;
             };
             std::vector<VertexFetch> vertexFetches;
             for (const auto& attribute : mesh != nullptr ? std::span<const ShaderRecompiler::VertexAttribute>{} : std::span(vertex->program->vertexAttributes)) {
@@ -3118,11 +3217,15 @@ struct VulkanDevice::State {
                 if (format == MTLVertexFormatInvalid) throw std::runtime_error("AGC graphics: vertex format " + std::to_string(static_cast<int>(decoded.format)) + " has no Metal vertex format");
                 const auto buffer = FirstVertexBuffer + static_cast<std::uint32_t>(vertexFetches.size());
                 if (buffer >= RenderSlots) throw std::runtime_error("AGC graphics: Metal draw has more vertex streams than buffer slots");
-                request.vertexAttributes.push_back({attribute.location, static_cast<std::uint32_t>(format), buffer, 0});
                 const auto packed = (decoded.bytes + 3u) & ~3u;
+                if (rectPath) {
+                    request.vertexConstants.push_back({ShaderRecompiler::MetalAbi::LocalFetchFormatConstant + attribute.location, static_cast<std::uint32_t>(format), false});
+                } else {
+                    request.vertexAttributes.push_back({attribute.location, static_cast<std::uint32_t>(format), buffer, 0});
+                }
                 if (Graphics::NullVertexDescriptor(attribute) || Graphics::VertexFetchOutOfRange(attribute) || attribute.resource.fields[2] == 0u) {
-                    request.vertexBuffers.push_back({buffer, packed, Metal::VertexStep::Constant});
-                    vertexFetches.push_back({0u, 0u, packed, false});
+                    if (!rectPath) request.vertexBuffers.push_back({buffer, packed, Metal::VertexStep::Constant});
+                    vertexFetches.push_back({0u, 0u, packed, false, attribute.location, 0u, 0x7fffffffu});
                     continue;
                 }
                 const auto& fields = attribute.resource.fields;
@@ -3130,8 +3233,9 @@ struct VulkanDevice::State {
                 const auto address = fields[0] | (static_cast<std::uint64_t>(fields[1] & 0xffffu) << 32u);
                 if (stride % 4u != 0u) throw std::runtime_error("AGC graphics: Metal vertex stride " + std::to_string(stride) + " is not a multiple of four");
                 const auto step = stride == 0u ? Metal::VertexStep::Constant : attribute.fetchIndex == 0u ? Metal::VertexStep::Vertex : Metal::VertexStep::Instance;
-                request.vertexBuffers.push_back({buffer, stride == 0u ? packed : stride, step});
-                vertexFetches.push_back({address, Graphics::VertexBufferExtent(attribute), packed, true});
+                if (!rectPath) request.vertexBuffers.push_back({buffer, stride == 0u ? packed : stride, step});
+                const auto records = step == Metal::VertexStep::Constant ? 0x7fffffffu : std::min<std::uint32_t>(attribute.resource.fields[2], 0x7fffffffu) | (step == Metal::VertexStep::Instance ? ShaderRecompiler::MetalAbi::PerInstanceFetch : 0u);
+                vertexFetches.push_back({address, Graphics::VertexBufferExtent(attribute), packed, true, attribute.location, stride, records});
             }
             awaitRenderPipeline(request);
             std::vector<std::uint64_t> vertexBuffers;
@@ -3143,6 +3247,17 @@ struct VulkanDevice::State {
                 const auto resolved = resolve(fetch.address, fetch.extent, false, snapshots);
                 if (resolved % 4u != 0u) throw std::runtime_error("AGC graphics: Metal vertex buffer address is not four-byte aligned");
                 vertexBuffers.push_back(resolved);
+            }
+            std::uint64_t fetchTable = 0;
+            if (rectPath) {
+                std::vector<ShaderRecompiler::MetalAbi::VertexFetchEntry> entries;
+                for (std::size_t index = 0; index < vertexFetches.size(); ++index) {
+                    const auto& fetch = vertexFetches[index];
+                    if (entries.size() <= fetch.location) entries.resize(fetch.location + 1u, ShaderRecompiler::MetalAbi::VertexFetchEntry{0u, 0u, 0u});
+                    entries[fetch.location] = {vertexBuffers[index], fetch.stride, fetch.records};
+                }
+                fetchTable = uploadBytes(entries.data(), entries.size() * sizeof(entries[0]));
+                vertexBuffers.clear();
             }
             void* pipelineState = renderPipeline(request);
             lap(1);
@@ -3280,7 +3395,21 @@ struct VulkanDevice::State {
             }
             for (std::size_t index = 0; index < vertexBuffers.size(); ++index) [vertexTable setAddress:vertexBuffers[index] atIndex:FirstVertexBuffer + index];
             const auto primitive = static_cast<MTLPrimitiveType>(translated.primitive);
-            if (mesh != nullptr) {
+            if (rectPath) {
+                [vertexTable setAddress:fetchTable atIndex:ShaderRecompiler::MetalAbi::VertexFetchSlot];
+                const auto threads = MTLSizeMake(request.meshThreads, 1, 1);
+                if (indirect != nullptr) {
+                    for (std::uint32_t record = 0; record < indirect->count; ++record) {
+                        const auto arguments = rectRecords + static_cast<std::uint64_t>(record) * 48u;
+                        [vertexTable setAddress:arguments + 16u atIndex:ShaderRecompiler::MetalAbi::GeometrySlot];
+                        [render drawMeshThreadgroupsWithIndirectBuffer:arguments threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:threads];
+                    }
+                } else {
+                    const ShaderRecompiler::MetalAbi::RectDrawParameters rect{rectIndices, params.indexed ? params.indexSize : 0u, params.indexCount / 3u, 0u, static_cast<std::int32_t>(params.firstVertex), params.firstInstance, 0u};
+                    [vertexTable setAddress:uploadBytes(&rect, sizeof(rect)) atIndex:ShaderRecompiler::MetalAbi::GeometrySlot];
+                    [render drawMeshThreadgroups:MTLSizeMake(rectGroups, params.instanceCount, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:threads];
+                }
+            } else if (mesh != nullptr) {
                 ShaderRecompiler::MetalAbi::GeometryParameters geometry{};
                 geometry.meshArguments = meshArgumentAddress;
                 geometry.instanceCount = params.instanceCount;
