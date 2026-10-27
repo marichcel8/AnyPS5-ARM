@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/X87Extended.hpp"
 #include <cerrno>
 #include <cstdarg>
 #include <cstddef>
@@ -384,8 +385,7 @@ private:
                 const long double value = std::strtold(field.c_str(), nullptr);
                 std::memcpy(target, &value, sizeof(value));
 #else
-                // TODO(native-arm64): store the guest's 80-bit x87 format.
-                Fail("%Lf scanning is not ported to arm64");
+                X87Extended::Store(target, std::strtod(field.c_str(), nullptr));
 #endif
             } else if (directive.length == "l") {
                 const double value = std::strtod(field.c_str(), nullptr);

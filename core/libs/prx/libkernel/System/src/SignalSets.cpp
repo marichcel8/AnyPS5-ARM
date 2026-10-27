@@ -1,5 +1,6 @@
 #include "prx/libkernel/include/Api.hpp"
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/General.hpp"
 #include "prx/libc/include/general/AsmMacros.hpp"
 #include "prx/libc/include/general/VabiMacros.hpp"
 #include <cstddef>
@@ -65,7 +66,6 @@ int APS5_VABI sigismember_nid_postfix(const GuestSignalSet* set, int signal) {
 #define APS5_SIGNAL_ASM_CALL(name) "    call " name "@PLT\n"
 #endif
 
-// TODO(native-arm64): sigsetjmp/siglongjmp must capture and restore the translated guest state.
 #if defined(__x86_64__)
 asm(".text\n"
     APS5_SIGNAL_ASM_FUNCTION("sigsetjmp_nid_postfix")
@@ -135,4 +135,16 @@ asm(".text\n"
     "1:\n"
     "    movq %rcx, 0(%rsp)\n"
     "    ret\n");
+#else
+// Natively, guest calls of sigsetjmp and siglongjmp are taken by the translator's runtime, which saves
+// and restores the translated caller (tools/translator/runtime); they reach these only from host code.
+extern "C" {
+int APS5_VABI sigsetjmp_nid_postfix(std::uint64_t*, int) {
+    NotImplemented_nid_no_patch("sigsetjmp called from host code");
+}
+
+void APS5_VABI siglongjmp_nid_postfix(std::uint64_t*, int) {
+    NotImplemented_nid_no_patch("siglongjmp called from host code");
+}
+}
 #endif

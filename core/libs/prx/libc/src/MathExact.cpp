@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/X87Extended.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <climits>
@@ -29,8 +30,8 @@ struct ExtendedBits {
 
 ExtendedBits Bits(const long double& value) {
     ExtendedBits bits;
-    unsigned char bytes[sizeof(long double)];
-    std::memcpy(bytes, &value, sizeof(bytes));
+    unsigned char bytes[16] = {};
+    X87Extended::Store(bytes, value);
     std::memcpy(&bits.mantissa, bytes, sizeof(bits.mantissa));
     std::memcpy(&bits.signExponent, bytes + 8, sizeof(bits.signExponent));
     return bits;
