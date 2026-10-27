@@ -52,7 +52,7 @@ void CheckTriangles() {
     Require(localLayout.localStride != 0u && localLayout.localStride == hullLayout.localStride, "the local and hull programs disagree on the control point record");
     Require(hullLayout.controlStride != 0u && hullLayout.controlStride == domainLayout.controlStride, "the hull and domain programs disagree on the output control point record");
     Require(hullLayout.inputControlPoints == 3u && hullLayout.outputControlPoints == 3u && hullLayout.domain == 1u && hullLayout.partitioning == 2u && hullLayout.outputTopology == 2u, "the hull layout does not describe the patch");
-    CheckTessellationMesh(domain, "domain", {"constant uint aps5_ts_mode = 2u;", "constant uint aps5_ts_edges = 3u;", "constant bool aps5_ts_flip = false;", "aps5_ts_domain(aps5_geo.base_instance, aps5_geo, aps5_ts_in.instance, aps5_ts_in.patch_id, aps5_ts_c"});
+    CheckTessellationMesh(domain, "domain", {"constant uint aps5_ts_mode = 2u;", "constant uint aps5_ts_edges = 3u;", "constant bool aps5_ts_flip = true;", "aps5_ts_domain(aps5_geo.base_instance, aps5_geo, aps5_ts_in.instance, aps5_ts_in.patch_id, aps5_ts_c"});
     bool refused = false;
     try {
         static_cast<void>(BuildMslTessellationMesh(hull));
@@ -67,7 +67,7 @@ void CheckQuads() {
     Check(Tessellation(ShaderStage::TessellationControl, QuadHullCode, QuadPatches), "quad hull", {"aps5_geo.factors[aps5_patch * 6u"});
     const auto domain = Check(Tessellation(ShaderStage::TessellationEvaluation, QuadDomainCode, QuadPatches), "quad domain", {"[[patch(quad, 0)]] vertex", "float2 aps5_tess_coord [[position_in_patch]]"});
     Require(Layout(domain, "quad domain", MslGeometryKind::Domain).domain == 2u, "the quad domain layout lost its domain");
-    CheckTessellationMesh(domain, "quad domain", {"constant uint aps5_ts_edges = 4u;", "constant uint aps5_ts_halves = 6u;", "constant bool aps5_ts_flip = true;", "aps5_ts_c.xy"});
+    CheckTessellationMesh(domain, "quad domain", {"constant uint aps5_ts_edges = 4u;", "constant uint aps5_ts_halves = 6u;", "constant bool aps5_ts_flip = false;", "aps5_ts_c.xy"});
 }
 
 void CheckMesh() {

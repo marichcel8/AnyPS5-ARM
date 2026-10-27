@@ -285,7 +285,7 @@ MslTessellationMesh BuildTessellation(std::string_view domain) {
     text += "constant uint aps5_ts_halves = " + Msl::U32(MetalAbi::TessellationFactorHalves(layout->domain)) + ";\n";
     text += "constant uint aps5_ts_chunk = " + Msl::U32(chunk) + ";\n";
     text += "constant uint aps5_ts_max_strips = " + Msl::U32(MaxStrips) + ";\n";
-    text += "constant bool aps5_ts_flip = " + std::string(layout->outputTopology == 3u ? "true" : "false") + ";\n";
+    text += "constant bool aps5_ts_flip = " + std::string(layout->outputTopology == 3u ? "false" : "true") + ";\n";
     text += CommonText;
     text += quad ? QuadText : TriangleText;
     text += "struct aps5_ts_payload {\n    aps5_ts_shape shape;\n    uint patch_id;\n    uint instance;\n    uint rings;\n    uint strips;\n    ushort first[" + std::to_string(MaxStrips + 1u) + "];\n};\n";
