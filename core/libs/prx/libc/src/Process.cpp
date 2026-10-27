@@ -73,6 +73,16 @@ extern "C" void LibcLogExit_nid_no_patch(const char* how, int code, void* caller
     std::fflush(stderr);
 }
 
+extern "C" void LibcLogGuestStack_nid_no_patch(const char* why) {
+#ifndef _WIN32
+    using Log = void (*)(const char*);
+    static const auto log = reinterpret_cast<Log>(dlsym(RTLD_DEFAULT, "aps5_log_guest_stack"));
+    if (log != nullptr) log(why);
+#else
+    static_cast<void>(why);
+#endif
+}
+
 extern "C" void LibcRequestExit_nid_postfix(int code) {
     if (exitRequested.exchange(true)) return;
     LibcRequestShutdown_nid_postfix();
@@ -177,6 +187,7 @@ extern "C" {
 [[noreturn]] void APS5_VABI _Exit_nid_postfix(int code) {
     LibcLogExit_nid_no_patch("the title called _Exit", code, __builtin_return_address(0));
     static const bool trace = std::getenv("APS5_TRACE_EXIT") != nullptr;
+    if (trace) LibcLogGuestStack_nid_no_patch("_Exit");
     if (trace) {
         std::fprintf(stderr, "[libc] _Exit(%d) called from %p\n", code, __builtin_return_address(0));
         std::fflush(stderr);
@@ -206,6 +217,7 @@ extern "C" {
         }
     }
     LibcRunEndFlush_nid_no_patch();
+    std::fflush(nullptr);
 #ifdef _WIN32
     TerminateProcess(GetCurrentProcess(), static_cast<UINT>(code));
 #endif
@@ -242,6 +254,7 @@ void LibcStartExit_nid_postfix() {
 void APS5_VABI exit_nid_postfix(int code) {
     LibcLogExit_nid_no_patch("the title called exit", code, __builtin_return_address(0));
     static const bool trace = std::getenv("APS5_TRACE_EXIT") != nullptr;
+    if (trace) LibcLogGuestStack_nid_no_patch("exit");
     if (trace) {
         std::fprintf(stderr, "[libc] exit(%d) called from %p\n", code, __builtin_return_address(0));
         std::fflush(stderr);
