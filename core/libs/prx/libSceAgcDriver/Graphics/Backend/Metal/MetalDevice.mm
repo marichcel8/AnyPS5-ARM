@@ -2941,7 +2941,6 @@ struct VulkanDevice::State {
     }
 
     void dispatchIndirectKernel(id<MTLComputePipelineState> pipeline, std::uint64_t source, std::uint64_t target, const void* params, std::size_t paramBytes, std::uint32_t threads) {
-        indirectKernels();
         auto compute = computeEncoder();
         [compute barrierAfterEncoderStages:MTLStageDispatch | MTLStageBlit beforeEncoderStages:MTLStageDispatch visibilityOptions:MTL4VisibilityOptionDevice];
         [indirectTable setAddress:source atIndex:0];
@@ -2966,6 +2965,7 @@ struct VulkanDevice::State {
             std::uint32_t count, strideWords, recordWords, vertexWord, instanceWord, vertexValue, instanceValue, flags;
         } params{args.count, args.stride / 4u, args.recordBytes / 4u, args.VertexDwordOffset() / 4u, args.InstanceDwordOffset() / 4u, args.vertexConstant, args.instanceConstant, (vertexConstant ? 1u : 0u) | (instanceConstant ? 2u : 0u)};
         const auto target = uploadBytes(nullptr, 0, static_cast<std::size_t>(args.count) * args.recordBytes);
+        indirectKernels();
         dispatchIndirectKernel(indirectRewritePipeline, source, target, &params, sizeof(params), args.count);
         stride = args.recordBytes;
         return target;
@@ -2991,6 +2991,7 @@ struct VulkanDevice::State {
         if (record == 0 || record % 4u != 0u) throw Graphics::UnrenderableDraw("AGC graphics: Metal indirect mesh draw record is not four-byte aligned");
         const auto inputSize = mesh.inputPrimitive == 1 ? 1u : mesh.inputPrimitive == 2 ? 2u : 3u;
         const std::array<std::uint32_t, 7> rules{params.indexCount, inputSize, mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize, mesh.primitivesPerGroup, MeshGroupLimit, MeshGroupLimit, MeshGroupLimit};
+        indirectKernels();
         dispatchIndirectKernel(meshArgumentsPipeline, record, address, rules.data(), sizeof(rules), 1u);
         return address;
     }

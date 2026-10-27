@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Draw.hpp"
 #include "Recompiler.hpp"
+#include "MslBackend/MslEmitter.hpp"
 #include "VulkanTestDevice.hpp"
 #include <algorithm>
 #include <array>
@@ -299,6 +300,9 @@ int main() {
         const auto vertexValues = CheckVertexValues();
         std::printf("mesh barycentric emulation tests passed: %u perspective and %u linear I/J pixels, %u raw vertex value pixels\n", smooth, noPerspective, vertexValues);
         return 0;
+    } catch (const ShaderRecompiler::MslUnsupported& error) {
+        std::printf("skipped, the MSL backend refuses the program: %s\n", error.what());
+        return VulkanTestSkipped;
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
