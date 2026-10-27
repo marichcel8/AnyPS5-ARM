@@ -116,7 +116,7 @@ Design details, the hard parts and the plan: [NATIVE_ARM64.md](../dev/NATIVE_ARM
 
 ## Known limits
 
-- Not ported yet: fibers, guest C++ exception unwinding through translated code, `getcontext`/`setcontext`, 80-bit `long double`. They stop the game with a clear message when reached.
+- Fibers, guest C++ exceptions, `getcontext`/`setcontext`/`swapcontext`/`makecontext`, `sigsetjmp` and `sceKernelRaiseException` work natively. A C++ exception cannot cross a host callback (for example a guest comparator called by `qsort`), and `long double` has double precision (an 80-bit value is rounded when read).
 - x86 memory ordering is stronger than arm64's. The translator does not add barriers yet, so multithreaded code that relies on x86 ordering can misbehave.
 - New NaNs are positive on arm64 and negative on x86; code that looks at a NaN's sign can differ.
 - Audio has not been checked yet.

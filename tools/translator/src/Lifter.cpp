@@ -1,6 +1,7 @@
 #include "LifterImpl.hpp"
 
 #include <llvm/IR/GlobalAlias.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/Transforms/Utils/ModuleUtils.h>
 
 namespace Translator {
@@ -49,6 +50,13 @@ void Lifter::Impl::Explore(std::uint64_t entry, std::deque<std::uint64_t>& pendi
         return target >= begin && target < end;
     };
     std::vector<std::uint64_t> work{entry};
+    // Landing pads are reached only through the unwinder.
+    if (range != ranges.end() && begin == entry) {
+        const auto& sites = elf.CallSites();
+        for (auto site = sites.lower_bound(begin); site != sites.end() && site->first < end; ++site) {
+            if (inside(site->second.pad)) work.push_back(site->second.pad);
+        }
+    }
     while (!work.empty()) {
         auto address = work.back();
         work.pop_back();
@@ -449,14 +457,48 @@ llvm::Value* Lifter::Impl::Pop() {
 // The guest return address goes on the guest stack; the callee's ret pops it. Translated calls nest
 // native frames, so guest code that rewrites its return address is not supported.
 void Lifter::Impl::CallGuest(std::uint64_t target, std::uint64_t returnAddress) {
+    auto* rsp = Gpr64(Rsp);
     Push(Host(returnAddress));
     if (const auto found = lifted.find(target); found != lifted.end()) builder.CreateCall(found->second, {guest});
     else builder.CreateCall(callRuntime, {guest, Host(target)});
+    Unwinding(rsp);
 }
 
 void Lifter::Impl::CallIndirect(llvm::Value* target, std::uint64_t returnAddress) {
+    auto* rsp = Gpr64(Rsp);
     Push(Host(returnAddress));
     builder.CreateCall(callRuntime, {guest, target});
+    Unwinding(rsp);
+}
+
+// After a call in a title with C++ exceptions: when the guest unwinder resumes an older frame
+// (GuestState.resumeRip), this frame returns, unless the landing pad of this call is the target and
+// the frame is the one it unwound to, whose rsp after the call is the one before it.
+void Lifter::Impl::Unwinding(llvm::Value* rspBefore) {
+    const auto& sites = elf.CallSites();
+    if (sites.empty()) return;
+    auto field = [&](std::size_t offset) { return builder.CreateConstInBoundsGEP1_64(builder.getInt8Ty(), guest, offset); };
+    auto* resume = builder.CreateLoad(builder.getInt64Ty(), field(StateLayout::ResumeRip));
+    auto* unwinding = NewBlock("unwinding");
+    auto* returned = NewBlock("returned");
+    builder.CreateCondBr(builder.CreateICmpNE(resume, builder.getInt64(0)), unwinding, returned, llvm::MDBuilder(context).createBranchWeights(1, 1u << 20));
+    builder.SetInsertPoint(unwinding);
+    auto site = sites.upper_bound(currentAddress);
+    if (site != sites.begin() && currentAddress < (--site)->second.end && site->first <= currentAddress) {
+        if (const auto pad = blocks.find(site->second.pad); pad != blocks.end()) {
+            auto* rsp = builder.CreateLoad(builder.getInt64Ty(), field(StateLayout::ResumeRsp));
+            auto* here = builder.CreateAnd(builder.CreateICmpEQ(resume, Host(pad->first)), builder.CreateICmpEQ(rsp, rspBefore));
+            auto* land = NewBlock("land");
+            auto* leave = NewBlock("leave");
+            builder.CreateCondBr(here, land, leave);
+            builder.SetInsertPoint(land);
+            builder.CreateStore(builder.getInt64(0), field(StateLayout::ResumeRip));
+            builder.CreateBr(pad->second);
+            builder.SetInsertPoint(leave);
+        }
+    }
+    builder.CreateRetVoid();
+    builder.SetInsertPoint(returned);
 }
 
 // A jump out of the function: the callee returns to this function's caller, which is a call
@@ -1218,6 +1260,10 @@ void Lifter::Impl::LiftFunction(std::uint64_t entry, const std::set<std::uint64_
         if (target && (instruction.id == X86_INS_JMP || IsConditionalJump(instruction.id)) && addresses.count(*target) != 0) branchTargets.insert(*target);
     }
     branchTargets.insert(entry);
+    const auto& sites = elf.CallSites();
+    for (auto site = sites.lower_bound(entry); site != sites.end() && !addresses.empty() && site->first <= *addresses.rbegin(); ++site) {
+        if (addresses.count(site->second.pad) != 0) branchTargets.insert(site->second.pad);
+    }
     if (const auto found = tableTargets.find(entry); found != tableTargets.end()) {
         for (const auto target : found->second) {
             if (addresses.count(target) != 0) branchTargets.insert(target);
@@ -1288,7 +1334,7 @@ void Lifter::Impl::PromoteState(llvm::AllocaInst* shadow, llvm::BasicBlock* prol
         else whole = true;
     }
     std::vector<std::pair<std::uint64_t, std::uint64_t>> intervals;
-    if (whole) intervals.emplace_back(0, StateLayout::Size);
+    if (whole) intervals.emplace_back(0, StateLayout::ResumeRip);
     for (const auto& [begin, end] : ranges) {
         if (whole) break;
         if (!intervals.empty() && begin <= intervals.back().second) intervals.back().second = std::max(intervals.back().second, end);

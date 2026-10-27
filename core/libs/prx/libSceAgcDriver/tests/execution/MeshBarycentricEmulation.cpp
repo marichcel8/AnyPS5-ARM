@@ -278,6 +278,10 @@ int main() {
             std::puts("skipped, the device has no VK_EXT_mesh_shader");
             return VulkanTestSkipped;
         }
+        if (ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Msl) {
+            std::puts("skipped, the MSL backend refuses wave64 mesh programs with lane operations and has no barycentric emulation");
+            return VulkanTestSkipped;
+        }
         if (device->DeviceName().starts_with("llvmpipe")) {
             std::puts("skipped, the device has no mesh shader compiler that handles these programs (llvmpipe)");
             return VulkanTestSkipped;

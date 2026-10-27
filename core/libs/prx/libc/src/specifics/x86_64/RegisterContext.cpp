@@ -109,6 +109,24 @@ asm(
 "movq 64(%r10),%r8\nmovq 72(%r10),%r9\nmovq 96(%r10),%r12\n"
 "movq 104(%r10),%r13\nmovq 112(%r10),%r14\nmovq 120(%r10),%r15\njmp *%r11\n"
 );
+#elif defined(__APPLE__) && defined(__aarch64__)
+// Natively the unwinder walks the translated guest's x86-64 frames: the registers come from the guest
+// call into the host that is running on this thread, and a landing pad is installed in its GuestState
+// (tools/translator/runtime).
+#include <dlfcn.h>
+
+void LibcCaptureRegisters(std::uintptr_t*) { std::abort(); }
+
+bool LibcCaptureGuest(std::uintptr_t* registers) {
+    static const auto capture = reinterpret_cast<int (*)(std::uintptr_t*)>(dlsym(RTLD_DEFAULT, "aps5_guest_context"));
+    return capture != nullptr && capture(registers) == 0;
+}
+
+[[noreturn]] void LibcRestoreRegisters(const std::uintptr_t* registers) {
+    static const auto resume = reinterpret_cast<void (*)(const std::uintptr_t*)>(dlsym(RTLD_DEFAULT, "aps5_guest_resume"));
+    if (resume != nullptr) resume(registers);
+    std::abort();
+}
 #else
 void LibcCaptureRegisters(std::uintptr_t*) { std::abort(); }
 [[noreturn]] void LibcRestoreRegisters(const std::uintptr_t*) { std::abort(); }

@@ -240,16 +240,38 @@ int APS5_VABI Aps5SwapcontextFinish_nid_no_patch(UserUcontext* saved, const User
 #else
 
 #include "prx/libc/include/General.hpp"
+#include <dlfcn.h>
 
-// TODO(native-arm64): getcontext/setcontext over the translator's GuestState.
+// Natively, guest calls of getcontext and swapcontext are taken by the translator's runtime, which
+// saves the translated caller (tools/translator/runtime); setcontext resumes through it.
 extern "C" {
 
 int APS5_VABI getcontext_nid_postfix(UserUcontext*) {
-    NotImplemented_nid_no_patch(__func__);
+    NotImplemented_nid_no_patch("getcontext called from host code");
 }
 
-int APS5_VABI setcontext_nid_postfix(const UserUcontext*) {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI swapcontext_nid_postfix(UserUcontext*, const UserUcontext*) {
+    NotImplemented_nid_no_patch("swapcontext called from host code");
+}
+
+int APS5_VABI setcontext_nid_postfix(const UserUcontext* context) {
+    constexpr std::uint32_t McontextFlagMask = 0x7;
+    if (context == nullptr || context->mcontext.len != sizeof(UserMcontext) || (context->mcontext.flags & ~McontextFlagMask) != 0) {
+        *__error_nid_postfix() = 22;
+        return -1;
+    }
+    static const auto resume = reinterpret_cast<void (*)(const UserUcontext*)>(dlsym(RTLD_DEFAULT, "aps5_context_set"));
+    if (resume == nullptr) NotImplemented_nid_no_patch("setcontext without the translator runtime");
+    resume(context);
+    NotImplemented_nid_no_patch("setcontext returned");
+}
+
+void Aps5ContextTargets_nid_no_patch(void** sigsetjmp, void** siglongjmp, void** getcontext, void** swapcontext, void** sigprocmask) {
+    *sigsetjmp = reinterpret_cast<void*>(&sigsetjmp_nid_postfix);
+    *siglongjmp = reinterpret_cast<void*>(&siglongjmp_nid_postfix);
+    *getcontext = reinterpret_cast<void*>(&getcontext_nid_postfix);
+    *swapcontext = reinterpret_cast<void*>(&swapcontext_nid_postfix);
+    *sigprocmask = reinterpret_cast<void*>(&sigprocmask_nid_postfix);
 }
 
 }

@@ -57,7 +57,7 @@ std::uint64_t nanosSince(std::chrono::steady_clock::time_point start) {
     return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - start).count());
 }
 
-void setAttachmentFormat(MTL4RenderPipelineDescriptor* descriptor, NSString* key, PixelFormat format) {
+void setAttachmentFormat(NSObject* descriptor, NSString* key, PixelFormat format) {
     if (format == PixelFormat::Invalid) return;
     NSString* setter = [NSString stringWithFormat:@"set%@%@:", [[key substringToIndex:1] uppercaseString], [key substringFromIndex:1]];
     if (![descriptor respondsToSelector:NSSelectorFromString(setter)]) return;
@@ -84,13 +84,32 @@ CompileOutcome buildRender(MetalWorker& worker, const RenderPipelineRequest& req
             return outcome;
         }
     }
-    MTL4RenderPipelineDescriptor* descriptor = [MTL4RenderPipelineDescriptor new];
-    descriptor.vertexFunctionDescriptor = functionDescriptor(vertexLibrary, request.vertexFunction, request.vertexConstants);
-    if (fragmentLibrary != nil) descriptor.fragmentFunctionDescriptor = functionDescriptor(fragmentLibrary, request.fragmentFunction, request.fragmentConstants);
     const auto& state = request.state;
+    MTL4PipelineDescriptor* built = nil;
+    MTL4RenderPipelineColorAttachmentDescriptorArray* colorAttachments = nil;
+    if (request.mesh) {
+        MTL4MeshRenderPipelineDescriptor* mesh = [MTL4MeshRenderPipelineDescriptor new];
+        mesh.meshFunctionDescriptor = functionDescriptor(vertexLibrary, request.vertexFunction, request.vertexConstants);
+        if (fragmentLibrary != nil) mesh.fragmentFunctionDescriptor = functionDescriptor(fragmentLibrary, request.fragmentFunction, request.fragmentConstants);
+        mesh.maxTotalThreadsPerMeshThreadgroup = request.meshThreads;
+        mesh.rasterSampleCount = state.sampleCount;
+        mesh.alphaToCoverageState = state.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
+        mesh.rasterizationEnabled = state.rasterization;
+        setAttachmentFormat(mesh, @"depthAttachmentPixelFormat", state.depthFormat);
+        setAttachmentFormat(mesh, @"stencilAttachmentPixelFormat", state.stencilFormat);
+        colorAttachments = mesh.colorAttachments;
+        built = mesh;
+    }
+    MTL4RenderPipelineDescriptor* descriptor = request.mesh ? nil : [MTL4RenderPipelineDescriptor new];
+    if (descriptor != nil) {
+        descriptor.vertexFunctionDescriptor = functionDescriptor(vertexLibrary, request.vertexFunction, request.vertexConstants);
+        if (fragmentLibrary != nil) descriptor.fragmentFunctionDescriptor = functionDescriptor(fragmentLibrary, request.fragmentFunction, request.fragmentConstants);
+        colorAttachments = descriptor.colorAttachments;
+        built = descriptor;
+    }
     for (std::uint32_t index = 0; index < state.colorCount; ++index) {
         const auto& color = state.colors[index];
-        MTL4RenderPipelineColorAttachmentDescriptor* attachment = descriptor.colorAttachments[index];
+        MTL4RenderPipelineColorAttachmentDescriptor* attachment = colorAttachments[index];
         attachment.pixelFormat = static_cast<MTLPixelFormat>(color.format);
         attachment.writeMask = color.format == PixelFormat::Invalid ? MTLColorWriteMaskNone : static_cast<MTLColorWriteMask>(color.writeMask);
         attachment.blendingState = color.blend ? MTL4BlendStateEnabled : MTL4BlendStateDisabled;
@@ -102,7 +121,7 @@ CompileOutcome buildRender(MetalWorker& worker, const RenderPipelineRequest& req
         attachment.destinationAlphaBlendFactor = static_cast<MTLBlendFactor>(color.destinationAlpha);
         attachment.alphaBlendOperation = static_cast<MTLBlendOperation>(color.alphaOperation);
     }
-    if (!request.vertexAttributes.empty()) {
+    if (descriptor != nil && !request.vertexAttributes.empty()) {
         MTLVertexDescriptor* vertex = [MTLVertexDescriptor vertexDescriptor];
         for (const auto& attribute : request.vertexAttributes) {
             vertex.attributes[attribute.location].format = static_cast<MTLVertexFormat>(attribute.format);
@@ -116,15 +135,17 @@ CompileOutcome buildRender(MetalWorker& worker, const RenderPipelineRequest& req
         }
         descriptor.vertexDescriptor = vertex;
     }
-    setAttachmentFormat(descriptor, @"depthAttachmentPixelFormat", state.depthFormat);
-    setAttachmentFormat(descriptor, @"stencilAttachmentPixelFormat", state.stencilFormat);
-    descriptor.rasterSampleCount = state.sampleCount;
-    descriptor.alphaToCoverageState = state.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
-    descriptor.inputPrimitiveTopology = static_cast<MTLPrimitiveTopologyClass>(state.topology);
-    descriptor.rasterizationEnabled = state.rasterization;
-    if (!request.label.empty()) descriptor.label = nsString(request.label);
+    if (descriptor != nil) {
+        setAttachmentFormat(descriptor, @"depthAttachmentPixelFormat", state.depthFormat);
+        setAttachmentFormat(descriptor, @"stencilAttachmentPixelFormat", state.stencilFormat);
+        descriptor.rasterSampleCount = state.sampleCount;
+        descriptor.alphaToCoverageState = state.alphaToCoverage ? MTL4AlphaToCoverageStateEnabled : MTL4AlphaToCoverageStateDisabled;
+        descriptor.inputPrimitiveTopology = static_cast<MTLPrimitiveTopologyClass>(state.topology);
+        descriptor.rasterizationEnabled = state.rasterization;
+    }
+    if (!request.label.empty()) built.label = nsString(request.label);
     NSError* failure = nil;
-    id<MTLRenderPipelineState> pipeline = [(__bridge id<MTL4Compiler>)worker.Compiler() newRenderPipelineStateWithDescriptor:descriptor dynamicLinkingDescriptor:nil compilerTaskOptions:(__bridge MTL4CompilerTaskOptions*)worker.TaskOptions() error:&failure];
+    id<MTLRenderPipelineState> pipeline = [(__bridge id<MTL4Compiler>)worker.Compiler() newRenderPipelineStateWithDescriptor:built dynamicLinkingDescriptor:nil compilerTaskOptions:(__bridge MTL4CompilerTaskOptions*)worker.TaskOptions() error:&failure];
     if (pipeline == nil) {
         outcome.error = std::string("render pipeline ") + request.vertexFunction + "/" + request.fragmentFunction + ": " + (failure.localizedDescription.UTF8String ?: "unknown");
         return outcome;
@@ -196,6 +217,7 @@ CompileKey PipelineCache::RenderKey(const RenderPipelineRequest& request) {
         addConstants(builder, request.fragmentConstants);
     }
     request.state.AddTo(builder);
+    if (request.mesh) builder.Add(0x4d455348ull).Add(request.meshThreads);
     builder.Add(static_cast<std::uint64_t>(request.vertexAttributes.size()));
     for (const auto& attribute : request.vertexAttributes) builder.Add(static_cast<std::uint64_t>(attribute.location) | static_cast<std::uint64_t>(attribute.format) << 8u | static_cast<std::uint64_t>(attribute.buffer) << 24u | static_cast<std::uint64_t>(attribute.offset) << 32u);
     for (const auto& buffer : request.vertexBuffers) builder.Add(static_cast<std::uint64_t>(buffer.buffer) | static_cast<std::uint64_t>(buffer.stride) << 8u | static_cast<std::uint64_t>(buffer.step) << 40u);

@@ -8,6 +8,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#if defined(__APPLE__) && defined(__aarch64__)
+#include "SceTypes.hpp"
+#include <dlfcn.h>
+#endif
 
 namespace {
 
@@ -82,6 +87,28 @@ void APS5_VABI makecontext_nid_postfix(UserUcontext* context, void (APS5_VABI* s
     __builtin_sysv_va_start(list, count);
     for (int index = 0; index < count; ++index) arguments[index] = __builtin_va_arg(list, std::uint64_t);
     __builtin_sysv_va_end(list);
+#elif defined(__APPLE__) && defined(__aarch64__)
+    // The guest passed the arguments the System V way; the translator runtime
+    // (tools/translator/runtime) gives a list over the guest call that is running.
+    using Start = int (*)(VaList*, void*, unsigned, unsigned);
+    static const auto guestVaStart = reinterpret_cast<Start>(dlsym(RTLD_DEFAULT, "aps5_guest_va_start"));
+    VaList list {};
+    alignas(16) unsigned char save[176];
+    if (count > 0 && (guestVaStart == nullptr || guestVaStart(&list, save, 3, 0) != 0)) {
+        context->mcontext.len = 0;
+        return;
+    }
+    for (int index = 0; index < count; ++index) {
+        const void* source;
+        if (list.gp_offset < 48) {
+            source = static_cast<unsigned char*>(list.reg_save_area) + list.gp_offset;
+            list.gp_offset += 8;
+        } else {
+            source = list.overflow_arg_area;
+            list.overflow_arg_area = static_cast<unsigned char*>(list.overflow_arg_area) + 8;
+        }
+        std::memcpy(&arguments[index], source, 8);
+    }
 #else
     std::va_list list;
     va_start(list, count);

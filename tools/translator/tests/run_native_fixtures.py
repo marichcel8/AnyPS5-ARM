@@ -93,6 +93,7 @@ def main():
         cases.append(("string-smoke", compiled("string_smoke.c"), 0, "strings ok"))
         cases.append(("jump-smoke", compiled("jump_smoke.c"), 0, "jumps ok"))
         cases.append(("misc-smoke", compiled("misc_smoke.c"), 0, "misc ok"))
+        cases.append(("exception-smoke", compiled("exception_smoke.cpp", ["-x", "c++"]), 0, "exceptions ok"))
         expected = host_reference("vector_smoke.c", VECTOR_FLAGS, work)
         if expected is not None:
             cases.append(("vector-smoke", compiled("vector_smoke.c", VECTOR_FLAGS), *expected))

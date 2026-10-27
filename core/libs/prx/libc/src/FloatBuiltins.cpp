@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/X87Extended.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -57,8 +58,8 @@ struct ExtendedBits {
 };
 
 ExtendedBits DecomposeExtended(long double value) {
-    unsigned char bytes[sizeof(long double)];
-    std::memcpy(bytes, &value, sizeof(bytes));
+    unsigned char bytes[16] = {};
+    X87Extended::Store(bytes, value);
     std::uint64_t mantissa;
     std::uint16_t signExponent;
     std::memcpy(&mantissa, bytes, sizeof(mantissa));
@@ -67,13 +68,11 @@ ExtendedBits DecomposeExtended(long double value) {
 }
 
 long double ComposeExtended(bool negative, int biased, std::uint64_t mantissa) {
-    unsigned char bytes[sizeof(long double)] = {};
+    unsigned char bytes[16] = {};
     const std::uint16_t signExponent = static_cast<std::uint16_t>((negative ? 0x8000u : 0u) | static_cast<unsigned>(biased));
     std::memcpy(bytes, &mantissa, sizeof(mantissa));
     std::memcpy(bytes + 8, &signExponent, sizeof(signExponent));
-    long double value;
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
+    return X87Extended::Load(bytes);
 }
 
 template<typename TShift>

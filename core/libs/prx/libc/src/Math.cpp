@@ -1,4 +1,5 @@
 #include "prx/libc/include/Api.hpp"
+#include "prx/libc/include/X87Extended.hpp"
 #include <mutex>
 #include <array>
 #include <bit>
@@ -136,8 +137,6 @@ float AtanhfLog1p(float x) {
 #if defined(__x86_64__)
 static_assert(std::numeric_limits<long double>::digits == 64, "guest long double is the x87 80-bit format");
 #endif
-// TODO(native-arm64): the long double exports take the guest's 80-bit x87 values; on arm64 they still
-// compute with the host's 64-bit long double.
 
 struct ExtendedParts {
     std::uint64_t mantissa;
@@ -162,8 +161,8 @@ TValue Hypot3(TValue x, TValue y, TValue z, THypot hypot) {
 }
 
 ExtendedParts SplitExtended(long double value) {
-    unsigned char bytes[sizeof(long double)];
-    std::memcpy(bytes, &value, sizeof(value));
+    unsigned char bytes[16] = {};
+    X87Extended::Store(bytes, value);
     ExtendedParts parts;
     std::memcpy(&parts.mantissa, bytes, sizeof(parts.mantissa));
     std::memcpy(&parts.signExponent, bytes + sizeof(parts.mantissa), sizeof(parts.signExponent));
@@ -171,11 +170,10 @@ ExtendedParts SplitExtended(long double value) {
 }
 
 long double ClearLowMantissaWord(long double value) {
-    unsigned char bytes[sizeof(long double)];
-    std::memcpy(bytes, &value, sizeof(value));
+    unsigned char bytes[16] = {};
+    X87Extended::Store(bytes, value);
     std::memset(bytes, 0, sizeof(std::uint32_t));
-    std::memcpy(&value, bytes, sizeof(value));
-    return value;
+    return X87Extended::Load(bytes);
 }
 
 constexpr long double AsinNumeratorCoefficients[] = {
@@ -1462,8 +1460,10 @@ int APS5_VABI __isfinitel_nid_postfix(long double x) {
 #if defined(__x86_64__)
     static_assert(sizeof(long double) == 16 && std::numeric_limits<long double>::digits == 64 && std::numeric_limits<long double>::max_exponent == 16384 && std::endian::native == std::endian::little, "guest long double requires little-endian x87 extended precision storage");
 #endif
+    unsigned char bytes[16] = {};
+    X87Extended::Store(bytes, x);
     std::uint16_t exponent;
-    std::memcpy(&exponent, reinterpret_cast<const std::uint8_t*>(&x) + 8, sizeof(exponent));
+    std::memcpy(&exponent, bytes + 8, sizeof(exponent));
     return (exponent & 0x7fffu) != 0x7fffu;
 }
 
