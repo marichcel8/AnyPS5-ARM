@@ -11,6 +11,9 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
+#include <io.h>
+#else
+#include <unistd.h>
 #endif
 #include <algorithm>
 #include <array>
@@ -781,6 +784,43 @@ void RequireInstancedRelativePatches(AgcDriver::VulkanDevice& device, const Shad
     if (ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Msl) ExpectRefusal(withoutDrawParameters, ShaderStage::TessellationControl, HullRelativeData, "shaderDrawParameters", shared);
 }
 
+class StderrCapture {
+public:
+    StderrCapture() {
+        std::fflush(stderr);
+        file = std::tmpfile();
+        Require(file != nullptr, "cannot open a temporary file for stderr");
+#ifdef _WIN32
+        saved = _dup(_fileno(stderr));
+        _dup2(_fileno(file), _fileno(stderr));
+#else
+        saved = dup(fileno(stderr));
+        dup2(fileno(file), fileno(stderr));
+#endif
+    }
+    std::string Finish() {
+        std::fflush(stderr);
+#ifdef _WIN32
+        _dup2(saved, _fileno(stderr));
+        _close(saved);
+#else
+        dup2(saved, fileno(stderr));
+        close(saved);
+#endif
+        std::rewind(file);
+        std::string text;
+        char buffer[4096];
+        for (std::size_t read = 0; (read = std::fread(buffer, 1, sizeof(buffer), file)) != 0;) text.append(buffer, read);
+        std::fclose(file);
+        std::fwrite(text.data(), 1, text.size(), stderr);
+        return text;
+    }
+
+private:
+    std::FILE* file = nullptr;
+    int saved = -1;
+};
+
 class GuestBlock {
 public:
     GuestBlock() {
@@ -838,12 +878,15 @@ void RequireHullBdaReads(AgcDriver::VulkanDevice& device, const ShaderRecompiler
             Compile(target, ShaderStage::Fragment, PixelCode, cursor),
         };
         std::string failure;
+        StderrCapture log;
         try {
             Draw(device, stages, VK_CULL_MODE_NONE, VK_FRONT_FACE_COUNTER_CLOCKWISE);
         } catch (const std::exception& error) {
             failure = error.what();
         }
         device.WaitIdle();
+        const auto printed = log.Finish();
+        if (failure.empty() && ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Msl) failure = printed;
         Require(failure.find("BDA access failed") != std::string::npos && failure.find("stage=7 reason=1") != std::string::npos, program + ": the unmapped read was reported as \"" + failure + "\", not as a tessellation-control BDA fault");
     }
     address(0u);
