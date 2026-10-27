@@ -225,14 +225,28 @@ void Classify(const Translator::Elf& elf, const Translator::Lifter& lifter, cons
     }
 }
 
-void EmitProfilePath(llvm::Module& module, const std::string& path) {
+std::set<std::string> HostExports(std::string& key) {
+    std::set<std::string> names;
+    const char* path = std::getenv("APS5_TRANSLATOR_HOST_EXPORTS");
+    if (path == nullptr || *path == 0) return names;
+    auto buffer = llvm::MemoryBuffer::getFile(path);
+    if (!buffer) throw std::runtime_error(std::string("cannot read ") + path);
+    llvm::SmallVector<llvm::StringRef> lines;
+    (*buffer)->getBuffer().split(lines, '\n', -1, false);
+    for (const auto line : lines) names.insert(line.trim().str());
+    key = Hash({(*buffer)->getBuffer()});
+    return names;
+}
+
+void EmitProfilePath(llvm::Module& module, const std::string& path, bool hidden) {
     auto* type = llvm::PointerType::get(module.getContext(), 0);
     llvm::Constant* value = llvm::ConstantPointerNull::get(type);
     if (!path.empty()) {
         auto* text = llvm::ConstantDataArray::getString(module.getContext(), path);
         value = new llvm::GlobalVariable(module, text->getType(), true, llvm::GlobalValue::PrivateLinkage, text, "aps5_profile_path_text");
     }
-    new llvm::GlobalVariable(module, type, true, llvm::GlobalValue::ExternalLinkage, value, "aps5_profile_path");
+    auto* variable = new llvm::GlobalVariable(module, type, true, llvm::GlobalValue::ExternalLinkage, value, "aps5_profile_path");
+    if (hidden) variable->setVisibility(llvm::GlobalValue::HiddenVisibility);
 }
 
 int EmitLlvm(const Translator::Elf& elf, Translator::Lifter& lifter, const Options& options, const std::set<std::uint64_t>& hot, const std::string& profile, const char* path) {
@@ -250,7 +264,7 @@ int EmitLlvm(const Translator::Elf& elf, Translator::Lifter& lifter, const Optio
     module->setDataLayout(machine->createDataLayout());
     std::vector<llvm::Function*> huge, giant;
     Classify(elf, lifter, options, hot, *module, partitions.front(), huge, giant);
-    EmitProfilePath(*module, profile);
+    EmitProfilePath(*module, profile, elf.IsModule());
     Optimize(*module, *machine, huge, giant);
     std::error_code code;
     llvm::raw_fd_ostream output(path, code, llvm::sys::fs::OF_None);
@@ -265,7 +279,9 @@ int EmitLlvm(const Translator::Elf& elf, Translator::Lifter& lifter, const Optio
 }
 
 // aps5-translator <guest.elf> <output.o> [--emit-llvm]: lifts the guest's x86-64 code and writes an
-// arm64 Mach-O object to link with the translator runtime and the host libraries.
+// arm64 Mach-O object to link with the translator runtime and the host libraries. A guest module (a
+// prx) gives an object for a dylib with the module runtime (runtime/Module.cpp): its tables are
+// hidden and its exports keep their NIDs.
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::fprintf(stderr, "usage: %s <guest.elf> <output.o> [--emit-llvm]\n", argv[0]);
@@ -281,6 +297,8 @@ int main(int argc, char** argv) {
         const Options options;
         const Translator::Elf elf(argv[1]);
         Translator::Lifter lifter(elf);
+        std::string hostExportsKey;
+        lifter.SetHostExports(HostExports(hostExportsKey));
         lifter.Discover();
         const std::chrono::duration<double> discovery = std::chrono::steady_clock::now() - started;
         const auto& bytes = elf.Bytes();
@@ -300,7 +318,7 @@ int main(int argc, char** argv) {
         const bool shared = partitions.size() > 1;
         const std::string settings = std::to_string(options.partition) + ":" + std::to_string(options.huge) + ":" + std::to_string(options.giant) + ":" +
                                      std::to_string(options.large) + ":" +
-                                     (std::getenv("APS5_TRANSLATOR_ALL_FLAGS") != nullptr ? "flags" : "") + ":" + (options.quick ? "quick:" + profile : "full");
+                                     (std::getenv("APS5_TRANSLATOR_ALL_FLAGS") != nullptr ? "flags" : "") + ":" + (options.quick ? "quick:" + profile : "full") + ":" + hostExportsKey;
         const auto runKey = Hash({ToolKey(argv[0]), elfKey, settings});
         llvm::SmallString<256> scratch;
         if (cache.empty()) {
@@ -366,7 +384,7 @@ int main(int argc, char** argv) {
             module->setDataLayout(machine->createDataLayout());
             std::vector<llvm::Function*> huge, giant;
             Classify(elf, lifter, options, hot, *module, partitions[index], huge, giant);
-            if (index == 0) EmitProfilePath(*module, profile);
+            if (index == 0) EmitProfilePath(*module, profile, elf.IsModule());
             liftTime += since(mark);
             Optimize(*module, *machine, huge, giant);
             optimizeTime += since(mark);

@@ -20,3 +20,7 @@ target_link_libraries(aps5-translator PRIVATE ${translatorLlvmLibraries} ${CAPST
 # Linked into every translated executable together with the object aps5-translator writes.
 add_library(aps5-translator-runtime STATIC runtime/Runtime.cpp runtime/HostBridge.S)
 set_target_properties(aps5-translator-runtime PROPERTIES OSX_ARCHITECTURES arm64)
+
+# Linked (-force_load) into every translated guest module, a dylib the executable's runtime serves.
+add_library(aps5-translator-module STATIC runtime/Module.cpp)
+set_target_properties(aps5-translator-module PROPERTIES OSX_ARCHITECTURES arm64 CXX_VISIBILITY_PRESET hidden)
