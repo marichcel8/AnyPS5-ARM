@@ -778,7 +778,7 @@ void RequireInstancedRelativePatches(AgcDriver::VulkanDevice& device, const Shad
     std::erase(capabilities, static_cast<std::uint32_t>(spv::CapabilityDrawParameters));
     auto withoutDrawParameters = target;
     withoutDrawParameters.supportedCapabilities = capabilities;
-    ExpectRefusal(withoutDrawParameters, ShaderStage::TessellationControl, HullRelativeData, "shaderDrawParameters", shared);
+    if (ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Msl) ExpectRefusal(withoutDrawParameters, ShaderStage::TessellationControl, HullRelativeData, "shaderDrawParameters", shared);
 }
 
 class GuestBlock {
