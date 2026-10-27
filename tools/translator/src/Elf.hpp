@@ -26,6 +26,12 @@ struct Relocation {
     std::int64_t addend;
 };
 
+// A call-site range of a function's LSDA and the landing pad of a call in it.
+struct CallSite {
+    std::uint64_t end;
+    std::uint64_t pad;
+};
+
 struct Symbol {
     std::string name;
     std::uint64_t value;
@@ -56,6 +62,8 @@ public:
     const std::vector<std::string>& Needed() const { return needed; }
     std::vector<std::uint64_t> InitFunctions() const;
     const std::map<std::uint64_t, std::uint64_t>& FunctionRanges() const { return functionRanges; }
+    // Call sites with a landing pad, keyed by the start of their range.
+    const std::map<std::uint64_t, CallSite>& CallSites() const { return callSites; }
 
     // The bytes of the loaded image at a virtual address, or null outside the file-backed part.
     const std::uint8_t* At(std::uint64_t vaddr, std::uint64_t size) const;
@@ -70,6 +78,7 @@ private:
     std::string String(std::uint64_t offset) const;
     void ReadRelocations(std::uint64_t offset, std::uint64_t size);
     void ReadUnwindTable(std::uint64_t header);
+    void ReadCallSites(std::uint64_t function, std::uint64_t lsda);
 
     std::vector<std::uint8_t> bytes;
     std::vector<Segment> loads;
@@ -85,6 +94,7 @@ private:
     std::vector<Symbol> symbols;
     std::vector<std::string> needed;
     std::map<std::uint64_t, std::uint64_t> functionRanges;
+    std::map<std::uint64_t, CallSite> callSites;
 };
 
 }

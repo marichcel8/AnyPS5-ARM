@@ -219,6 +219,7 @@ struct Lifter::Impl {
     llvm::Value* Pop();
     void CallGuest(std::uint64_t target, std::uint64_t returnAddress);
     void CallIndirect(llvm::Value* target, std::uint64_t returnAddress);
+    void Unwinding(llvm::Value* rspBefore);
     void Jump(std::uint64_t target);
     void JumpIndirect(llvm::Value* target);
     void TailCall(std::uint64_t target);
