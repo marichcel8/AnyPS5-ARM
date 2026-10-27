@@ -2,13 +2,20 @@
 // guest's SysV argument registers. rdi, rsi, rdx, rcx, r8, r9 become x0-x5, the guest stack
 // arguments 7 and 8 become x6 and x7, arguments 9 to 16 are copied to the native stack, and xmm0-7 become q0-q7. x0/x1 return into rax/rdx and
 // q0/q1 into xmm0/xmm1. The guest return address is at [rsp], so stack arguments start at rsp + 8.
+// A guest unwinder resuming an older frame throws through it to aps5_call_impl, hence the CFI.
     .text
     .p2align 2
     .globl _aps5_host_bridge
 _aps5_host_bridge:
+    .cfi_startproc
     stp x29, x30, [sp, #-32]!
     mov x29, sp
+    .cfi_def_cfa w29, 32
+    .cfi_offset w30, -24
+    .cfi_offset w29, -32
     stp x19, x20, [sp, #16]
+    .cfi_offset w20, -8
+    .cfi_offset w19, -16
     mov x19, x0
     mov x16, x1
     add x9, x19, #160
@@ -48,6 +55,7 @@ _aps5_host_bridge:
     ldp x19, x20, [sp, #16]
     ldp x29, x30, [sp], #32
     ret
+    .cfi_endproc
 
 // aps5_enter: a host (AAPCS64) call of a guest function, reached through the fault redirect with the
 // translated function in x16. Saves x0-x7 and q0-q7, runs aps5_enter_guest(frame, x16) and returns
@@ -55,8 +63,12 @@ _aps5_host_bridge:
     .p2align 2
     .globl _aps5_enter
 _aps5_enter:
+    .cfi_startproc
     stp x29, x30, [sp, #-16]!
     mov x29, sp
+    .cfi_def_cfa w29, 16
+    .cfi_offset w30, -8
+    .cfi_offset w29, -16
     sub sp, sp, #192
     stp x0, x1, [sp, #0]
     stp x2, x3, [sp, #16]
@@ -74,6 +86,7 @@ _aps5_enter:
     add sp, sp, #192
     ldp x29, x30, [sp], #16
     ret
+    .cfi_endproc
 
     .p2align 2
     .globl _aps5_invoke_translated
@@ -82,20 +95,27 @@ _aps5_invoke_translated:
     b _aps5_enter
 
 // aps5_call(GuestState* state, uint64_t target): every translated call or jump to an address the
-// translator could not resolve. A call to the libc setjmp saves the registers of its translated
+// translator could not resolve. A call to one of the libc and libkernel functions that capture their
+// caller (setjmp, sigsetjmp, getcontext, swapcontext) saves the native registers of its translated
 // caller, so that aps5_native_restore can later continue there as if this call returned again;
-// everything else goes to aps5_call_impl.
+// swapcontext then continues in the other context. Everything else goes to aps5_call_impl.
     .p2align 2
     .globl _aps5_call
 _aps5_call:
-    adrp x2, _aps5_setjmp_target@PAGE
-    ldr x2, [x2, _aps5_setjmp_target@PAGEOFF]
-    cmp x1, x2
-    b.eq Lsetjmp
+    adrp x2, _aps5_capture_targets@PAGE
+    add x2, x2, _aps5_capture_targets@PAGEOFF
+    ldp x3, x4, [x2]
+    cmp x1, x3
+    ccmp x1, x4, #4, ne
+    b.eq Lcapture
+    ldp x3, x4, [x2, #16]
+    cmp x1, x3
+    ccmp x1, x4, #4, ne
+    b.eq Lcapture
     b _aps5_call_impl
-Lsetjmp:
+Lcapture:
     stp x29, x30, [sp, #-16]!
-    bl _aps5_prepare_jump
+    bl _aps5_prepare_capture
     ldp x29, x30, [sp], #16
     stp x19, x20, [x0, #0]
     stp x21, x22, [x0, #16]
@@ -109,6 +129,9 @@ Lsetjmp:
     stp d10, d11, [x0, #120]
     stp d12, d13, [x0, #136]
     stp d14, d15, [x0, #152]
+    cbz x1, Lcaptured
+    br x1
+Lcaptured:
     ret
 
 // aps5_native_restore(const uint64_t* registers): continues after the aps5_call that saved them.
@@ -128,3 +151,18 @@ _aps5_native_restore:
     ldp d12, d13, [x0, #136]
     ldp d14, d15, [x0, #152]
     ret
+
+// aps5_start_on_stack(void* top, void (*start)(uint64_t, uint64_t, uint64_t), a, b, c): runs start(a,
+// b, c) on a fresh native stack; start does not return.
+    .p2align 2
+    .globl _aps5_start_on_stack
+_aps5_start_on_stack:
+    mov sp, x0
+    mov x16, x1
+    mov x0, x2
+    mov x1, x3
+    mov x2, x4
+    mov x29, #0
+    mov x30, #0
+    blr x16
+    brk #1
