@@ -1,6 +1,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/VulkanDevice.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
+#include "MslBackend/MslEmitter.hpp"
 #include "Recompiler.hpp"
 #include "SceShaders.hpp"
 #include "VulkanTestDevice.hpp"
@@ -542,10 +543,14 @@ void ExpectRefusal(const ShaderRecompiler::SpirvTarget& target, ShaderStage stag
     Require(false, "a tessellation program was accepted although " + reason);
 }
 
+bool Compiled(const ShaderRecompiler::RecompileResult& result) {
+    return !result.spirv.empty() || !result.msl.empty();
+}
+
 void RequireCompareBranches(const ShaderRecompiler::SpirvTarget& target) {
     std::uint32_t cursor = 0;
-    Require(!Compile(target, ShaderStage::TessellationEvaluation, DomainCompareBranch, cursor).spirv.empty(), "a domain program branching on a compare copied to VCC was not compiled");
-    Require(!Compile(target, ShaderStage::TessellationControl, HullCompareBranch, cursor).spirv.empty(), "a hull program branching on a compare copied to VCC was not compiled");
+    Require(Compiled(Compile(target, ShaderStage::TessellationEvaluation, DomainCompareBranch, cursor)), "a domain program branching on a compare copied to VCC was not compiled");
+    Require(Compiled(Compile(target, ShaderStage::TessellationControl, HullCompareBranch, cursor)), "a hull program branching on a compare copied to VCC was not compiled");
 }
 
 std::array<std::uint8_t, 4> PixelAt(std::uint32_t x, std::uint32_t y) {
@@ -666,10 +671,17 @@ bool HasInstruction(std::span<const std::uint32_t> words, spv::Op opcode, std::u
 }
 
 bool HasSpacing(const ShaderRecompiler::RecompileResult& domain, spv::ExecutionMode spacing) {
+    if (domain.backend == ShaderRecompiler::ShaderBackendKind::Msl) {
+        const auto layout = ShaderRecompiler::ParseMslGeometryLayout(domain.msl.Source());
+        if (!layout) return false;
+        const auto mode = layout->partitioning == 2u ? spv::ExecutionModeSpacingFractionalOdd : layout->partitioning == 3u ? spv::ExecutionModeSpacingFractionalEven : spv::ExecutionModeSpacingEqual;
+        return mode == spacing;
+    }
     return HasInstruction(domain.spirv.Words(), spv::OpExecutionMode, 3u, 2u, static_cast<std::uint32_t>(spacing));
 }
 
 bool HasLevelBound(const ShaderRecompiler::RecompileResult& hull, float bound) {
+    if (hull.backend == ShaderRecompiler::ShaderBackendKind::Msl) return hull.msl.Source().find(", " + std::to_string(static_cast<int>(bound)) + ".0f));") != std::string_view::npos;
     return HasInstruction(hull.spirv.Words(), spv::OpConstant, 4u, 3u, std::bit_cast<std::uint32_t>(bound));
 }
 
@@ -949,8 +961,8 @@ ShaderRecompiler::RecompileResult CompileHull(const ShaderRecompiler::SpirvTarge
 }
 
 void RequireSingleControlPointHulls(const ShaderRecompiler::SpirvTarget& target) {
-    Require(!CompileHull(target, HullSingleInput, {1u, 3u, 1u, 2u, 2u}).spirv.empty(), "a hull that reads only the one input control point of its patch was not compiled");
-    Require(!CompileHull(target, HullSingleOutput, {1u, 1u, 1u, 2u, 2u}).spirv.empty(), "a hull with one output control point and unguarded patch outputs was not compiled");
+    Require(Compiled(CompileHull(target, HullSingleInput, {1u, 3u, 1u, 2u, 2u})), "a hull that reads only the one input control point of its patch was not compiled");
+    Require(Compiled(CompileHull(target, HullSingleOutput, {1u, 1u, 1u, 2u, 2u})), "a hull with one output control point and unguarded patch outputs was not compiled");
 }
 
 void RequireMergedHullWithoutSubgroups(const ShaderRecompiler::SpirvTarget& target) {
@@ -1023,7 +1035,7 @@ int main() {
         ExpectRefusal(target, ShaderStage::Local, LocalIndexAsData, "outside a tessellation ring or LDS address");
         {
             std::uint32_t cursor = 0;
-            Require(!Compile(target, ShaderStage::Local, LocalInactiveIndex, cursor).spirv.empty(), "a local program whose relative index survives only on inactive lanes was not compiled");
+            Require(Compiled(Compile(target, ShaderStage::Local, LocalInactiveIndex, cursor)), "a local program whose relative index survives only on inactive lanes was not compiled");
         }
         ExpectRefusal(target, ShaderStage::Local, LocalRestoredIndex, "outside a tessellation ring or LDS address");
         ExpectRefusal(target, ShaderStage::Local, LocalObservedWindow, "outside a tessellation ring or LDS address");
