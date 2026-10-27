@@ -62,6 +62,17 @@ struct MslRectList {
 
 [[nodiscard]] MslRectList BuildMslRectList(std::string_view vertex);
 
+inline constexpr std::string_view MslTessellationObjectEntryPoint = "aps5_ts_object";
+
+struct MslTessellationMesh {
+    std::string source;
+    std::uint32_t meshThreads = 0;
+    std::uint32_t payloadBytes = 0;
+    std::uint32_t maxGroupsPerPatch = 0;
+};
+
+[[nodiscard]] MslTessellationMesh BuildMslTessellationMesh(std::string_view domain);
+
 }
 
 #endif

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -73,27 +74,26 @@ id<MTLBuffer> Zeroed(id<MTLDevice> device, std::size_t bytes) {
     return buffer;
 }
 
-Compiled Compile(id<MTLDevice> device, const RecompileRequest& request, const std::string& name, double& compileMs) {
-    Compiled compiled{Recompile(request), {}, nil, {}};
-    Require(compiled.result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
-    compiled.source = std::string(compiled.result.msl.Source());
-    if (const auto layout = ParseMslGeometryLayout(compiled.source)) compiled.layout = *layout;
+id<MTLLibrary> Library(id<MTLDevice> device, const std::string& source, const std::string& name) {
     MTLCompileOptions* options = [MTLCompileOptions new];
     options.languageVersion = MTLLanguageVersion3_1;
     if (@available(macOS 15.0, *)) {
         options.languageVersion = MTLLanguageVersion3_2;
         options.mathMode = MTLMathModeFast;
     }
-    const auto start = std::chrono::steady_clock::now();
     NSError* error = nil;
-    id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:compiled.source.c_str()] options:options error:&error];
+    id<MTLLibrary> library = [device newLibraryWithSource:[NSString stringWithUTF8String:source.c_str()] options:options error:&error];
     if (library == nil) {
-        std::fprintf(stderr, "%s\n", compiled.source.c_str());
+        std::fprintf(stderr, "%s\n", source.c_str());
         throw std::runtime_error(name + ": the MSL source does not compile: " + Describe(error));
     }
+    return library;
+}
+
+id<MTLFunction> Specialize(id<MTLLibrary> library, const std::string& source, const RecompileResult& result, std::string_view entry, const std::string& name) {
     MTLFunctionConstantValues* values = [MTLFunctionConstantValues new];
-    const auto declared = [&](std::uint32_t id) { return compiled.source.find("[[function_constant(" + std::to_string(id) + ")]]") != std::string::npos; };
-    for (const auto& constant : compiled.result.specialization) {
+    const auto declared = [&](std::uint32_t id) { return source.find("[[function_constant(" + std::to_string(id) + ")]]") != std::string::npos; };
+    for (const auto& constant : result.specialization) {
         if (!declared(constant.id) || constant.id == MetalAbi::PositionFlipYConstant) continue;
         const std::uint32_t value = constant.value;
         [values setConstantValue:&value type:MTLDataTypeUInt atIndex:constant.id];
@@ -102,13 +102,47 @@ Compiled Compile(id<MTLDevice> device, const RecompileRequest& request, const st
         const std::uint32_t keep = 0u;
         [values setConstantValue:&keep type:MTLDataTypeUInt atIndex:MetalAbi::PositionFlipYConstant];
     }
-    compiled.function = [library newFunctionWithName:[NSString stringWithUTF8String:std::string(MslEntryPoint).c_str()] constantValues:values error:&error];
-    if (compiled.function == nil) {
-        std::fprintf(stderr, "%s\n", compiled.source.c_str());
-        throw std::runtime_error(name + ": the entry point does not specialize: " + Describe(error));
+    NSError* error = nil;
+    id<MTLFunction> function = [library newFunctionWithName:[NSString stringWithUTF8String:std::string(entry).c_str()] constantValues:values error:&error];
+    if (function == nil) {
+        std::fprintf(stderr, "%s\n", source.c_str());
+        throw std::runtime_error(name + ": the entry point " + std::string(entry) + " does not specialize: " + Describe(error));
     }
+    return function;
+}
+
+Compiled Compile(id<MTLDevice> device, const RecompileRequest& request, const std::string& name, double& compileMs) {
+    Compiled compiled{Recompile(request), {}, nil, {}};
+    Require(compiled.result.backend == ShaderBackendKind::Msl, name + ": the result is not an MSL artifact");
+    compiled.source = std::string(compiled.result.msl.Source());
+    if (const auto layout = ParseMslGeometryLayout(compiled.source)) compiled.layout = *layout;
+    const auto start = std::chrono::steady_clock::now();
+    compiled.function = Specialize(Library(device, compiled.source, name), compiled.source, compiled.result, MslEntryPoint, name);
     compileMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
     return compiled;
+}
+
+struct TessellationMesh {
+    id<MTLRenderPipelineState> pipeline;
+    MslTessellationMesh wrapped;
+};
+
+TessellationMesh TessellationMeshPipeline(id<MTLDevice> device, const Compiled& domain, const Compiled& pixel, const std::string& name) {
+    TessellationMesh mesh{nil, BuildMslTessellationMesh(domain.source)};
+    id<MTLLibrary> library = Library(device, mesh.wrapped.source, name);
+    MTLMeshRenderPipelineDescriptor* descriptor = [MTLMeshRenderPipelineDescriptor new];
+    descriptor.objectFunction = Specialize(library, mesh.wrapped.source, domain.result, MslTessellationObjectEntryPoint, name);
+    descriptor.meshFunction = Specialize(library, mesh.wrapped.source, domain.result, MslEntryPoint, name);
+    descriptor.fragmentFunction = pixel.function;
+    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
+    descriptor.payloadMemoryLength = mesh.wrapped.payloadBytes;
+    descriptor.maxTotalThreadsPerObjectThreadgroup = 1u;
+    descriptor.maxTotalThreadsPerMeshThreadgroup = mesh.wrapped.meshThreads;
+    descriptor.maxTotalThreadgroupsPerMeshGrid = mesh.wrapped.maxGroupsPerPatch;
+    NSError* error = nil;
+    mesh.pipeline = [device newRenderPipelineStateWithMeshDescriptor:descriptor options:MTLPipelineOptionNone reflection:nil error:&error];
+    Require(mesh.pipeline != nil, name + ": the tessellation mesh pipeline does not build: " + Describe(error));
+    return mesh;
 }
 
 id<MTLComputePipelineState> ComputePipeline(id<MTLDevice> device, const Compiled& compiled, const std::string& name) {
@@ -214,6 +248,7 @@ void CompileQuadPatches(id<MTLDevice> device, double& compileMs) {
     const auto pixel = Compile(device, MslGeometryPrograms::Pixel(), "pixel", compileMs);
     static_cast<void>(ComputePipeline(device, hull, "quad hull"));
     static_cast<void>(TessellationPipeline(device, domain, pixel, "quad domain"));
+    static_cast<void>(TessellationMeshPipeline(device, domain, pixel, "quad domain mesh"));
 }
 
 std::uint32_t Column(std::uint32_t patch, float offset) {
@@ -288,8 +323,8 @@ void DrawTrianglePatches(id<MTLDevice> device, id<MTLCommandQueue> queue, double
         for (id<MTLBuffer> ring in @[indices, localRing, controlRing, patchRing, factors]) [encoder useResource:ring usage:MTLResourceUsageRead | MTLResourceUsageWrite];
     };
 
+    const auto meshTessellation = TessellationMeshPipeline(device, domain, pixel, "domain mesh");
     const auto start = std::chrono::steady_clock::now();
-    const auto target = MakeTarget(device, TessWidth, TessHeight);
     id<MTLCommandBuffer> commands = [queue commandBuffer];
     id<MTLComputeCommandEncoder> compute = [commands computeCommandEncoderWithDispatchType:MTLDispatchTypeSerial];
     [compute setComputePipelineState:localPipeline];
@@ -300,22 +335,46 @@ void DrawTrianglePatches(id<MTLDevice> device, id<MTLCommandQueue> queue, double
     bindCompute(compute, hullPush);
     [compute dispatchThreads:MTLSizeMake(patches.outputControlPoints, PatchCount, 1) threadsPerThreadgroup:MTLSizeMake(patches.outputControlPoints, 1, 1)];
     [compute endEncoding];
-
-    id<MTLRenderCommandEncoder> render = BeginPass(commands, target);
-    [render setRenderPipelineState:domainPipeline];
-    [render setTessellationFactorBuffer:factors offset:0 instanceStride:0];
-    [render setVertexBytes:&parameters length:sizeof(parameters) atIndex:MetalAbi::GeometrySlot];
-    [render setVertexBuffer:domainPush offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::PushConstants)];
-    [render setVertexBuffer:fault offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::FaultBuffer)];
-    [render setVertexBuffer:buffers offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::GuestBuffers)];
-    [render setFragmentBuffer:pixelPush offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::PushConstants)];
-    [render setFragmentBuffer:fault offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::FaultBuffer)];
-    [render setFragmentBuffer:buffers offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::GuestBuffers)];
-    [render useResource:controlRing usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
-    [render useResource:patchRing usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
-    [render drawPatches:patches.outputControlPoints patchStart:0 patchCount:PatchCount patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
-    [render endEncoding];
-    const auto image = Finish(commands, target, "tessellation");
+    [commands commit];
+    [commands waitUntilCompleted];
+    Require(commands.status == MTLCommandBufferStatusCompleted, "tessellation: the local and hull kernels failed: " + Describe(commands.error));
+    const auto draw = [&](bool mesh, bool cull, const std::string& name) {
+        const auto target = MakeTarget(device, TessWidth, TessHeight);
+        id<MTLCommandBuffer> pass = [queue commandBuffer];
+        id<MTLRenderCommandEncoder> render = BeginPass(pass, target);
+        if (cull) {
+            [render setCullMode:MTLCullModeBack];
+            [render setFrontFacingWinding:MTLWindingClockwise];
+        }
+        [render setFragmentBuffer:pixelPush offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::PushConstants)];
+        [render setFragmentBuffer:fault offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::FaultBuffer)];
+        [render setFragmentBuffer:buffers offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::GuestBuffers)];
+        if (mesh) {
+            [render setRenderPipelineState:meshTessellation.pipeline];
+            [render setObjectBytes:&parameters length:sizeof(parameters) atIndex:MetalAbi::GeometrySlot];
+            [render setMeshBytes:&parameters length:sizeof(parameters) atIndex:MetalAbi::GeometrySlot];
+            [render setMeshBuffer:domainPush offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::PushConstants)];
+            [render setMeshBuffer:fault offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::FaultBuffer)];
+            [render setMeshBuffer:buffers offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::GuestBuffers)];
+            [render useResource:factors usage:MTLResourceUsageRead stages:MTLRenderStageObject];
+            [render useResource:controlRing usage:MTLResourceUsageRead stages:MTLRenderStageMesh];
+            [render useResource:patchRing usage:MTLResourceUsageRead stages:MTLRenderStageMesh];
+            [render drawMeshThreadgroups:MTLSizeMake(PatchCount, 1, 1) threadsPerObjectThreadgroup:MTLSizeMake(1, 1, 1) threadsPerMeshThreadgroup:MTLSizeMake(meshTessellation.wrapped.meshThreads, 1, 1)];
+        } else {
+            [render setRenderPipelineState:domainPipeline];
+            [render setTessellationFactorBuffer:factors offset:0 instanceStride:0];
+            [render setVertexBytes:&parameters length:sizeof(parameters) atIndex:MetalAbi::GeometrySlot];
+            [render setVertexBuffer:domainPush offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::PushConstants)];
+            [render setVertexBuffer:fault offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::FaultBuffer)];
+            [render setVertexBuffer:buffers offset:0 atIndex:MetalAbi::SlotIndex(MetalAbi::BufferSlot::GuestBuffers)];
+            [render useResource:controlRing usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+            [render useResource:patchRing usage:MTLResourceUsageRead stages:MTLRenderStageVertex];
+            [render drawPatches:patches.outputControlPoints patchStart:0 patchCount:PatchCount patchIndexBuffer:nil patchIndexBufferOffset:0 instanceCount:1 baseInstance:0];
+        }
+        [render endEncoding];
+        return Finish(pass, target, name);
+    };
+    const auto image = draw(false, false, "tessellation");
     const auto gpuMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
     const auto* faultWords = static_cast<const std::uint32_t*>(fault.contents);
@@ -331,7 +390,24 @@ void DrawTrianglePatches(id<MTLDevice> device, id<MTLCommandQueue> queue, double
     Require(CoveredPixels(image, 1, false) == 0, "tessellation: the patch with level 0 was not culled");
     Require(CoveredPixels(image, 2, false) > 100 && image.At(Column(2, 0.25f), center)[1] > 32, "tessellation: the level-5 patch has no interior domain points at its centre, " + PixelText(image.At(Column(2, 0.25f), center)));
     Require(image.At(0, 0) == Background && image.At(TessWidth - 1u, TessHeight - 1u) == Background, "tessellation: the corners changed");
-    std::printf("MslGeometryMetal: local and hull kernels, factor buffer and post-tessellation vertex function draw the three patches (Metal compile %.1f ms, first frame %.2f ms)\n", compileMs, gpuMs);
+
+    const auto meshImage = draw(true, false, "tessellation mesh");
+    Require(faultWords[0] == 0u, "tessellation mesh: a stage recorded fault reason " + std::to_string(faultWords[1]));
+    Require(CoveredPixels(meshImage, 0, false) > 100 && CoveredPixels(meshImage, 0, true) == 0, "tessellation mesh: the level-1 patch was not drawn as one flat triangle, centre " + PixelText(meshImage.At(Column(0, 0.25f), center)));
+    Require(CoveredPixels(meshImage, 1, false) == 0, "tessellation mesh: the patch with level 0 was not culled");
+    Require(CoveredPixels(meshImage, 2, false) > 100 && meshImage.At(Column(2, 0.25f), center)[1] > 32, "tessellation mesh: the level-5 patch has no interior domain points at its centre, " + PixelText(meshImage.At(Column(2, 0.25f), center)));
+    const auto hardwareCulled = draw(false, true, "tessellation culled");
+    const auto meshCulled = draw(true, true, "tessellation mesh culled");
+    const auto similar = [](std::uint32_t expected, std::uint32_t got) { return std::max(expected, got) - std::min(expected, got) <= std::max(8u, expected / 20u); };
+    for (std::uint32_t patch = 0; patch < PatchCount; ++patch) {
+        const auto expected = CoveredPixels(image, patch, false);
+        const auto got = CoveredPixels(meshImage, patch, false);
+        Require(similar(expected, got), "tessellation mesh: patch " + std::to_string(patch) + " covers " + std::to_string(got) + " pixels, the Metal tessellator " + std::to_string(expected));
+        const auto front = CoveredPixels(hardwareCulled, patch, false);
+        const auto meshFront = CoveredPixels(meshCulled, patch, false);
+        Require((front == 0u) == (meshFront == 0u) && similar(front, meshFront), "tessellation mesh: with back faces culled patch " + std::to_string(patch) + " covers " + std::to_string(meshFront) + " pixels, the Metal tessellator " + std::to_string(front));
+    }
+    std::printf("MslGeometryMetal: local and hull kernels, factor buffer and post-tessellation vertex function draw the three patches, and the object and mesh tessellator matches them with and without back-face culling (Metal compile %.1f ms, first frame %.2f ms)\n", compileMs, gpuMs);
 }
 
 std::array<std::uint8_t, 4> TriangleColor(std::uint32_t triangle) {
