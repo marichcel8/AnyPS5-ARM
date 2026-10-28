@@ -718,6 +718,8 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_executables.py $<TARGET_FILE:relinker>)
         add_test(NAME game_patches COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_game_patches.py $<TARGET_FILE:relinker>)
+        add_test(NAME annotate_guest_module COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_annotate_guest_module.py $<TARGET_FILE:relinker>)
         if(Python3_VERSION VERSION_GREATER_EQUAL 3.11)
             add_test(NAME patch_advisor_unit COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tools/tests/test_suggest_patches.py)
@@ -877,6 +879,11 @@ if(BUILD_TESTING)
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_input_file.py $<TARGET_FILE:relinker>)
         add_test(NAME null_symbol_relocations COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_null_symbol_relocations.py $<TARGET_FILE:relinker>)
+        foreach(symbolInput IN ITEMS executable guest)
+            add_test(NAME restricted_undefined_symbols_${symbolInput} COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_restricted_undefined_symbols.py $<TARGET_FILE:relinker> ${symbolInput})
+            set_tests_properties(restricted_undefined_symbols_${symbolInput} PROPERTIES TIMEOUT 20)
+        endforeach()
         add_test(NAME input_nonascii COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_CURRENT_SOURCE_DIR}/relinker/tests/test_input_nonascii.py $<TARGET_FILE:relinker>)
         add_test(NAME long_paths COMMAND ${Python3_EXECUTABLE}

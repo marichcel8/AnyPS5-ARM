@@ -9,6 +9,22 @@
 
 ### Unknown function info
 
+- [libSceAudioOut additional exports](../../../core/libs/prx/libSceAudioOut/src/InventoryExports.cpp) - the following name/NID pairs are present in the 13.60 export inventory. Parameter lists, return types and behavior are unverified. Parameterless `int` declarations are import-resolution placeholders, not verified ABI prototypes; every entry throws through `NotImplemented_nid_no_patch`. No runtime functionality is implemented.
+
+| Name | NID |
+| --- | --- |
+| `sceAudioOut2GetSystemDebugState` | `1kUphng3rOk` |
+| `sceAudioOut2LoContextCreateEx` | `o+Ol1OcMbBo` |
+| `sceAudioOut2LoContextGetAttributes` | `Nb3DK8hNqeY` |
+| `sceAudioOut2LoContextQueryMemoryEx` | `+8fuZ1rh4PA` |
+| `sceAudioOut2LoPortCreateEx` | `eD21Kabealg` |
+| `sceAudioOut2LoPortGetAttributes` | `45qxRgFYZZg` |
+| `sceAudioOut2LoPortSetAttributesEx` | `3o6lDIe0iY0` |
+| `sceAudioOut2PortSetAttributesEx` | `11yhLGUG49M` |
+| `sceAudioOut2SetHrtfIdForCronos` | `PA3AjhcS+w4` |
+| `sceAudioOut2SetSpeakerInfo` | `-Bn3G37Q1qU` |
+| `sceAudioOut2SetTvCorrectionInfo` | `slskcaPR5u0` |
+
 - [sceAudioOut2ContextAdvance and sceAudioOut2ContextPush](../../../core/libs/prx/libSceAudioOut/src/AudioOut2Context.cpp) (libSceAudioOut) - with an SDL device, Advance snapshots each port's PCM and gain; Push consumes completed grains in order and a blocking Push waits for Advance when none is ready. Inferred from PPSA26358, which rewrites the same 512-frame, 12-channel float buffer on a producer thread and pushes on another thread. Console buffer ownership, snapshot timing and empty-queue errors are unverified. Completed grains remain queued until Push consumes them, so memory use grows with an unconsumed PCM backlog. The console backlog limit is unverified. A nonblocking Push without a completed grain throws; this is a runtime restriction, not a console measurement. Context destruction concurrent with active calls remains unsupported. Without an SDL device the existing wall-clock path remains.
 
 - [sceAudioOut2UserGetSupportedAttributes](../../../core/libs/prx/libSceAudioOut/src/AudioOut2User.cpp) - the PS5 module confirms a pointer-sized user handle and two optional uint32 outputs. Handles 0/-1 return 0x80268010 before checking outputs; two null outputs return 0x80268001. Host masks still describe only implemented PCM/gain support, unlike native SDK- and device-dependent masks. Unknown or destroyed host handles throw; native arbitrary handles are pointers and cannot be validated by the host registry. Port ownership and busy-user destruction remain unimplemented.
