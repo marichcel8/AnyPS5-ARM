@@ -590,7 +590,7 @@ public:
 
     int Protect(std::uintptr_t begin, std::uintptr_t end, int protection) {
         if (!_available) return HostProtect(begin, end, protection);
-        const Lock lock(_lock);
+        const Lock lock(_lock, SiteProtectionChanged);
         if (const int error = HostProtect(begin, end, protection); error != 0) return error;
         const auto first = pageStart(begin);
         const auto last = pageEnd(end);

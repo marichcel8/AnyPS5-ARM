@@ -41,7 +41,7 @@ It runs with the default settings now. A few letters of its font are missing (gl
 
 ### Compatibility
 
-The [compatibility list](COMPATIBILITY.md) has every game tested on macOS, its status and its frame rate. Players' own reports, for macOS, Windows and Linux, are on the [community compatibility list](https://anytogether.kodla.agency/compatibility) (see [How did it run?](#anytogether)).
+The [compatibility list](COMPATIBILITY.md) has every game tested on macOS, its status and its frame rate. Players' own reports, for macOS, Windows and Linux, are on the [community compatibility list](https://anytogether.net/compatibility) (see [How did it run?](#anytogether)).
 
 ### Status
 
@@ -62,15 +62,15 @@ Measured with Vulkan SDK 1.4.363.0. The 7 failing tests hit Apple GPU or Metal l
 
 **AnyPS5.app** is a launcher laid out like the PS5 home screen. It finds the game dumps in a folder, unlocks (converts) them for the Mac and starts them: no Terminal, no build, no Vulkan SDK.
 
-<p><a href="https://github.com/utkuhalis/AnyPS5-ARM/releases/latest/download/AnyPS5-macOS.zip"><b>⬇ Download AnyPS5 for macOS</b></a> · Apple silicon · macOS 14+</p>
+<p><a href="https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/AnyPS5-macOS.zip"><b>⬇ Download AnyPS5 for macOS</b></a> · Apple silicon · macOS 14+</p>
 
 **Install.** The quickest way is one line in Terminal; a download through `curl` is not quarantined, so macOS opens the app without any "cannot be opened" warning:
 
 ```sh
-curl -fsSL https://github.com/utkuhalis/AnyPS5-ARM/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/install.sh | sh
 ```
 
-With the zip from the [latest release](https://github.com/utkuhalis/AnyPS5-ARM/releases/latest) instead, the app is not notarized, so macOS blocks it the first time: open **System Settings → Privacy & Security** and click **Open Anyway**. If it then runs from the read-only copy macOS makes of downloaded apps, the launcher offers to move itself to Applications and reopen from there.
+With the zip from the [latest release](https://github.com/AnyTogether/AnyPS5-ARM/releases/latest) instead, the app is not notarized, so macOS blocks it the first time: open **System Settings → Privacy & Security** and click **Open Anyway**. If it then runs from the read-only copy macOS makes of downloaded apps, the launcher offers to move itself to Applications and reopen from there.
 
 **First start.** Pick the language, one of four animated themes (Cosmic, Aurora, Sunset, Glass) and the folder that holds your PS5 dumps. Subfolders are scanned, and games added later show up on their own.
 
@@ -135,7 +135,7 @@ The launcher is driven with the arrow keys, Return and Esc, a game controller (D
 
 ### AnyTogether
 
-[AnyTogether](https://anytogether.kodla.agency) is the launcher's online home: friends, profiles, messages, parties with voice, share play, activity, leaderboards, notifications, the Theme Hub and the community compatibility list. It is optional; signed out, the launcher works exactly as before. The server is open source ([AnyTogether](https://github.com/utkuhalis/AnyTogether), MIT), and **Settings → AnyTogether → Server** points the launcher at one you run yourself.
+[AnyTogether](https://anytogether.net) is the launcher's online home: friends, profiles, messages, parties with voice, share play, activity, leaderboards, notifications, the Theme Hub and the community compatibility list. It is optional; signed out, the launcher works exactly as before. The server is open source ([AnyTogether](https://github.com/AnyTogether/AnyTogether), MIT), and **Settings → AnyTogether → Server** points the launcher at one you run yourself.
 
 **Signing in.** **Settings → AnyTogether**: type your email and the code it sends you, approve the launcher on the website (where passkeys work too), or tap once on your phone if the AnyPS5 Remote app is paired and signed in. There is no password and no sign-up form; the first sign-in makes the account.
 
@@ -145,15 +145,15 @@ The launcher is driven with the arrow keys, Return and Esc, a game controller (D
 
 **Share play: watching.** In the launcher, **Watch** a friend from the Friends panel or from their invite: their game fills the screen with its sound, and once they let you play, your controller is their player 2, 3 or 4; the PS button leaves. On the phone (AnyPS5 Remote 1.11 or newer), **Watch** is in Friends; when the host hands you a pad, the on-screen pad lies over the picture, with the game's rumble and light bar. In a browser, open the link from the invite or the friend's profile on the website: a controller works (press a button once so the browser sees it), and so does the keyboard (WASD the left stick, the arrow keys the D-pad, I J K L the face buttons, Q / E L1 / R1, Z / C L2 / R2, Return Options).
 
-**Theme Hub.** **Settings → Appearance → Themes** lists the themes people share on AnyTogether's Theme Hub, installed with one press; the website's [Theme Hub](https://anytogether.kodla.agency/themes) has the same themes, with likes. Signed in, **Share on the Hub** uploads the theme you use (made in the Theme Studio, at most 50 MB); sharing it again sends a new version. `anyps5://theme/<id>` links open a Hub theme in the launcher.
+**Theme Hub.** **Settings → Appearance → Themes** lists the themes people share on AnyTogether's Theme Hub, installed with one press; the website's [Theme Hub](https://anytogether.net/themes) has the same themes, with likes. Signed in, **Share on the Hub** uploads the theme you use (made in the Theme Studio, at most 50 MB); sharing it again sends a new version. `anyps5://theme/<id>` links open a Hub theme in the launcher.
 
-**How did it run?** After you play a game, the launcher may ask **How did *game* run?**: Nothing, Boots, Menus, In game or Playable. One tap sends a report with the launcher and engine versions, the Mac model, macOS and the average frame rate (it shows what goes with it). **Don't ask after games** stops the question; a game's options still have **How does it run?**, with the community's verdict for that game. All reports make the [community compatibility list](https://anytogether.kodla.agency/compatibility).
+**How did it run?** After you play a game, the launcher may ask **How did *game* run?**: Nothing, Boots, Menus, In game or Playable. One tap sends a report with the launcher and engine versions, the Mac model, macOS and the average frame rate (it shows what goes with it). **Don't ask after games** stops the question; a game's options still have **How does it run?**, with the community's verdict for that game. All reports make the [community compatibility list](https://anytogether.net/compatibility).
 
 ### About the project
 
 AnyPS5-ARM is the macOS port of [AnyPS5](https://github.com/boykopovar/AnyPS5). AnyPS5 is not an emulator. Its relinker turns a PS5 executable into a native program, and its system libraries are reimplemented as ordinary shared libraries the program links against. This fork makes that work on Apple silicon:
 
-- **CPU:** the game's x86-64 code runs under **Rosetta 2**. A [native arm64 mode](https://github.com/utkuhalis/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md) that translates the code ahead of time, with no Rosetta, is in development on the `native-arm64` branch.
+- **CPU:** the game's x86-64 code runs under **Rosetta 2**. A [native arm64 mode](https://github.com/AnyTogether/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md) that translates the code ahead of time, with no Rosetta, is in development on the `native-arm64` branch.
 - **Executable:** the relinker writes a **Mach-O** executable.
 - **Graphics:** the PS5 graphics driver runs on **Vulkan through MoltenVK**, which runs on Metal.
 - **Distribution:** the result is packaged as a normal **`.app`** you open from Finder.
@@ -172,7 +172,7 @@ AnyPS5-ARM is the macOS port of [AnyPS5](https://github.com/boykopovar/AnyPS5). 
 #### 1. Build
 
 ```sh
-git clone --recursive https://github.com/utkuhalis/AnyPS5-ARM.git
+git clone --recursive https://github.com/AnyTogether/AnyPS5-ARM.git
 cd AnyPS5-ARM
 cmake -S . -B build-mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
 ninja -C build-mac all libs
@@ -258,7 +258,7 @@ Controllers that SDL recognizes, such as DualSense, DualShock and Xbox pads, wor
 ### Documentation
 
 - [macOS port: status and changes](../dev/MACOS_PORT.md)
-- [Native arm64 mode: design and plan](https://github.com/utkuhalis/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md)
+- [Native arm64 mode: design and plan](https://github.com/AnyTogether/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md)
 - [Relinker usage](USAGE.md)
 - [Input mapping](INPUT_MAPPING.md)
 - [Architecture](../dev/ARCHITECTURE.md)
@@ -309,7 +309,7 @@ Artık varsayılan ayarlarla çalışıyor. Yazı tipinin bazı harfleri eksik (
 
 ### Uyumluluk
 
-[Uyumluluk listesi](COMPATIBILITY.md#türkçe), macOS'ta test edilen her oyunu, durumunu ve FPS'ini gösterir. Oyuncuların macOS, Windows ve Linux için gönderdiği raporlar [topluluk uyumluluk listesinde](https://anytogether.kodla.agency/compatibility) toplanır (bkz. [Nasıl çalıştı?](#anytogether-1)).
+[Uyumluluk listesi](COMPATIBILITY.md#türkçe), macOS'ta test edilen her oyunu, durumunu ve FPS'ini gösterir. Oyuncuların macOS, Windows ve Linux için gönderdiği raporlar [topluluk uyumluluk listesinde](https://anytogether.net/compatibility) toplanır (bkz. [Nasıl çalıştı?](#anytogether-1)).
 
 ### Durum
 
@@ -330,15 +330,15 @@ Artık varsayılan ayarlarla çalışıyor. Yazı tipinin bazı harfleri eksik (
 
 **AnyPS5.app**, PS5 ana ekranı gibi tasarlanmış bir launcher. Bir klasördeki oyun dump'larını bulur, Mac için kilidini açar (dönüştürür) ve başlatır: Terminal, derleme ya da Vulkan SDK gerekmez.
 
-<p><a href="https://github.com/utkuhalis/AnyPS5-ARM/releases/latest/download/AnyPS5-macOS.zip"><b>⬇ AnyPS5'i indir</b></a> · Apple silicon · macOS 14+</p>
+<p><a href="https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/AnyPS5-macOS.zip"><b>⬇ AnyPS5'i indir</b></a> · Apple silicon · macOS 14+</p>
 
 **Kurulum.** En kolayı Terminal'de tek satır. `curl` ile inen dosya karantinaya alınmadığı için macOS uygulamayı "açılamıyor" uyarısı vermeden açar:
 
 ```sh
-curl -fsSL https://github.com/utkuhalis/AnyPS5-ARM/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/AnyTogether/AnyPS5-ARM/releases/latest/download/install.sh | sh
 ```
 
-[Son sürümdeki](https://github.com/utkuhalis/AnyPS5-ARM/releases/latest) zip'i kullanırsan uygulama notarize edilmediği için macOS ilk seferde engeller: **Sistem Ayarları → Gizlilik ve Güvenlik**'te **Yine de Aç**'a tıkla. macOS indirilen uygulamayı salt okunur bir kopyadan açarsa launcher kendini Uygulamalar'a taşıyıp oradan yeniden açmayı önerir.
+[Son sürümdeki](https://github.com/AnyTogether/AnyPS5-ARM/releases/latest) zip'i kullanırsan uygulama notarize edilmediği için macOS ilk seferde engeller: **Sistem Ayarları → Gizlilik ve Güvenlik**'te **Yine de Aç**'a tıkla. macOS indirilen uygulamayı salt okunur bir kopyadan açarsa launcher kendini Uygulamalar'a taşıyıp oradan yeniden açmayı önerir.
 
 **İlk açılış.** Dili, dört hareketli temadan birini (Kozmik, Aurora, Gün Batımı, Cam) ve PS5 dump'larının olduğu klasörü seç. Alt klasörler de taranır, sonradan eklenen oyunlar kendiliğinden görünür.
 
@@ -388,7 +388,7 @@ Launcher ok tuşları, Return ve Esc ile, oyun kumandasıyla (yön tuşları, �
 
 ### AnyTogether
 
-[AnyTogether](https://anytogether.kodla.agency), launcher'ın online evi: arkadaşlar, profiller, mesajlar, sesli partiler, birlikte oynama, etkinlikler, sıralamalar, bildirimler, Tema Hub ve topluluk uyumluluk listesi. İsteğe bağlıdır; giriş yapmadan launcher eskisi gibi çalışır. Sunucu açık kaynaktır ([AnyTogether](https://github.com/utkuhalis/AnyTogether), MIT); **Ayarlar → AnyTogether → Sunucu** launcher'ı kendi kurduğun bir sunucuya bağlar.
+[AnyTogether](https://anytogether.net), launcher'ın online evi: arkadaşlar, profiller, mesajlar, sesli partiler, birlikte oynama, etkinlikler, sıralamalar, bildirimler, Tema Hub ve topluluk uyumluluk listesi. İsteğe bağlıdır; giriş yapmadan launcher eskisi gibi çalışır. Sunucu açık kaynaktır ([AnyTogether](https://github.com/AnyTogether/AnyTogether), MIT); **Ayarlar → AnyTogether → Sunucu** launcher'ı kendi kurduğun bir sunucuya bağlar.
 
 **Giriş.** **Ayarlar → AnyTogether**: e-postanı ve gelen kodu yaz, launcher'ı web sitesinde onayla (orada passkey de çalışır) ya da AnyPS5 Remote uygulaması eşli ve giriş yapmışsa telefonda bir kez dokun. Şifre ve kayıt formu yok; ilk giriş hesabı açar.
 
@@ -398,15 +398,15 @@ Launcher ok tuşları, Return ve Esc ile, oyun kumandasıyla (yön tuşları, �
 
 **Birlikte oyna: izleyen.** Launcher'da bir arkadaşı Arkadaşlar panelinden ya da davetinden **İzle**: oyunu sesiyle tam ekran açılır; izin verdiğinde kolun onun 2., 3. ya da 4. oyuncusu olur; PS tuşu çıkarır. Telefonda (AnyPS5 Remote 1.11 ve üstü) **İzle** Arkadaşlar'dadır; paylaşan sana kol verince ekrandaki kol görüntünün üstüne gelir, oyunun titreşimi ve ışık çubuğu da gelir. Tarayıcıda davetteki bağlantıyı ya da web sitesinde arkadaşın profilini aç: kol çalışır (tarayıcının görmesi için bir tuşa bir kez bas), klavye de çalışır (WASD sol analog, ok tuşları yön tuşları, I J K L şekil tuşları, Q / E L1 / R1, Z / C L2 / R2, Return Options).
 
-**Tema Hub.** **Ayarlar → Görünüm → Temalar**, insanların AnyTogether'ın Tema Hub'ında paylaştığı temaları listeler; tek basışla kurulur. Web sitesindeki [Tema Hub](https://anytogether.kodla.agency/themes) aynı temaları beğenileriyle gösterir. Giriş yapmışken **Hub'da paylaş**, kullandığın temayı yükler (Tema Stüdyosu'nda yapılmış, en çok 50 MB); yeniden paylaşmak yeni bir sürüm gönderir. `anyps5://theme/<id>` bağlantıları bir Hub temasını launcher'da açar.
+**Tema Hub.** **Ayarlar → Görünüm → Temalar**, insanların AnyTogether'ın Tema Hub'ında paylaştığı temaları listeler; tek basışla kurulur. Web sitesindeki [Tema Hub](https://anytogether.net/themes) aynı temaları beğenileriyle gösterir. Giriş yapmışken **Hub'da paylaş**, kullandığın temayı yükler (Tema Stüdyosu'nda yapılmış, en çok 50 MB); yeniden paylaşmak yeni bir sürüm gönderir. `anyps5://theme/<id>` bağlantıları bir Hub temasını launcher'da açar.
 
-**Nasıl çalıştı?** Bir oyunu oynadıktan sonra launcher **… nasıl çalıştı?** diye sorabilir: Hiç, Açılıyor, Menüler, Oyun içi ya da Oynanabilir. Tek dokunuş launcher ve motor sürümlerini, Mac modelini, macOS'u ve ortalama FPS'i içeren bir rapor gönderir (neyin gittiğini gösterir). **Oyunlardan sonra sorma** soruyu kapatır; oyunun seçeneklerinde **Nasıl çalışıyor?** satırı topluluğun o oyun için kararıyla durur. Bütün raporlar [topluluk uyumluluk listesini](https://anytogether.kodla.agency/compatibility) oluşturur.
+**Nasıl çalıştı?** Bir oyunu oynadıktan sonra launcher **… nasıl çalıştı?** diye sorabilir: Hiç, Açılıyor, Menüler, Oyun içi ya da Oynanabilir. Tek dokunuş launcher ve motor sürümlerini, Mac modelini, macOS'u ve ortalama FPS'i içeren bir rapor gönderir (neyin gittiğini gösterir). **Oyunlardan sonra sorma** soruyu kapatır; oyunun seçeneklerinde **Nasıl çalışıyor?** satırı topluluğun o oyun için kararıyla durur. Bütün raporlar [topluluk uyumluluk listesini](https://anytogether.net/compatibility) oluşturur.
 
 ### Proje hakkında
 
 AnyPS5-ARM, [AnyPS5](https://github.com/boykopovar/AnyPS5)'in macOS sürümüdür. AnyPS5 bir emülatör değildir. Relinker'ı PS5 oyun dosyasını yerel bir programa dönüştürür. Sistem kütüphaneleri de yeniden yazılmıştır ve program bunlara normal paylaşımlı kütüphaneler gibi bağlanır. Bu fork, bunu Apple silicon'da çalışır hale getirir:
 
-- **İşlemci:** Oyunun x86-64 kodu **Rosetta 2** altında çalışır. Kodu önceden arm64'e çeviren ve Rosetta gerektirmeyen bir [native arm64 modu](https://github.com/utkuhalis/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md), `native-arm64` dalında geliştiriliyor.
+- **İşlemci:** Oyunun x86-64 kodu **Rosetta 2** altında çalışır. Kodu önceden arm64'e çeviren ve Rosetta gerektirmeyen bir [native arm64 modu](https://github.com/AnyTogether/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md), `native-arm64` dalında geliştiriliyor.
 - **Çalıştırılabilir dosya:** Relinker, oyunu bir **Mach-O** dosyası olarak yazar.
 - **Grafik:** PS5 grafik sürücüsü, **MoltenVK üzerinden Vulkan** ile çalışır. MoltenVK da Metal'i kullanır.
 - **Dağıtım:** Sonuç, Finder'dan açılan normal bir **`.app`** olarak paketlenir.
@@ -425,7 +425,7 @@ AnyPS5-ARM, [AnyPS5](https://github.com/boykopovar/AnyPS5)'in macOS sürümüdü
 #### 1. Derleme
 
 ```sh
-git clone --recursive https://github.com/utkuhalis/AnyPS5-ARM.git
+git clone --recursive https://github.com/AnyTogether/AnyPS5-ARM.git
 cd AnyPS5-ARM
 cmake -S . -B build-mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
 ninja -C build-mac all libs
@@ -511,7 +511,7 @@ SDL'in tanıdığı kollar (DualSense, DualShock, Xbox kolları gibi) kendiliği
 ### Belgeler
 
 - [macOS sürümü: durum ve değişiklikler](../dev/MACOS_PORT.md)
-- [Native arm64 modu: tasarım ve plan](https://github.com/utkuhalis/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md)
+- [Native arm64 modu: tasarım ve plan](https://github.com/AnyTogether/AnyPS5-ARM/blob/native-arm64/docs/dev/NATIVE_ARM64.md)
 - [Relinker kullanımı](USAGE.md)
 - [Tuş atamaları](INPUT_MAPPING.md)
 - [Mimari](../dev/ARCHITECTURE.md)
