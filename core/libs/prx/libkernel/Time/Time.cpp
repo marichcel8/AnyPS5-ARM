@@ -367,6 +367,7 @@ void KernelTraceWait_nid_postfix(const char* kind, const void* caller, std::uint
 
 static void CancellableSleep(std::uint64_t nanos) {
     ThreadCancel::Check();
+    const int savedErrno = errno;
     if (nanos <= SleepWake::MAX_WAKEABLE_NANOS) {
         SleepWake::Sleep(nanos);
     } else {
@@ -379,6 +380,7 @@ static void CancellableSleep(std::uint64_t nanos) {
             ThreadCancel::Wait(condition, lock, deadline);
         }
     }
+    errno = savedErrno;
     ThreadCancel::Check();
 }
 

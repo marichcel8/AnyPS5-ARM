@@ -420,6 +420,7 @@ std::vector<std::uint32_t> SpirvEmitter::Emit(const IrProgram& program, const Sh
     state.float32DenormPreserve = target.float32DenormPreserve;
     state.fusedExactArithmetic = target.fusedExactArithmetic;
     state.deviceScopeLdsMemoryBarriers = target.deviceScopeLdsMemoryBarriers;
+    state.ldsLockFences = target.ldsLockFences;
     state.hostSubgroupSize = target.subgroupSize;
     state.singleLane = (target.subgroupStages & SubgroupStageBit(state.meshAsCompute ? IrShaderStage::Compute : program.Resources().stage)) == 0u;
     state.singleSampleImages = std::find(target.supportedCapabilities.begin(), target.supportedCapabilities.end(), static_cast<std::uint32_t>(spv::CapabilityStorageImageMultisample)) == target.supportedCapabilities.end();

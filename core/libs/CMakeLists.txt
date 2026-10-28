@@ -326,6 +326,15 @@ if(BUILD_TESTING)
         set_tests_properties(guest_kernel_sys_console_identity PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel_sys>")
     endif()
+    add_test_executable(guest_kernel_sys_cpumode_tests tests/GuestKernelSysCpumode.cpp)
+    target_include_directories(guest_kernel_sys_cpumode_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_kernel_sys_cpumode_tests PRIVATE libkernel_sys libkernel libc)
+    configure_windows_unwind(guest_kernel_sys_cpumode_tests)
+    add_test(NAME guest_kernel_sys_cpumode COMMAND guest_kernel_sys_cpumode_tests)
+    if(WIN32)
+        set_tests_properties(guest_kernel_sys_cpumode PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel_sys>")
+    endif()
     add_test_executable(nid_buffer_validation_tests nid/tests/BufferValidation.cpp)
     target_include_directories(nid_buffer_validation_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/nid/include)
     target_compile_features(nid_buffer_validation_tests PRIVATE cxx_std_20)
@@ -868,6 +877,16 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_rudp_poll PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceRudp>")
+    endif()
+    if(WIN32)
+        add_test_executable(rudp_poll_wait_exception_tests tests/RudpPollWaitException.cpp
+            prx/libSceRudp/Export.cpp prx/libkernel/Time/TimedWait.cpp)
+        target_include_directories(rudp_poll_wait_exception_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_link_libraries(rudp_poll_wait_exception_tests PRIVATE libc)
+        configure_windows_unwind(rudp_poll_wait_exception_tests)
+        add_test(NAME rudp_poll_wait_exception COMMAND rudp_poll_wait_exception_tests)
+        set_tests_properties(rudp_poll_wait_exception PROPERTIES TIMEOUT 30 SKIP_RETURN_CODE 77 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 
     add_test_executable(guest_memory_pool_stats_tests tests/GuestMemoryPoolStats.cpp)
