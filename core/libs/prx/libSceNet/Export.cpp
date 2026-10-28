@@ -1068,7 +1068,12 @@ int APS5_VABI sceNetSocket(const char* name, int family, int type, int protocol)
     const int hostType = type == NET_SOCK_STREAM_P2P ? NET_SOCK_STREAM : type == NET_SOCK_DGRAM_P2P ? NET_SOCK_DGRAM : type;
     if (!initialize_sockets()) return fail(5);
     const NativeSocket native = ::socket(family == NET_AF_INET ? AF_INET : AF_INET6, hostType, p2p ? 0 : protocol);
-    if (native == INVALID_NATIVE_SOCKET) return fail(native_error());
+    if (native == INVALID_NATIVE_SOCKET) {
+#ifdef __APPLE__
+        if (errno == EPROTOTYPE) return fail(NET_EPROTONOSUPPORT);
+#endif
+        return fail(native_error());
+    }
     if (p2p && hostType == NET_SOCK_DGRAM) {
         sockaddr_in loopback{};
         loopback.sin_family = AF_INET;
@@ -2561,6 +2566,13 @@ int APS5_VABI sceNetInetPton(int af, const char* src, void* dst) {
         return fail(NET_EINVAL);
     }
     const auto convert = [](int family, const std::string& text, unsigned char* address) {
+#ifdef __APPLE__
+        if (family == AF_INET) {
+            for (std::size_t i = 0; i + 1 < text.size(); ++i) {
+                if (text[i] == '0' && (i == 0 || text[i - 1] == '.') && text[i + 1] >= '0' && text[i + 1] <= '9') return 0;
+            }
+        }
+#endif // __APPLE__
 #ifdef _WIN32
         return InetPtonA(family, text.c_str(), address);
 #else

@@ -54,7 +54,10 @@ extern "C" {
 
 // Whether the allocation stub has to keep the upper halves of the ymm registers.
 #if defined(__x86_64__)
-std::uint8_t Aps5GuestTlsAvx_nid_no_patch = __builtin_cpu_supports("avx") ? 1 : 0;
+std::uint8_t Aps5GuestTlsAvx_nid_no_patch = [] {
+    __builtin_cpu_init();
+    return __builtin_cpu_supports("avx") ? 1 : 0;
+}();
 #endif
 
 void Aps5GuestTlsRegister_nid_no_patch(GuestTlsDescriptor* descriptor) {

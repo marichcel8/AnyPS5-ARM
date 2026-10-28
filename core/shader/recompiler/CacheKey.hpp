@@ -347,6 +347,7 @@ private:
         append(key, value.narrowSubgroupClock);
         append(key, value.subgroupStages);
         append(key, value.relaxedFloat);
+        append(key, value.fragmentBarycentricBuiltins);
         append(key, value.float64DenormPreserve);
         append(key, value.meshAsCompute);
         append(key, value.depthRangeRemap);

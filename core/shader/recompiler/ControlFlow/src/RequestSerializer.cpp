@@ -907,7 +907,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     std::string buffer;
     Writer writer(buffer);
     writer.WriteU32(0x41505335u);
-    writer.WriteU32(request.backend == ShaderBackendKind::Msl ? 49u : 48u);
+    writer.WriteU32(request.backend == ShaderBackendKind::Msl ? 50u : 49u);
     writeShaderBinary(writer, request.shader);
     writeGuestContext(writer, request.context);
     writeSpirvTarget(writer, request.target);
@@ -948,6 +948,7 @@ std::string RequestSerializer::Serialize(const RecompileRequest& request) const 
     writer.WriteBool(request.target.fusedExactArithmetic);
     writer.WriteBool(request.target.largePixelFunctionLdsBuffer);
     writer.WriteU32(request.target.pixelFunctionStorageDwords);
+    writer.WriteBool(request.target.fragmentBarycentricBuiltins);
     writer.WriteU32(request.target.subgroupStages);
     writer.WriteBool(request.target.meshAsCompute);
     if (request.backend == ShaderBackendKind::Msl) {
@@ -962,7 +963,7 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
     Reader reader(decoded);
     if (reader.ReadU32() != 0x41505335u) throw std::runtime_error("invalid recompile request signature");
     const auto version = reader.ReadU32();
-    if (version < 1u || version > 49u) throw std::runtime_error("unsupported recompile request serialization version");
+    if (version < 1u || version > 50u) throw std::runtime_error("unsupported recompile request serialization version");
     DeserializedRequest result{};
     result.request.shader = readShaderBinary(reader, result.shaderCode, result.shaderHeader);
     result.request.context = readGuestContext(reader, result, version);
@@ -1027,11 +1028,12 @@ DeserializedRequest RequestSerializer::Deserialize(std::string_view text) const 
         result.request.target.largePixelFunctionLdsBuffer = reader.ReadBool();
         result.request.target.pixelFunctionStorageDwords = reader.ReadU32();
     }
-    if (version >= 48u) {
+    if (version >= 48u) result.request.target.fragmentBarycentricBuiltins = reader.ReadBool();
+    if (version >= 49u) {
         result.request.target.subgroupStages = reader.ReadU32();
         result.request.target.meshAsCompute = reader.ReadBool();
     }
-    if (version >= 49u) {
+    if (version >= 50u) {
         if (reader.ReadU8() != static_cast<std::uint8_t>(ShaderBackendKind::Msl)) throw std::runtime_error("RequestSerializer: invalid shader backend");
         result.request.backend = ShaderBackendKind::Msl;
         result.request.msl = readMslTarget(reader);
