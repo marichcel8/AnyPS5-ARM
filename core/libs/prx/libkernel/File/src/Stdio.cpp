@@ -437,12 +437,25 @@ std::int64_t File::AppendKeepingOffset(int descriptor, const struct iovec* vecto
     return result;
 }
 #endif
+#ifdef __APPLE__
+std::int64_t File::WritevAtEnd(int descriptor, const iovec* iov, int iovcnt) {
+    struct stat status{};
+    if (!File::Appends(descriptor) || ::fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode)) return -2;
+    const off_t position = ::lseek(descriptor, 0, SEEK_CUR);
+    if (position < 0) return -1;
+    const auto result = static_cast<std::int64_t>(::writev(descriptor, iov, iovcnt));
+    const int error = errno;
+    if (::lseek(descriptor, position, SEEK_SET) < 0) throw std::runtime_error("WritevAtEnd: cannot restore the file offset");
+    errno = error;
+    return result;
+}
+#endif
 static std::int64_t NativePwrite(int descriptor, const void* buf, std::size_t nbytes, std::int64_t offset) {
     const auto result = File::PwriteSharedMemory_nid_no_patch(descriptor, buf, nbytes, offset);
     if (result != -2) return result;
 #ifdef __APPLE__
-    const struct iovec vector{const_cast<void*>(buf), nbytes};
-    if (const auto appended = File::AppendKeepingOffset(descriptor, &vector, 1); appended != -2) return appended;
+    const iovec whole{const_cast<void*>(buf), nbytes};
+    if (const auto appended = File::WritevAtEnd(descriptor, &whole, 1); appended != -2) return appended;
 #endif
     return static_cast<std::int64_t>(::pwrite(descriptor, buf, nbytes, static_cast<off_t>(offset)));
 }
@@ -1732,9 +1745,7 @@ int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* guestIov, int iovcn
     const auto sharedResult = File::PwritevSharedMemory_nid_no_patch(d, NativeIovecs(iov), iovcnt, offset);
     if (sharedResult != -2) return sharedResult < 0 ? SceErrorFromErrno(errno) : sharedResult;
 #ifdef __APPLE__
-    if (const auto appended = File::AppendKeepingOffset(d, NativeIovecs(iov), iovcnt); appended != -2) {
-        return appended < 0 ? SceErrorFromErrno(errno) : appended;
-    }
+    if (const auto appended = File::WritevAtEnd(d, NativeIovecs(iov), iovcnt); appended != -2) return appended < 0 ? SceErrorFromErrno(errno) : appended;
 #endif
     const auto result = static_cast<std::int64_t>(::pwritev(d, NativeIovecs(iov), iovcnt, static_cast<off_t>(offset)));
     return result < 0 ? SceErrorFromErrno(errno) : result;

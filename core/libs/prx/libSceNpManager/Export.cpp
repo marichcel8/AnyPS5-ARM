@@ -1057,6 +1057,11 @@ int APS5_VABI sceNpPollAsync(int req_id, int* result) {
     return call.Return(NP_POLL_ASYNC_FINISHED, [&](Online::Fields& out) { out.Int("result", value); });
 }
 
+int APS5_VABI sceNpWaitAsync(void) {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
 // Presence changes come from PlayStation Network, so a registered callback is never called.
 void APS5_VABI sceNpRegisterGamePresenceCallback(void* callback, void* userdata) {
     Online::Call call("libSceNpManager", __func__);

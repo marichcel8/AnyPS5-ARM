@@ -213,6 +213,7 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     if (const auto localDevice = device.Load(); localDevice != nullptr) localDevice->NormalizeUnobservedViewportDepth(product->state, product->pixel);
     if (product->pixel.ancillary) product->pixel.layerExported = product->state.layerExports != 0;
     product->pixel.ditheredAlphaToCoverage = product->state.ditheredAlphaToCoverage;
+    product->pixel.ditheredAlphaSamples = product->state.ditheredAlphaSamples;
     product->pixel.iteratesSamples = product->state.perSampleShading;
     product->pixel.sampleLocations = Graphics::PixelSampleLocations(product->state, product->pixel);
     return product;

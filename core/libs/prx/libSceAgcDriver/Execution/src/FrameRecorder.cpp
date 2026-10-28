@@ -24,6 +24,7 @@
 #include <windows.h>
 #else
 #include <unistd.h>
+extern char** environ;
 #endif
 #ifdef __APPLE__
 #include <crt_externs.h>
