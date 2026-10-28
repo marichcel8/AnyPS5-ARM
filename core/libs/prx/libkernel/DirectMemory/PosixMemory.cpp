@@ -167,12 +167,11 @@ void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protecti
         // macOS places guest mappings with host mmap outside the arena (MapPlaced); only page zero is refused.
         if (fixedAnonymous && start == 0) return failed(GuestInvalid);
 #endif
-        const bool exclusive = fixedAnonymous && (mappingFlags & GuestMapExclusive) != 0;
-        const int placement = fixedAnonymous ? GuestMapFixed | (exclusive ? GuestMapNoOverwrite : 0) : 0;
+        const int placement = fixedAnonymous ? GuestMapFixed : 0;
         void* mapped = address;
         const auto alignment = !fixedAnonymous && (flags & GuestAlignedSuper) != 0 ? SuperpageSize : PS5_PAGE_SIZE;
         try {
-            const auto result = DoMapAnon(&mapped, rounded, protection, placement, alignment, exclusive, fixedAnonymous);
+            const auto result = DoMapAnon(&mapped, rounded, protection, placement, alignment, false, fixedAnonymous);
             if (result != 0) return failed(result == SCE_KERNEL_ERROR_EINVAL ? GuestInvalid : GuestNoMemory);
             if (fixedAnonymous) ReleaseFlexibleMappingRange(start, rounded);
             return mapped;

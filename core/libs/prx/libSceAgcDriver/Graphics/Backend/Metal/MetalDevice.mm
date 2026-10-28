@@ -3899,7 +3899,7 @@ auto VulkanDevice::PresentWaitsForSlots(const DisplayBuffer*) const -> bool { re
 
 auto VulkanDevice::AcquireImage() -> bool { return state->presenter != nullptr; }
 
-auto VulkanDevice::PresentClear(std::uint32_t width, std::uint32_t height, bool opaque) -> bool {
+auto VulkanDevice::PresentClear(std::uint32_t width, std::uint32_t height, bool opaque, const DisplayBuffer*) -> bool {
     auto& s = *state;
     if (s.presenter == nullptr) return false;
     std::vector<std::byte> pixels(static_cast<std::size_t>(width) * height * 4u);
@@ -3925,7 +3925,7 @@ auto VulkanDevice::PresentPixels(std::uint32_t width, std::uint32_t height, std:
     }
 }
 
-auto VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) -> bool {
+auto VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer, const DisplayBuffer*) -> bool {
     auto& s = *state;
     if (s.presenter == nullptr) return false;
     std::lock_guard lock(s.mutex);

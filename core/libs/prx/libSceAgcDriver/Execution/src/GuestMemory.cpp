@@ -2007,8 +2007,22 @@ bool UnchangedCommittedSince(std::span<const std::pair<std::uint64_t, std::uint6
     return true;
 }
 
+static GuestAllocations::Lease::Ranges pinStoreRanges(std::uint64_t address, std::size_t bytes) {
+    GuestAllocations::Lease::Ranges pinned;
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - address) return pinned;
+    const auto end = address + bytes;
+    for (auto at = address; at < end;) {
+        auto range = GuestAllocations::GuestAllocationsLookup_nid_postfix(at, true);
+        if (range == nullptr || range->address >= end) break;
+        at = range->address + range->bytes;
+        pinned.push_back(std::move(range));
+    }
+    return pinned;
+}
+
 std::uint64_t storeOwn(std::uint64_t address, std::size_t bytes, const std::function<std::pair<std::uint64_t, std::uint64_t>()>& store) {
     if (bytes == 0) return 0;
+    const auto pinned = pinStoreRanges(address, bytes);
     BreakProofs();
     const auto stampStored = [](WriteTracker& tracker, std::pair<std::uint64_t, std::uint64_t> stored) -> std::uint64_t {
         if (stored.second <= stored.first) return 0;
@@ -2044,21 +2058,21 @@ std::uint64_t StoreOwnBytes(std::uint64_t address, std::size_t bytes, const std:
     });
 }
 
-std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
-    return StoreOwnBytes(address, source.size(), [&] {
+static void copyOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
 #ifndef _WIN32
-        if (GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix() && GuestArena::GuestArenaWriteSharedBacking_nid_no_patch(address, source.data(), source.size())) return;
+    if (GuestWriteWatch::GuestWriteWatchAvailable_nid_postfix() && GuestArena::GuestArenaWriteSharedBacking_nid_no_patch(address, source.data(), source.size())) return;
 #endif
 #ifdef __APPLE__
-        // Opened for the store instead of faulting: under Rosetta a host store into a watched page can fault
-        // without the signal ever reaching the watch (Stray's queue stalled on a label for good).
-        GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(reinterpret_cast<const void*>(address), source.size());
-        std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
-        GuestWriteWatch::GuestWriteWatchEndHostWrite_nid_postfix(reinterpret_cast<const void*>(address), source.size());
+    GuestWriteWatch::GuestWriteWatchBeginHostWrite_nid_postfix(reinterpret_cast<const void*>(address), source.size());
+    std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
+    GuestWriteWatch::GuestWriteWatchEndHostWrite_nid_postfix(reinterpret_cast<const void*>(address), source.size());
 #else
-        std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
+    std::memcpy(reinterpret_cast<void*>(address), source.data(), source.size());
 #endif
-    });
+}
+
+std::uint64_t StoreOwnBytes(std::uint64_t address, std::span<const std::byte> source) {
+    return StoreOwnBytes(address, source.size(), [&] { copyOwnBytes(address, source); });
 }
 
 static std::uint64_t markWritten(std::uint64_t address, std::size_t bytes, bool complete) {
@@ -2846,10 +2860,10 @@ void WriteChanged(std::uint64_t address, std::span<const std::byte> current, std
     FlushGpuWrites(address, current.size());
     const TimedAccess timed(CounterChangedWrite, current.size());
     auto* destination = reinterpret_cast<std::byte*>(address);
-    CheckRange(destination, current.size(), 1, true);
     const auto size = current.size();
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
     storeOwn(address, size, [&] {
+        CheckRange(destination, size, 1, true);
         std::size_t firstChanged = size;
         std::size_t lastChanged = 0;
         std::size_t at = 0;
@@ -2885,10 +2899,12 @@ void Write(std::uint64_t address, std::span<const std::byte> source, std::size_t
     const TimedAccess timed(CounterWrite, source.size());
     CountWriteCaller(__builtin_return_address(0));
     auto* destination = reinterpret_cast<void*>(address);
-    CheckRange(destination, source.size(), alignment, true);
     // Stamped like a GPU write: a collect memoized for this packet would not see the page fault.
-    StoreOwnBytes(address, source);
-    static_cast<void>(destination);
+    StoreOwnBytes(address, source.size(), [&] {
+        CheckRange(destination, source.size(), alignment, true);
+        if (source.size() >= PageBytes) copyOwnBytes(address, source);
+        else std::memcpy(destination, source.data(), source.size());
+    });
 }
 
 }
@@ -2898,8 +2914,8 @@ extern "C" void AgcDriverCheckGuestMemory_nid_postfix(const void* pointer, std::
 }
 
 extern "C" void AgcDriverStoreGuestLabel_nid_postfix(std::uint64_t* pointer, std::uint64_t value) {
-    AgcDriver::GuestMemory::CheckRange(pointer, sizeof(*pointer), std::atomic_ref<std::uint64_t>::required_alignment, true);
     AgcDriver::GuestMemory::StoreOwnBytes(reinterpret_cast<std::uintptr_t>(pointer), sizeof(*pointer), [&] {
+        AgcDriver::GuestMemory::CheckRange(pointer, sizeof(*pointer), std::atomic_ref<std::uint64_t>::required_alignment, true);
         std::atomic_ref(*pointer).store(value, std::memory_order_release);
     });
 }

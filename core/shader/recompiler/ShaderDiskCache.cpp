@@ -85,9 +85,9 @@ std::filesystem::path ShaderCacheDirectory() {
 namespace ShaderRecompiler::ShaderDiskCache {
 
 #if defined(__linux__) && defined(__x86_64__) && defined(__GLIBCXX__)
-static_assert(sizeof(CompiledShaderArtifact) == 320, "CompiledShaderArtifact changed: update the artifact encoder");
+static_assert(sizeof(CompiledShaderArtifact) == 328, "CompiledShaderArtifact changed: update the artifact encoder");
 static_assert(sizeof(ShaderInvocation) == 216, "ShaderInvocation changed: update the invocation encoder");
-static_assert(sizeof(RecompileResult) == 584, "RecompileResult changed: update EncodeResult and DecodeResult");
+static_assert(sizeof(RecompileResult) == 592, "RecompileResult changed: update EncodeResult and DecodeResult");
 static_assert(sizeof(DescriptorBinding) == 656, "DescriptorBinding changed: update the binding encoder");
 static_assert(sizeof(VertexAttribute) == 32, "VertexAttribute changed: update the attribute encoder");
 static_assert(sizeof(VertexInput) == 16, "VertexInput changed: update the vertex input encoder");
@@ -141,14 +141,14 @@ constexpr std::size_t fieldCount() {
 
 static_assert(fieldCount<ShaderInfo>() == 24, "ShaderInfo changed: update the info encoder");
 static_assert(fieldCount<BufferResource>() == 12, "BufferResource changed: update the info encoder");
-static_assert(fieldCount<ImageResource>() == 43, "ImageResource changed: update the info encoder");
+static_assert(fieldCount<ImageResource>() == 44, "ImageResource changed: update the info encoder");
 static_assert(fieldCount<SamplerResource>() == 8, "SamplerResource changed: update the info encoder");
 static_assert(fieldCount<SampledResourcePair>() == 3, "SampledResourcePair changed: update the info encoder");
 static_assert(fieldCount<StageInput>() == 5, "StageInput changed: update the info encoder");
 static_assert(fieldCount<StageOutput>() == 4, "StageOutput changed: update the info encoder");
 static_assert(fieldCount<IrResourcePlan>() == 24, "IrResourcePlan changed: update EncodePlan and DecodePlan");
 static_assert(fieldCount<GuestRegister>() == 2, "GuestRegister changed: update the plan value encoder");
-static_assert(fieldCount<MemoryInfo>() == 31, "MemoryInfo changed: update the plan encoder");
+static_assert(fieldCount<MemoryInfo>() == 32, "MemoryInfo changed: update the plan encoder");
 static_assert(fieldCount<DescriptorSource>() == 3, "DescriptorSource changed: update the plan encoder");
 static_assert(fieldCount<TableColumn>() == 18, "TableColumn changed: update the plan encoder");
 static_assert(fieldCount<KeyDomain>() == 4, "KeyDomain changed: update the plan encoder");
@@ -525,6 +525,7 @@ void encodeArtifact(Writer& writer, const CompiledShaderArtifact& result) {
     writer.Values(std::span<const char>(result.msl.Source().data(), result.msl.Source().size()));
     writer.Value(result.bdaAbiVersion);
     writer.Value(result.windowLaneGuards);
+    writer.Value(result.descriptorFaults);
     writer.Value(result.memoryOffsetDword);
     writer.Value(result.shaderDataDwords);
     writer.Value(result.imageMetadataDword);
@@ -593,6 +594,7 @@ void decodeArtifact(Reader& reader, CompiledShaderArtifact& result) {
     result.msl = reader.Msl();
     reader.Value(result.bdaAbiVersion);
     reader.Value(result.windowLaneGuards);
+    reader.Value(result.descriptorFaults);
     reader.Value(result.memoryOffsetDword);
     reader.Value(result.shaderDataDwords);
     reader.Value(result.imageMetadataDword);
@@ -824,6 +826,7 @@ void encodeShaderInfo(Writer& writer, const ShaderInfo& info) {
         out.Value(image.foldTexelOffsetsOnly);
         out.Value(image.convertedSamples);
         out.Value(image.remappedDepth1D);
+        out.Value(image.optionalDescriptor);
         out.Value(image.byElements);
         out.Value(image.byComponents);
         out.Value(image.packedFormat);
@@ -932,6 +935,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
         in.Value(image.foldTexelOffsetsOnly);
         in.Value(image.convertedSamples);
         in.Value(image.remappedDepth1D);
+        in.Value(image.optionalDescriptor);
         in.Value(image.byElements);
         in.Value(image.byComponents);
         in.Value(image.packedFormat);
@@ -1059,6 +1063,7 @@ void encodeMemoryInfo(Writer& out, const MemoryInfo& memory) {
     out.Value(memory.gpuDescriptor);
     out.Value(memory.flushDenormals);
     out.Value(memory.flushDenormalResults);
+    out.Value(memory.descriptorWebArm);
 }
 
 void decodeMemoryInfo(Reader& in, MemoryInfo& memory) {
@@ -1093,6 +1098,7 @@ void decodeMemoryInfo(Reader& in, MemoryInfo& memory) {
     in.Value(memory.gpuDescriptor);
     in.Value(memory.flushDenormals);
     in.Value(memory.flushDenormalResults);
+    in.Value(memory.descriptorWebArm);
 }
 
 bool encodePlan(Writer& writer, const IrResourcePlan& plan) {

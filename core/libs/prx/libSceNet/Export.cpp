@@ -49,6 +49,7 @@
 #include "prx/libSceNet/include/VirtualNet.hpp"
 #include "prx/libSceNet/include/VirtualStream.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
+#include "prx/libkernel/Socket/include/SocketOptions.hpp"
 #include "prx/libkernel/Time/include/Time.hpp"
 #include "prx/libkernel/Pthread/include/ThreadLifecycle.hpp"
 #include "src/ResolverTestHooks.hpp"
@@ -102,6 +103,7 @@ constexpr int NET_EINTR = 4;
 constexpr int NET_EBADF = 9;
 constexpr int NET_EACCES = 13;
 constexpr int NET_EFAULT = 14;
+constexpr int NET_EBUSY = 16;
 constexpr int NET_EINVAL = 22;
 constexpr int NET_ENOTTY = 25;
 constexpr int NET_ENOSPC = 28;
@@ -128,8 +130,14 @@ constexpr int NET_EHOSTUNREACH = 65;
 constexpr int NET_ENOTINIT = 200;
 constexpr int NET_ERROR_BASE = static_cast<int>(0x80410100u);
 constexpr int NET_ERROR_RESOLVER_ENODNS = static_cast<int>(0x804101E1u);
+constexpr int NET_CONFIG_ERROR_NULL_FLAGS = static_cast<int>(0x8041130Eu);
 constexpr int NET_RESOLVER_ABORT_FLAG_NTOA_PRESERVATION = 0x1;
 constexpr int NET_RESOLVER_ABORT_FLAG_ATON_PRESERVATION = 0x2;
+constexpr std::uint32_t NET_IFF_UP = 0x1;
+constexpr std::uint32_t NET_IFF_LOOPBACK = 0x8;
+constexpr std::uint32_t NET_IFF_RUNNING = 0x40;
+constexpr std::uint32_t NET_IFF_MULTICAST = 0x8000;
+constexpr std::uint32_t NET_IF_LO0 = 0;
 
 constexpr int NET_AF_INET = 2;
 constexpr int NET_AF_INET6 = 28;
@@ -143,6 +151,7 @@ constexpr int NET_EPOLL_CTL_MOD = 2;
 constexpr int NET_EPOLL_CTL_DEL = 3;
 constexpr int NET_SOL_SOCKET = 0xFFFF;
 constexpr int NET_IPPROTO_TCP = 6;
+constexpr int NET_IPPROTO_IPV6 = 41;
 constexpr int NET_TCP_NODELAY = 1;
 constexpr int NET_TF_NODELAY = 4;
 constexpr int NET_SO_SNDTIMEO = 0x1005;
@@ -164,6 +173,7 @@ constexpr int NET_SO_ACCEPTCONN = 0x2;
 constexpr int NET_MSG_PEEK = 0x2;
 constexpr int NET_MSG_TRUNC = 0x10;
 constexpr int NET_MSG_DONTWAIT = 0x80;
+constexpr int NET_MSG_NOSIGNAL = 0x20000;
 constexpr int NET_UIO_MAXIOV = 1024;
 
 #ifdef _WIN32
@@ -369,13 +379,6 @@ std::map<int, Sock> g_socks;
 std::set<int> g_epolls;
 using EpollRegistrations = std::map<int, std::shared_ptr<const NetEpollEvent>>;
 std::map<int, EpollRegistrations> g_epoll_socks;
-// Registrations of descriptors made by libkernel's socket(), which have no Sock here. The weak owner tells a
-// registration of a closed socket from one of a new socket that reuses its number.
-struct KernelEpollWatch {
-    std::weak_ptr<void> owner;
-    NativeSocket native;
-};
-std::map<int, std::map<int, KernelEpollWatch>> g_epoll_kernel_watches;
 std::set<int> g_epoll_aborted;
 std::map<int, std::size_t> g_pools;
 
@@ -392,6 +395,8 @@ int g_next_epoll = 0x4000;
 int g_next_pool = 1;
 int g_next_resolver = 0x100;
 bool g_net_inited = false;
+bool g_net_init_param_set = false;
+std::array<std::uint8_t, 32> g_net_init_param{};
 std::atomic<GuestSceNetTest::ResolverLookup> g_resolverLookupForTests{nullptr};
 
 int* errno_slot() {
@@ -535,10 +540,10 @@ int timeout_option(int optname) {
 }
 
 #ifdef _WIN32
-short closed_stream_events(int type, bool sendingShut, short native, short requested) {
-    if (type != NET_SOCK_STREAM || (native & (POLLHUP | POLLERR)) != POLLHUP) return native;
+short closed_stream_events(const Sock& socket, short native, short requested) {
+    if (socket.type != NET_SOCK_STREAM || (native & (POLLHUP | POLLERR)) != POLLHUP) return native;
     native = static_cast<short>(native | (requested & POLLRDNORM));
-    return sendingShut ? native : static_cast<short>(native & ~POLLHUP);
+    return socket.sending_shut ? native : static_cast<short>(native & ~POLLHUP);
 }
 #endif
 
@@ -946,7 +951,10 @@ const bool g_socketPollerRegistered = (KernelSetSocketPoller_nid_no_patch(&PollS
 bool CloseSocketForKernel(int descriptor, int* error) {
     {
         std::lock_guard lk(g_mutex);
-        if (g_socks.count(descriptor) == 0) return false;
+        if (g_socks.count(descriptor) == 0) {
+            for (auto& epoll : g_epoll_socks) epoll.second.erase(descriptor);
+            return false;
+        }
     }
     *error = sceNetSocketClose(descriptor) == 0 ? 0 : *errno_slot();
     return true;
@@ -1597,7 +1605,7 @@ int64_t APS5_VABI sceNetRecvfrom(int s, void* buf, size_t len, int flags, void* 
 }
 
 int64_t APS5_VABI sceNetSend(int s, const void* buf, size_t len, int flags) {
-    if (!message_flags_supported(flags, NET_MSG_DONTWAIT)) return fail(NET_EOPNOTSUPP);
+    if (!message_flags_supported(flags, NET_MSG_DONTWAIT | NET_MSG_NOSIGNAL)) return fail(NET_EOPNOTSUPP);
     if (!buf && len) return fail(NET_EINVAL);
     if (len > INT_MAX) return fail(NET_EMSGSIZE);
     Sock socket;
@@ -1625,7 +1633,7 @@ int64_t APS5_VABI GuestNetSend_nid_no_patch(int s, const void* buf, size_t len, 
 }
 
 int64_t APS5_VABI sceNetSendto(int s, const void* buf, size_t len, int flags, const void* to, uint32_t tolen) {
-    if (!message_flags_supported(flags, NET_MSG_DONTWAIT)) return fail(NET_EOPNOTSUPP);
+    if (!message_flags_supported(flags, NET_MSG_DONTWAIT | NET_MSG_NOSIGNAL)) return fail(NET_EOPNOTSUPP);
     if (!buf && len) return fail(NET_EINVAL);
     if (len > INT_MAX) return fail(NET_EMSGSIZE);
     Sock socket;
@@ -1834,6 +1842,11 @@ int APS5_VABI sceNetSetsockopt(int s, int level, int optname, const void* optval
         if (!GuestSocketIsOpen_nid_no_patch(s)) return fail(NET_EBADF);
         return setsockopt_nid_postfix(s, level, optname, optval, optlen) == 0 ? 0 : fail(*__error_nid_postfix());
     }
+    if (level == NET_IPPROTO_IPV6) {
+        if (!optval) return fail(NET_EINVAL);
+        const int error = GuestSocketSetIpv6LevelOption_nid_no_patch(static_cast<std::uintptr_t>(socket.native->value), socket.family == NET_AF_INET6, optname, optval, optlen);
+        return error == 0 ? 0 : fail(error);
+    }
     if (level == NET_IPPROTO_TCP && socket.type != NET_SOCK_STREAM) return fail(NET_EINVAL);
     if (level == NET_IPPROTO_TCP && optname == NET_TCP_NODELAY) {
         if (!optval || optlen < sizeof(int)) return fail(NET_EINVAL);
@@ -1937,6 +1950,19 @@ int APS5_VABI sceNetGetsockopt(int s, int level, int optname, void* optval, uint
         if (socket.type == NET_SOCK_RAW) NotImplemented_nid_no_patch(__func__);
         *optlen = std::min(*optlen, static_cast<std::uint32_t>(sizeof(socket.protocol)));
         std::memcpy(optval, &socket.protocol, *optlen);
+        return 0;
+    }
+    if (level == NET_IPPROTO_IPV6) {
+        int value = 0;
+        std::uint32_t length = *optlen;
+        const int error = GuestSocketGetIpv6LevelOption_nid_no_patch(static_cast<std::uintptr_t>(socket.native->value), socket.family == NET_AF_INET6, optname, &value, &length);
+        if (error != 0) return fail(error);
+        const GuestArena::HostWrite destination(length == 0 ? nullptr : optval, length);
+        if (!destination.Open()) return fail(NET_EFAULT);
+        const GuestArena::HostWrite lengthOutput(optlen, sizeof(*optlen));
+        if (!lengthOutput.Open()) return fail(NET_EFAULT);
+        if (length != 0) std::memcpy(optval, &value, length);
+        *optlen = length;
         return 0;
     }
     if (level == NET_SOL_SOCKET && (optname == NET_SO_RCVTIMEO || optname == NET_SO_SNDTIMEO)) {
@@ -2339,7 +2365,6 @@ int APS5_VABI sceNetEpollDestroy(int eid) {
         return fail(NET_EBADF);
     }
     g_epoll_socks.erase(eid);
-    g_epoll_kernel_watches.erase(eid);
     g_epoll_aborted.erase(eid);
     g_cv.NotifyAll();
     return 0;
@@ -2357,30 +2382,24 @@ int APS5_VABI sceNetEpollAbort(int eid, int flags) {
 }
 
 int APS5_VABI sceNetEpollControl(int eid, int op, int id, const NetEpollEvent* event) {
-    KernelSocket kernel;
-    const bool kernelSocket = find_kernel_socket(id, kernel);
+    bool kernel = false;
+    {
+        std::lock_guard lk(g_mutex);
+        kernel = g_socks.count(id) == 0;
+    }
+    kernel = kernel && GuestSocketIsOpen_nid_no_patch(id);
     std::lock_guard lk(g_mutex);
     if (g_epolls.count(eid) == 0) {
         return fail(NET_EBADF);
     }
     if (op != NET_EPOLL_CTL_ADD && op != NET_EPOLL_CTL_MOD && op != NET_EPOLL_CTL_DEL) return fail(NET_EINVAL);
     if (op != NET_EPOLL_CTL_DEL && !event) return fail(NET_EINVAL);
-    const bool netSocket = g_socks.count(id) != 0;
-    if (!netSocket && !kernelSocket) return fail(NET_EBADF);
+    if (!kernel && g_socks.count(id) == 0) return fail(NET_EBADF);
     auto& registrations = g_epoll_socks[eid];
-    auto& kernelWatches = g_epoll_kernel_watches[eid];
-    const auto previous = kernelWatches.find(id);
-    if (previous != kernelWatches.end() && (netSocket || previous->second.owner.lock() != kernel.owner)) {
-        // The registered socket() descriptor was closed and its number now names another socket.
-        kernelWatches.erase(previous);
-        registrations.erase(id);
-    }
     if (op == NET_EPOLL_CTL_ADD) {
         if (registrations.count(id) != 0) return fail(NET_EADDRINUSE);
         registrations.emplace(id, std::make_shared<const NetEpollEvent>(*event));
-        if (!netSocket) kernelWatches.insert_or_assign(id, KernelEpollWatch{kernel.owner, kernel.native});
     } else if (op == NET_EPOLL_CTL_DEL) {
-        kernelWatches.erase(id);
         if (registrations.erase(id) == 0) return fail(NET_ENOENT);
     } else {
         auto registration = registrations.find(id);
@@ -2396,39 +2415,47 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
     struct Watch {
         int descriptor;
         std::shared_ptr<const NetEpollEvent> registration;
-        std::shared_ptr<void> owner;
-        NativeSocket native;
-        int type = 0;
-        bool sendingShut = false;
+        Sock socket;
+        std::shared_ptr<void> kernelOwner;
+        NativeSocket native = INVALID_NATIVE_SOCKET;
     };
     const auto deadline = timeout > 0
         ? std::chrono::steady_clock::now() + std::chrono::microseconds(timeout)
         : std::chrono::steady_clock::time_point::max();
     for (;;) {
         std::vector<Watch> watches;
+        std::vector<Watch> kernelWatches;
         {
             std::lock_guard lk(g_mutex);
             if (g_epolls.count(eid) == 0) return fail(NET_EBADF);
             if (g_epoll_aborted.erase(eid) != 0) return fail(NET_ECONNABORTED);
             const auto registration = g_epoll_socks.find(eid);
             if (registration != g_epoll_socks.end()) {
-                auto& kernelWatches = g_epoll_kernel_watches[eid];
-                std::vector<int> closed;
                 for (const auto& entry : registration->second) {
                     const auto socket = g_socks.find(entry.first);
-                    if (socket != g_socks.end()) {
-                        watches.push_back({entry.first, entry.second, socket->second.native, socket->second.native->value, socket->second.type, socket->second.sending_shut});
-                        continue;
-                    }
-                    const auto kernel = kernelWatches.find(entry.first);
-                    if (kernel == kernelWatches.end()) continue;
-                    if (auto owner = kernel->second.owner.lock()) watches.push_back({entry.first, entry.second, std::move(owner), kernel->second.native});
-                    else closed.push_back(entry.first);
+                    if (socket == g_socks.end()) kernelWatches.push_back({entry.first, entry.second, Sock{}, nullptr, INVALID_NATIVE_SOCKET});
+                    else watches.push_back({entry.first, entry.second, socket->second, nullptr, socket->second.native->value});
                 }
-                // A socket() descriptor closed while registered leaves its epoll, as a kernel descriptor does.
-                for (const int descriptor : closed) {
-                    registration->second.erase(descriptor);
-                    kernelWatches.erase(descriptor);
+            }
+        }
+        std::vector<Watch> closedWatches;
+        for (auto& watch : kernelWatches) {
+            std::uintptr_t native = 0;
+            if (KernelLookupSocketNative_nid_no_patch(watch.descriptor, &watch.kernelOwner, &native)) {
+                watch.native = static_cast<NativeSocket>(native);
+                watches.push_back(std::move(watch));
+            } else {
+                closedWatches.push_back(std::move(watch));
+            }
+        }
+        if (!closedWatches.empty()) {
+            std::lock_guard lk(g_mutex);
+            const auto registration = g_epoll_socks.find(eid);
+            if (registration != g_epoll_socks.end()) {
+                for (const auto& watch : closedWatches) {
+                    const auto entry = registration->second.find(watch.descriptor);
+                    if (entry != registration->second.end() && entry->second == watch.registration && g_socks.count(watch.descriptor) == 0)
+                        registration->second.erase(entry);
                 }
             }
         }
@@ -2469,7 +2496,8 @@ int APS5_VABI sceNetEpollWait(int eid, NetEpollEvent* events, int maxevents, int
 #ifdef _WIN32
         const int ready_count = WSAPoll(descriptors.data(), static_cast<ULONG>(descriptors.size()), wait_ms);
         for (std::size_t index = 0; index < descriptors.size(); ++index)
-            descriptors[index].revents = closed_stream_events(watches[index].type, watches[index].sendingShut, descriptors[index].revents, descriptors[index].events);
+            if (!watches[index].kernelOwner)
+                descriptors[index].revents = closed_stream_events(watches[index].socket, descriptors[index].revents, descriptors[index].events);
 #else
         const int ready_count = ::poll(descriptors.data(), descriptors.size(), wait_ms);
 #endif
@@ -3033,7 +3061,12 @@ int APS5_VABI sceNetGetSystemMemInfo(NetSystemMemoryInfo* info, std::uint32_t fl
 }
 
 int APS5_VABI sceNetInitParam(const NetInitializeParameter* parameter) {
-    NotImplemented_nid_no_patch(__func__);
+    std::lock_guard lk(g_mutex);
+    if (g_net_init_param_set) return fail(NET_EBUSY);
+    if (parameter == nullptr) return fail(NET_EINVAL);
+    std::memcpy(g_net_init_param.data(), parameter, g_net_init_param.size());
+    g_net_init_param_set = true;
+    g_net_inited = true;
     return 0;
 }
 
@@ -3236,7 +3269,10 @@ int APS5_VABI sceNetShowRoute6ForBuffer(char* buffer, std::int32_t bufferSize, s
 }
 
 int APS5_VABI sceNetConfigGetIfFlags(std::uint32_t interfaceId, std::uint32_t* flags) {
-    NotImplemented_nid_no_patch(__func__);
+    if (flags == nullptr) return NET_CONFIG_ERROR_NULL_FLAGS;
+    if (interfaceId >= 10) return -1;
+    if (interfaceId != NET_IF_LO0) throw std::runtime_error("sceNetConfigGetIfFlags: interface " + std::to_string(interfaceId) + " is not implemented");
+    *flags = NET_IFF_UP | NET_IFF_LOOPBACK | NET_IFF_RUNNING | NET_IFF_MULTICAST;
     return 0;
 }
 
