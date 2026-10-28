@@ -64,7 +64,7 @@ final class IssueDraftTests: XCTestCase {
         XCTAssertEqual(draft.title, "Crash: Stray (PPSA01234)")
         let components = try XCTUnwrap(URLComponents(url: draft.url, resolvingAgainstBaseURL: false))
         XCTAssertEqual(components.host, "github.com")
-        XCTAssertEqual(components.path, "/utkuhalis/AnyPS5-ARM/issues/new")
+        XCTAssertEqual(components.path, "/AnyTogether/AnyPS5-ARM/issues/new")
         let query = Dictionary(uniqueKeysWithValues: (components.queryItems ?? []).map { ($0.name, $0.value ?? "") })
         XCTAssertEqual(query["template"], "crash.yml")
         XCTAssertEqual(query["title"], "Crash: Stray (PPSA01234)")
@@ -80,7 +80,12 @@ final class IssueDraftTests: XCTestCase {
         // tools/macos/launcher/Tests/AnyPS5CoreTests → the repository root.
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let template = try String(contentsOf: root.appendingPathComponent(".github/ISSUE_TEMPLATE/crash.yml"), encoding: .utf8)
+        let file = root.appendingPathComponent(".github/ISSUE_TEMPLATE/crash.yml")
+        // The issue forms are AnyPS5-ARM's; the standalone AnyLauncher repository has none to check.
+        guard FileManager.default.fileExists(atPath: file.path) else {
+            throw XCTSkip("no .github/ISSUE_TEMPLATE/crash.yml: run this in AnyPS5-ARM's tools/macos/launcher")
+        }
+        let template = try String(contentsOf: file, encoding: .utf8)
         for field in IssueDraft.crash(report()).fields {
             XCTAssertTrue(template.contains("id: \(field.id)\n"), "crash.yml has no field \(field.id)")
         }
