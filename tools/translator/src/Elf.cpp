@@ -15,8 +15,8 @@ constexpr std::uint32_t PtDynamic = 2;
 constexpr std::uint32_t PtTls = 7;
 constexpr std::uint32_t PtGnuEhFrame = 0x6474e550;
 constexpr std::int64_t DtNull = 0, DtNeeded = 1, DtPltRelSz = 2, DtStrTab = 5, DtSymTab = 6, DtRela = 7, DtRelaSz = 8;
-constexpr std::int64_t DtInit = 12, DtStrSz = 10, DtJmpRel = 23, DtInitArray = 25, DtInitArraySz = 27;
-constexpr std::int64_t DtOsInit = 0x6000000c, DtOsInitArray = 0x60000019, DtOsInitArraySz = 0x6000001b;
+constexpr std::int64_t DtInit = 12, DtFini = 13, DtStrSz = 10, DtJmpRel = 23, DtInitArray = 25, DtFiniArray = 26, DtInitArraySz = 27, DtFiniArraySz = 28;
+constexpr std::int64_t DtOsInit = 0x6000000c, DtOsFini = 0x6000000d, DtOsInitArray = 0x60000019, DtOsFiniArray = 0x6000001a, DtOsInitArraySz = 0x6000001b, DtOsFiniArraySz = 0x6000001c;
 constexpr std::int64_t DtOsJmpRel = 0x61000029, DtOsPltRelSz = 0x6100002d, DtOsRela = 0x6100002f, DtOsRelaSz = 0x61000031;
 constexpr std::int64_t DtOsStrTab = 0x61000035, DtOsStrSz = 0x61000037, DtOsSymTab = 0x61000039, DtOsSymTabSz = 0x6100003f;
 
@@ -36,6 +36,7 @@ Elf::Elf(const std::filesystem::path& path) {
     bytes.assign(std::istreambuf_iterator<char>(file), {});
     if (bytes.size() < 64 || std::memcmp(bytes.data(), "\x7f" "ELF\x02\x01", 6) != 0) throw std::runtime_error("not a 64-bit little-endian ELF");
     if (Read<std::uint16_t>(bytes, 18) != 62) throw std::runtime_error("not an x86-64 ELF");
+    type = Read<std::uint16_t>(bytes, 16);
     entry = Read<std::uint64_t>(bytes, 24);
     const auto phoff = Read<std::uint64_t>(bytes, 32);
     const auto phentsize = Read<std::uint16_t>(bytes, 54);
@@ -85,6 +86,7 @@ Elf::Elf(const std::filesystem::path& path) {
         const auto name = Read<std::uint32_t>(bytes, at);
         symbol.name = name < stringsSize ? String(name) : std::string();
         symbol.info = Read<std::uint8_t>(bytes, at + 4);
+        symbol.visibility = Read<std::uint8_t>(bytes, at + 5) & 3;
         symbol.section = Read<std::uint16_t>(bytes, at + 6);
         symbol.value = Read<std::uint64_t>(bytes, at + 8);
         symbol.size = Read<std::uint64_t>(bytes, at + 16);
@@ -106,20 +108,35 @@ std::uint64_t Elf::ImageEnd() const {
 
 std::vector<std::uint64_t> Elf::InitFunctions() const {
     std::vector<std::uint64_t> functions;
-    if (HasTag(DtOsInit) || HasTag(DtInit)) functions.push_back(HasTag(DtOsInit) ? Tag(DtOsInit) : Tag(DtInit));
-    const auto array = HasTag(DtOsInitArray) ? Tag(DtOsInitArray) : Tag(DtInitArray);
-    const auto size = HasTag(DtOsInitArraySz) ? Tag(DtOsInitArraySz) : Tag(DtInitArraySz);
-    for (std::uint64_t at = 0; array != 0 && at + 8 <= size; at += 8) {
-        if (const auto* slot = At(array + at, 8)) {
-            std::uint64_t value;
-            std::memcpy(&value, slot, 8);
-            for (const auto& relocation : relocations) {
-                if (relocation.offset == array + at && relocation.type == 8) value = static_cast<std::uint64_t>(relocation.addend);
+    const auto found = Initializers();
+    for (const auto function : {found.init, found.fini}) {
+        if (function != 0) functions.push_back(function);
+    }
+    for (const auto [array, size] : {std::pair{found.initArray, found.initArraySize}, std::pair{found.finiArray, found.finiArraySize}}) {
+        for (std::uint64_t at = 0; array != 0 && at + 8 <= size; at += 8) {
+            if (const auto* slot = At(array + at, 8)) {
+                std::uint64_t value;
+                std::memcpy(&value, slot, 8);
+                for (const auto& relocation : relocations) {
+                    if (relocation.offset == array + at && relocation.type == 8) value = static_cast<std::uint64_t>(relocation.addend);
+                }
+                if (value != 0 && value != ~0ull) functions.push_back(value);
             }
-            if (value != 0 && value != ~0ull) functions.push_back(value);
         }
     }
     return functions;
+}
+
+ImageInitializers Elf::Initializers() const {
+    auto tag = [&](std::int64_t osTag, std::int64_t sysvTag) { return HasTag(osTag) ? Tag(osTag) : Tag(sysvTag); };
+    ImageInitializers found;
+    found.init = tag(DtOsInit, DtInit);
+    found.fini = tag(DtOsFini, DtFini);
+    found.initArray = tag(DtOsInitArray, DtInitArray);
+    found.initArraySize = found.initArray != 0 ? tag(DtOsInitArraySz, DtInitArraySz) : 0;
+    found.finiArray = tag(DtOsFiniArray, DtFiniArray);
+    found.finiArraySize = found.finiArray != 0 ? tag(DtOsFiniArraySz, DtFiniArraySz) : 0;
+    return found;
 }
 
 void Elf::ReadUnwindTable(std::uint64_t header) {
@@ -190,7 +207,12 @@ void Elf::ReadUnwindTable(std::uint64_t header) {
     reader.Bytes(2);
     if (frameEncoding == 0xff) return;
     reader.at = reader.Encoded(frameEncoding, header);
-    std::map<std::uint64_t, std::uint8_t> cieEncodings;
+    struct CieEncodings {
+        std::uint8_t frame = 0;
+        std::uint8_t lsda = 0xff;
+        bool augmented = false;
+    };
+    std::map<std::uint64_t, CieEncodings> cieEncodings;
     for (unsigned entries = 0; entries < (1u << 24) && !reader.failed; ++entries) {
         const auto start = reader.at;
         std::uint64_t length = reader.Bytes(4);
@@ -208,26 +230,88 @@ void Elf::ReadUnwindTable(std::uint64_t header) {
             reader.Signed();
             if (version == 1) reader.Bytes(1);
             else reader.Unsigned();
-            std::uint8_t encoding = 0;
+            CieEncodings encodings;
             if (!augmentation.empty() && augmentation[0] == 'z') {
+                encodings.augmented = true;
                 reader.Unsigned();
                 for (std::size_t i = 1; i < augmentation.size() && !reader.failed; ++i) {
-                    if (augmentation[i] == 'R') encoding = static_cast<std::uint8_t>(reader.Bytes(1));
+                    if (augmentation[i] == 'R') encodings.frame = static_cast<std::uint8_t>(reader.Bytes(1));
                     else if (augmentation[i] == 'P') reader.Encoded(static_cast<std::uint8_t>(reader.Bytes(1)) & 0x7f, header);
-                    else if (augmentation[i] == 'L') reader.Bytes(1);
+                    else if (augmentation[i] == 'L') encodings.lsda = static_cast<std::uint8_t>(reader.Bytes(1));
                     else if (augmentation[i] != 'S' && augmentation[i] != 'B') break;
                 }
             }
-            cieEncodings[start] = encoding;
+            cieEncodings[start] = encodings;
         } else {
             const auto cie = cieEncodings.find(idField - id);
             if (cie != cieEncodings.end()) {
-                const auto begin = reader.Encoded(cie->second, header);
-                const auto range = reader.Encoded(cie->second & 0x0f, header, false);
+                const auto begin = reader.Encoded(cie->second.frame, header);
+                const auto range = reader.Encoded(cie->second.frame & 0x0f, header, false);
                 if (!reader.failed && range != 0 && InExecutable(begin)) functionRanges[begin] = std::max(functionRanges[begin], begin + range);
+                if (cie->second.augmented && cie->second.lsda != 0xff && (cie->second.lsda & 0x80) == 0) {
+                    reader.Unsigned();
+                    const auto lsda = reader.Encoded(cie->second.lsda, header);
+                    if (!reader.failed && lsda != 0 && range != 0 && InExecutable(begin)) ReadCallSites(begin, lsda);
+                    reader.failed = false;
+                }
             }
         }
         reader.at = next;
+    }
+}
+
+// The call-site table of a function's LSDA (.gcc_except_table): the landing pad the unwinder resumes
+// at for an exception thrown by a call in each range.
+void Elf::ReadCallSites(std::uint64_t function, std::uint64_t lsda) {
+    std::uint64_t at = lsda;
+    bool failed = false;
+    auto bytes = [&](unsigned count) {
+        const auto* data = At(at, count);
+        if (data == nullptr) {
+            failed = true;
+            return std::uint64_t{0};
+        }
+        std::uint64_t value = 0;
+        std::memcpy(&value, data, count);
+        at += count;
+        return value;
+    };
+    auto uleb = [&] {
+        std::uint64_t value = 0;
+        for (unsigned shift = 0; shift < 64 && !failed; shift += 7) {
+            const auto byte = bytes(1);
+            value |= (byte & 0x7f) << shift;
+            if ((byte & 0x80) == 0) break;
+        }
+        return value;
+    };
+    auto encoded = [&](std::uint8_t encoding) -> std::uint64_t {
+        const auto field = at;
+        std::uint64_t value = 0;
+        switch (encoding & 0x0f) {
+        case 0x00: case 0x04: case 0x0c: value = bytes(8); break;
+        case 0x01: value = uleb(); break;
+        case 0x02: value = bytes(2); break;
+        case 0x03: value = bytes(4); break;
+        case 0x0b: value = static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(bytes(4)))); break;
+        default: failed = true; return 0;
+        }
+        if ((encoding & 0x70) == 0x10) value += field;
+        else if ((encoding & 0x70) != 0) failed = true;
+        return value;
+    };
+    std::uint64_t padBase = function;
+    const auto padEncoding = static_cast<std::uint8_t>(bytes(1));
+    if (padEncoding != 0xff) padBase = encoded(padEncoding);
+    if (static_cast<std::uint8_t>(bytes(1)) != 0xff) uleb();
+    const auto siteEncoding = static_cast<std::uint8_t>(bytes(1)) & 0x0f;
+    const auto tableEnd = uleb() + at;
+    while (!failed && at < tableEnd) {
+        const auto start = encoded(siteEncoding);
+        const auto length = encoded(siteEncoding);
+        const auto pad = encoded(siteEncoding);
+        uleb();
+        if (!failed && pad != 0 && length != 0 && InExecutable(padBase + pad)) callSites[function + start] = {function + start + length, padBase + pad};
     }
 }
 

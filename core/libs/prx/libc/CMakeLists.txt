@@ -95,6 +95,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/JumpBuffer.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Formatting.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestVarargs.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/GuestX87.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ScanWideField.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/FormattingWide.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/ScanningWide.cpp

@@ -35,10 +35,10 @@ constexpr std::string_view GeometryText = R"(struct aps5_geometry {
 )";
 
 constexpr std::string_view FetchText = R"(struct aps5_fetch { device const uchar* data; uint stride; uint records; };
-static inline uint4 aps5_fetch_attribute(constant aps5_fetch& f, uint vertex, uint instance, uint format) {
+static inline uint4 aps5_fetch_attribute(constant aps5_fetch& f, uint vertex_index, uint instance_index, uint format) {
     const bool integer = (format >= 1u && format <= 6u) || (format >= 13u && format <= 18u) || (format >= 32u && format <= 39u) || format == 45u || format == 46u || format == 49u || format == 50u;
     uint4 r = uint4(0u, 0u, 0u, integer ? 1u : 0x3f800000u);
-    const uint index = (f.records & 0x80000000u) != 0u ? instance : vertex;
+    const uint index = (f.records & 0x80000000u) != 0u ? instance_index : vertex_index;
     if (f.data == nullptr || index >= (f.records & 0x7fffffffu)) return r;
     device const uchar* p = f.data + ulong(index) * ulong(f.stride);
     device const ushort* h = reinterpret_cast<device const ushort*>(p);
@@ -191,6 +191,11 @@ std::string AttributeWord(State& state, const IrValue& inst) {
         return geo + ".control[(aps5_patch * " + U32(tess.outputControlPoints) + " + aps5_tid.x) * " + geo + ".control_words + " + Offset(raw, address, control) + "]";
     case TessellationAttribute::EvaluationInput:
         return geo + ".control[(aps5_patch * " + U32(tess.outputControlPoints) + " + " + Vertex(raw, address, control, tess.outputControlPoints) + ") * " + geo + ".control_words + " + Offset(raw, address, control) + "]";
+    case TessellationAttribute::ControlShared: {
+        const auto shared = Stride(metadata.tessellationSharedStride);
+        const auto point = inst.Opcode() == IrOpcode::SetTessellationAttribute ? std::string("aps5_tid.x") : Vertex(raw, address, shared, tess.outputControlPoints);
+        return "aps5_shared[(" + point + ") * " + U32((shared + 3u) / 4u) + " + " + Offset(raw, address, shared) + "]";
+    }
     case TessellationAttribute::PatchOutput:
     case TessellationAttribute::PatchInput: {
         const IrValue* resolved = raw.Resolve();
@@ -217,6 +222,7 @@ void RequireAttributeStage(State& state, const IrValue& inst) {
     case TessellationAttribute::InstanceInput:
     case TessellationAttribute::ControlOutput:
     case TessellationAttribute::PatchOutput:
+    case TessellationAttribute::ControlShared:
     case TessellationAttribute::Factor: valid = stage == IrShaderStage::TessellationControl; break;
     case TessellationAttribute::EvaluationInput:
     case TessellationAttribute::PatchInput: valid = stage == IrShaderStage::TessellationEvaluation; break;
@@ -399,6 +405,10 @@ std::size_t Count(const std::string& text, const std::string& needle) {
     return count;
 }
 
+}
+
+std::string_view VertexFetchText() {
+    return FetchText;
 }
 
 bool IsGeometry(IrShaderStage stage) {
@@ -587,6 +597,8 @@ std::string GeometryProgram(State& state, const std::string& prelude, const std:
             if (const auto culls = MeshCullDistances(state); culls != 0u) text += "    threadgroup float aps5_mesh_cull[" + std::to_string(mesh.maxVertices * culls) + "];\n";
         } else if (stage == IrShaderStage::TessellationEvaluation) {
             text += "    aps5_stage_out aps5_out = {};\n";
+        } else if (stage == IrShaderStage::TessellationControl && state.program.Metadata().tessellationSharedStride != 0u) {
+            text += "    threadgroup uint aps5_shared[" + std::to_string(Tess(state).outputControlPoints * ((Stride(state.program.Metadata().tessellationSharedStride) + 3u) / 4u)) + "];\n";
         }
         text += state.body;
         if (!state.body.ends_with(state.exit + "\n")) text += "    " + state.exit + "\n";

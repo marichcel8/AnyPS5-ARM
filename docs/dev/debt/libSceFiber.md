@@ -2,6 +2,7 @@
 
 ### Functional
 
+- [Fibers on native arm64](../../../core/libs/prx/libSceFiber/Export.cpp) (libSceFiber) - every fiber runs on a host stack of 16 times its context size plus 1 MiB and a translator `GuestState` of its own; the context is the guest stack, so the 64 KiB limit for host stacks does not apply. The factor 16 covers translated frames, which are larger than the guest's, and is not measured on a title.
 - [sceFiberGetInfo](../../../core/libs/prx/libSceFiber/Export.cpp) reports the requested-size window at the top of the host stack used for execution, rather than the original caller buffer, which is retained and pinned. The additional 1 MiB host-call margin below that window is not included in `size_context`. Planet Coaster (PPSA01736 v01.017) uses this range for ChakraCore garbage-collector stack scans; reporting the unused caller buffer makes the scan cross unmapped memory. The range is covered by a regression test while running, switching and migrating a fiber between threads. Console behavior for substituted host stacks has no direct equivalent and is not measured.
 
 ### Unknown function info

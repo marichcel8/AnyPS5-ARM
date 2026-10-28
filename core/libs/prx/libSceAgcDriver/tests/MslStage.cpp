@@ -43,6 +43,27 @@ void CheckVertex() {
     Require(HasConstant(result, first, 4u) && HasConstant(result, first + 3u, 7u) && HasConstant(result, first + 5u, 0u), "fetch vertex: the vertex class and selector constants are missing");
 }
 
+void CheckRectList() {
+    const auto grid = BuildMslRectList(Recompile(MslStagePrograms::GridVertexRequest(0x10000u)).msl.Source());
+    Require(grid.rectsPerGroup >= 1u && grid.rectsPerGroup <= 64u, "grid rect list: the group holds " + std::to_string(grid.rectsPerGroup) + " rectangles");
+    for (const std::string_view marker : {"[[mesh]] void aps5_main(", "static inline aps5_stage_out aps5_rect_vertex(uint aps5_vertex_id", "= aps5_rect_vertex(aps5_vertex_id", "metal::topology::triangle>", "float clip [[clip_distance]] [1];", "aps5_mesh.set_primitive_count(aps5_count * 2u);"}) {
+        Require(grid.source.find(marker) != std::string::npos, "grid rect list: the source lacks " + std::string(marker) + "\n" + grid.source);
+    }
+    Require(grid.source.find("vertex aps5_stage_out") == std::string::npos && grid.source.find("[[vertex_id]]") == std::string::npos, "grid rect list: the vertex entry point survived\n" + grid.source);
+    const auto fetch = BuildMslRectList(Recompile(MslStagePrograms::FetchVertexRequest(0x11000u)).msl.Source());
+    for (const std::string_view marker : {"constant uint aps5_fc60100 [[function_constant(60100)]];", "const uint4 aps5_a0 = aps5_fetch_attribute(aps5_fetch_table[0], aps5_vertex_id, aps5_instance_id, aps5_c60100);", "aps5_in.a0f = as_type<float4>(aps5_a0);", "aps5_in.a0u = aps5_a0;", "    float4 a0f;\n", "constant aps5_fetch* aps5_fetch_table [[buffer(15)]]", "device const aps5_rect_draw& aps5_rect_draw_params [[buffer(14)]]"}) {
+        Require(fetch.source.find(marker) != std::string::npos, "fetch rect list: the source lacks " + std::string(marker) + "\n" + fetch.source);
+    }
+    Require(fetch.source.find("[[stage_in]]") == std::string::npos && fetch.source.find("[[attribute(") == std::string::npos, "fetch rect list: stage_in attributes survived\n" + fetch.source);
+    bool rejected = false;
+    try {
+        static_cast<void>(BuildMslRectList(Recompile(MslStagePrograms::InterpolatedPixelRequest(0x20000u)).msl.Source()));
+    } catch (const MslUnsupported&) {
+        rejected = true;
+    }
+    Require(rejected, "a pixel function was wrapped as a rect-list mesh function");
+}
+
 void CheckPixel() {
     const auto interpolated = MslStagePrograms::InterpolatedPixelRequest(0x20000u);
     Check(interpolated, "interpolated pixel", {"fragment aps5_stage_out aps5_main(", "float4 p0 [[user(locn0), center_perspective]]", "float4 c0 [[color(0)]]", "aps5_c8192"});
@@ -66,7 +87,6 @@ void Rejected(const std::string& name, const std::function<void(RecompileRequest
 }
 
 void CheckUnsupported() {
-    Rejected("a quad pixel mask", [](RecompileRequest& request) { request.context.pixel->quadPixelMask = 0x7u; });
     Rejected("a primitive-ordered pixel shader", [](RecompileRequest& request) { request.context.pixel->orderedPixelShader = true; });
 }
 
@@ -82,6 +102,7 @@ void CheckWave64Pixel() {
 int main() {
     try {
         CheckVertex();
+        CheckRectList();
         CheckPixel();
         CheckUnsupported();
         CheckWave64Pixel();
@@ -89,6 +110,6 @@ int main() {
         std::fprintf(stderr, "MslStage: %s\n", error.what());
         return 1;
     }
-    std::puts("MslStage: vertex and pixel programs recompile to MSL stage functions with their inputs, exports and pipeline constants");
+    std::puts("MslStage: vertex and pixel programs recompile to MSL stage functions with their inputs, exports and pipeline constants, and vertex functions wrap into rect-list mesh functions");
     return 0;
 }

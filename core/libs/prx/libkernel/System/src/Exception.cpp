@@ -29,6 +29,9 @@
 #include <pthread.h>
 #ifdef __APPLE__
 #include <sys/ucontext.h>
+#ifndef __x86_64__
+#include <dlfcn.h>
+#endif
 #else
 #include <ucontext.h>
 #endif
@@ -877,14 +880,50 @@ constexpr int HostSignal = SIGUSR1;
 constexpr std::size_t FxsaveRegisterBytes = 416;
 
 #if defined(__APPLE__) && !defined(__x86_64__)
-// TODO(native-arm64): the interrupted guest context lives in the translator's GuestState, not in
-// the host thread state.
-void FromHost(const mcontext_t&, GuestMcontext&) {
-    NotImplemented_nid_no_patch("guest exception context on arm64");
+// Natively the interrupted guest registers live in the translator's GuestState (tools/translator/
+// runtime): 16 in DWARF order, rip, rflags, mxcsr and the x87 control word. They are exact while the
+// thread is in a call from guest code into the host, where a raised exception usually finds it, and
+// the handler's changes then take effect when that call returns; its return address and stack
+// pointer stay. The handler runs on a guest stack of its own.
+using GuestSignalEnter = int (*)(std::uint64_t*);
+using GuestSignalLeave = void (*)(const std::uint64_t*);
+constexpr std::size_t GuestRegisterCount = 20;
+
+void FromHost(const mcontext_t&, GuestMcontext& m) {
+    static const auto enter = reinterpret_cast<GuestSignalEnter>(dlsym(RTLD_DEFAULT, "aps5_signal_enter"));
+    std::uint64_t r[GuestRegisterCount] = {};
+    if (enter == nullptr || enter(r) != 0) NotImplemented_nid_no_patch("guest exception context without translated guest code on this thread");
+    m.rax = r[0];
+    m.rdx = r[1];
+    m.rcx = r[2];
+    m.rbx = r[3];
+    m.rsi = r[4];
+    m.rdi = r[5];
+    m.rbp = r[6];
+    m.rsp = r[7];
+    m.r8 = r[8];
+    m.r9 = r[9];
+    m.r10 = r[10];
+    m.r11 = r[11];
+    m.r12 = r[12];
+    m.r13 = r[13];
+    m.r14 = r[14];
+    m.r15 = r[15];
+    m.rip = r[16];
+    m.rflags = r[17];
+    m.cs = 0x43;
+    m.ss = 0x3b;
+    m.len = sizeof(GuestMcontext);
+    SetFpWord(m, 0, static_cast<std::uint32_t>(r[19]));
+    SetFpWord(m, MxcsrOffset, static_cast<std::uint32_t>(r[18]));
+    SetFpWord(m, MxcsrMaskOffset, DefaultMxcsrMask);
 }
 
-void ToHost(const GuestMcontext&, mcontext_t&) {
-    NotImplemented_nid_no_patch("guest exception context on arm64");
+void ToHost(const GuestMcontext& m, mcontext_t&) {
+    static const auto leave = reinterpret_cast<GuestSignalLeave>(dlsym(RTLD_DEFAULT, "aps5_signal_leave"));
+    const std::uint64_t r[GuestRegisterCount] = {m.rax, m.rdx, m.rcx, m.rbx, m.rsi, m.rdi, m.rbp, m.rsp, m.r8, m.r9, m.r10, m.r11, m.r12, m.r13, m.r14, m.r15,
+                                                 m.rip, m.rflags, FpWord(m, MxcsrOffset), FpWord(m, 0) & 0xffffu};
+    if (leave != nullptr) leave(r);
 }
 #elif defined(__APPLE__)
 // macOS's mcontext_t points at the thread state; __fs starts with two reserved words and then

@@ -30,7 +30,21 @@ namespace Translator {
 namespace StateLayout = GuestStateLayout;
 
 constexpr std::uint32_t RelocationAbsolute64 = 1, RelocationGlobDat = 6, RelocationJumpSlot = 7, RelocationRelative = 8;
-constexpr std::uint8_t SymbolTypeFunction = 2, SymbolBindingWeak = 2;
+constexpr std::uint32_t RelocationTlsModule = 16, RelocationTlsOffset = 17, RelocationTlsStatic = 18;
+constexpr std::uint8_t SymbolTypeFunction = 2, SymbolTypeTls = 6, SymbolBindingWeak = 2;
+constexpr std::uint16_t SectionAbsolute = 0xfff1;
+// Offsets in __APS5DATA,__meta (the relinker's MacOsImage.cpp layout): the TLS descriptor libkernel's
+// GuestTlsMacOs.cpp reads, its pthread key, and the original program headers.
+constexpr std::uint64_t MetaTlsDescriptor = 0x20, MetaHeaders = 0x60;
+
+// A slot of a module's image that holds the TLS module or offset of another module's exported TLS
+// variable; the module's initializer fills it from that module's TLS index.
+struct TlsImportSlot {
+    std::uint64_t offset;
+    std::string symbol;
+    bool module;
+    std::int64_t addend;
+};
 
 enum Flag : unsigned { Cf, Pf, Af, Zf, Sf, Of, Df };
 
@@ -168,6 +182,16 @@ struct Lifter::Impl {
     llvm::Constant* SlotValue(const Relocation& relocation);
     void EmitTables();
     void EmitImageMetadata();
+    void DeclareImageMetadata();
+    void EmitModuleTables();
+    void EmitExports();
+    bool PlaceholderExport(const Symbol& symbol, bool stubLibrary) const;
+    bool ReturnsZero(std::uint64_t address) const;
+    llvm::Constant* TlsDescriptor();
+    llvm::Constant* Import(const Symbol& symbol);
+    void Publish(llvm::GlobalValue* value) const {
+        if (moduleImage) value->setVisibility(llvm::GlobalValue::HiddenVisibility);
+    }
     void LiftFunction(std::uint64_t entry, const std::set<std::uint64_t>& addresses, Statistics& stats);
     void Emit(const Instruction& instruction);
     std::map<std::uint64_t, std::uint8_t> DeadFlags(std::uint64_t entry, const std::set<std::uint64_t>& addresses);
@@ -180,6 +204,7 @@ struct Lifter::Impl {
     llvm::IntegerType* Int(unsigned bits) { return builder.getIntNTy(bits); }
     llvm::ConstantInt* Const(unsigned bits, std::uint64_t value);
     llvm::Constant* Host(std::uint64_t vaddr);
+    llvm::Constant* ImagePointer(std::uint64_t vaddr);
     llvm::Value* Resize(llvm::Value* value, unsigned bits, bool isSigned = false);
     llvm::Value* Field(unsigned offset) { return builder.CreateConstInBoundsGEP1_64(builder.getInt8Ty(), state, offset); }
     llvm::Value* Gpr64(unsigned index) { return builder.CreateLoad(builder.getInt64Ty(), Field(StateLayout::Gpr + index * 8)); }
@@ -219,6 +244,7 @@ struct Lifter::Impl {
     llvm::Value* Pop();
     void CallGuest(std::uint64_t target, std::uint64_t returnAddress);
     void CallIndirect(llvm::Value* target, std::uint64_t returnAddress);
+    void Unwinding(llvm::Value* rspBefore);
     void Jump(std::uint64_t target);
     void JumpIndirect(llvm::Value* target);
     void TailCall(std::uint64_t target);
@@ -267,6 +293,13 @@ struct Lifter::Impl {
 
     llvm::Module* module = nullptr;
     llvm::GlobalVariable* image = nullptr;
+    llvm::GlobalVariable* meta = nullptr;
+    // A module keeps its own TLS block and thread pointer, as in the relinker's macOS mode.
+    bool moduleImage = false;
+    bool moduleTls = false;
+    const std::set<std::string>* hostExports = nullptr;
+    std::vector<TlsImportSlot> tlsImports;
+    llvm::FunctionCallee threadPointerRuntime;
     std::map<std::uint64_t, llvm::Function*> lifted;
     llvm::FunctionCallee callRuntime, trapRuntime, unsupportedRuntime;
 

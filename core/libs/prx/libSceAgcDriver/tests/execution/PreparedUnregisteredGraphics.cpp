@@ -83,8 +83,8 @@ void Check(AgcDriver::VulkanDevice& device) {
         static_cast<void>(InvocationFor(*program.snapshot, program.codeOffset, request));
         Require(program.snapshot->prepared->entries.size() == 1, "a relocated push-constant block prepared an unregistered graphics program again");
     }
-    if (!target.tessellation.has_value()) {
-        std::cout << "the device has no tessellation shaders: the SPIR-V rectangle preparation was not checked\n";
+    if (!target.tessellation.has_value() || ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Msl) {
+        std::cout << "the device has no tessellation shaders or draws rect lists through MSL mesh functions: the SPIR-V rectangle preparation was not checked\n";
         return;
     }
     ResolvePreparedGraphics(*draw.programs[0].snapshot, draw.programs[1].snapshot, 17, target);

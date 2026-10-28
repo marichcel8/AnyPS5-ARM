@@ -138,6 +138,7 @@ void DeclareVertexOutputs(State& state);
 std::string StageConstant(State& state, std::uint32_t id, std::uint32_t fallback);
 
 bool IsGeometry(IrShaderStage stage);
+std::string_view VertexFetchText();
 void PrepareGeometry(State& state);
 std::string GeometryBuiltin(State& state, StageInputKind kind, std::uint32_t component);
 bool EmitGeometry(State& state, const IrValue& inst);

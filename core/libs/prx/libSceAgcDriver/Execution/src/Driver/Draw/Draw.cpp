@@ -1037,7 +1037,8 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
             throw;
         }
     };
-    if (graphics.rectList) buildRectList();
+    const bool expandRectList = graphics.rectList && ShaderRecompiler::DefaultShaderBackend() != ShaderRecompiler::ShaderBackendKind::Msl;
+    if (expandRectList) buildRectList();
     if (graphics.stages.tessellationGeometry) {
         static std::mutex captureMutex;
         static std::map<std::pair<std::uint32_t, std::uint32_t>, ShaderRecompiler::RecompileResult> captureShaders;
@@ -1070,7 +1071,7 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
         require(graphics.stages.path == Graphics::ShaderPath::Vertex && programs.size() == 2 && programResults[0] != nullptr && stages.size() == 2, "a pixel shader that reads barycentrics without VK_KHR_fragment_shader_barycentric needs a vertex shader before it");
         const auto geometryLimits = localDevice->GeometryLimits();
         results.reserve(programs.size() + 2u);
-        if (geometryLimits || !localDevice->Target().tessellation) {
+        if (geometryLimits || !localDevice->Target().tessellation || ShaderRecompiler::DefaultShaderBackend() == ShaderRecompiler::ShaderBackendKind::Msl) {
             results.push_back(ShaderRecompiler::BuildBarycentricGeometryShader(*programResults[0], *programResults[1], localDevice->Target(), geometryLimits));
             stages.insert(stages.begin() + 1, Graphics::CompiledShader{Stage::Geometry, &results.back(), 0});
         } else {
@@ -1189,7 +1190,7 @@ DrawVerdict Driver::finishDraw(DrawTail& tail, PerformanceTimer& timing) {
                 require(result.pushConstants.size() == pushBytes, "patched program changed its push constant layout");
             }
             fold(*programResults[0], direct);
-            if (graphics.rectList && patched.contains(0)) buildRectList();
+            if (expandRectList && patched.contains(0)) buildRectList();
             snapshot();
             if (auto known = localDevice->KnownDrawRejection(graphics, stages)) {
                 rejected = std::move(*known);
