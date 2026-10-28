@@ -90,8 +90,7 @@ public:
                 cursor += size;
             } else {
                 if (memory.State != MEM_COMMIT) throw std::runtime_error("guest memory is not committed");
-                const auto mapped = views.find(cursor & ~(pageBytes - 1));
-                if (mapped != views.end()) {
+                for (auto mapped = views.lower_bound(cursor & ~(pageBytes - 1)); mapped != views.end() && mapped->first < stop; ++mapped) {
                     mapped->second.protection = protection;
                     mapped->second.armed = 0;
                     invalidate(*mapped->second.page);

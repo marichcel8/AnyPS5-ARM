@@ -676,6 +676,48 @@ void CheckSharedRunIsOneView() {
     VirtualFree(other, 0, MEM_RELEASE);
     CloseHandle(section);
 }
+
+void CheckCommitResetsEveryPageOfARunView() {
+    auto& mappings = Mappings::Get();
+    constexpr std::size_t Page = 16384;
+    constexpr std::size_t Span = 4 * Page;
+    HANDLE section = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_EXECUTE_READWRITE | SEC_RESERVE, 0, Span, nullptr);
+    auto* memory = static_cast<unsigned char*>(mappings.Reserve(nullptr, Span));
+    Require(section && memory, "cannot allocate recommitted run test memory");
+    mappings.ForgetSection(section);
+    const auto address = reinterpret_cast<std::uintptr_t>(memory);
+    const auto collect = [&](std::size_t page, std::size_t count, Collection collection) {
+        std::array<void*, 32> pages{};
+        std::size_t available = pages.size();
+        Require(mappings.Collect(address + page * Page, count * Page, pages.data(), &available, true, collection), "recommitted run collection failed");
+        std::set<std::size_t> result;
+        for (std::size_t i = 0; i < available; ++i) result.insert((reinterpret_cast<std::uintptr_t>(pages[i]) - address) / Small);
+        return result;
+    };
+    mappings.Map(memory, Span, section, 0, PAGE_READWRITE);
+    Require(MappedViews(memory, Span) == 1, "the recommitted run was not mapped as one view");
+    Require(collect(0, 4, Collection::All) == Pages(0, Span / Small), "the run's first collection did not report its fresh pages");
+    MEMORY_BASIC_INFORMATION armed{};
+    Require(VirtualQuery(memory, &armed, sizeof(armed)) == sizeof(armed) && armed.Protect == PAGE_READONLY && armed.RegionSize == Span, "collection did not arm every page of the run alike");
+    mappings.Commit(memory, Span, PAGE_READWRITE, Page, false);
+    Require(ProtectionAt(memory + 3 * Page) == PAGE_READWRITE, "Commit did not reprotect the whole run");
+    memory[Page + 8] = 0x5a;
+    Require(collect(1, 1, Collection::Armed) == Pages(4, 8), "a store into the second page of a run that Commit reprotected was not collected");
+    Require(ProtectionAt(memory + Page) == PAGE_READONLY, "collection did not arm the second page of the recommitted run again");
+    const auto before = faults.load();
+    memory[Page + Small + 8] = 0x5b;
+    Require(faults == before + 1, "a store into the rearmed second page of the run did not fault");
+    Require(collect(1, 1, Collection::Armed) == Pages(5, 6), "a store into the rearmed second page of the run was not collected once");
+    mappings.Commit(memory, Span, PAGE_READONLY, Page, false);
+    for (std::size_t page = 0; page < 4; ++page) {
+        std::uint32_t protection = 0;
+        Require(mappings.Protection(address + page * Page, &protection) && protection == PAGE_READONLY, ("Commit left page " + std::to_string(page) + " of a run with its old guest protection").c_str());
+    }
+    mappings.Reset(memory, Span);
+    VirtualFree(memory, 0, MEM_RELEASE);
+    mappings.ForgetSection(section);
+    CloseHandle(section);
+}
 }
 
 int main(int argc, char** argv) {
@@ -706,6 +748,7 @@ int main(int argc, char** argv) {
         CheckPrivateCommitCarvesPlaceholders();
         CheckPrivateCommitEdgeLayouts();
         CheckPrivateCommitTails();
+        CheckCommitResetsEveryPageOfARunView();
         std::cout << "Windows deferred write-watch tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

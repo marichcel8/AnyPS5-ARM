@@ -147,13 +147,15 @@ int APS5_VABI sceNpEntitlementAccessInitialize(const NpEntitlementAccessInitPara
 int APS5_VABI sceNpEntitlementAccessAbortRequest(std::int64_t requestId) {
     Online::Call call("libSceNpEntitlementAccess", __func__);
     call.Args([&](Online::Fields& in) { in.Int("requestId", static_cast<std::int64_t>(requestId)); });
-    throw std::logic_error("sceNpEntitlementAccessAbortRequest: asynchronous request tracking is unimplemented");
+    NotImplemented_nid_no_patch(__func__);
+    return call.Return(0);
 }
 
 int APS5_VABI sceNpEntitlementAccessDeleteRequest(std::int64_t requestId) {
     Online::Call call("libSceNpEntitlementAccess", __func__);
     call.Args([&](Online::Fields& in) { in.Int("requestId", static_cast<std::int64_t>(requestId)); });
-    throw std::logic_error("sceNpEntitlementAccessDeleteRequest: asynchronous request tracking is unimplemented");
+    NotImplemented_nid_no_patch(__func__);
+    return call.Return(0);
 }
 
 int APS5_VABI sceNpEntitlementAccessGenerateTransactionId(NpEntitlementAccessTransactionId* transactionId) {
