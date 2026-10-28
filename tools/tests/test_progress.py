@@ -11,6 +11,33 @@ import progress
 
 
 class ProgressSnapshotTests(unittest.TestCase):
+    def test_library_counters_reject_invalid_types_and_negative_values(self):
+        for field in ("done", "todo"):
+            for value in (None, True, False, "1", 1.5, [], {}, -1, float("nan"), float("inf")):
+                with self.subTest(field=field, value=value):
+                    snapshot = self.snapshot()
+                    snapshot["libraries"]["groups"] = [{"name": "libExample", "done": 0, "todo": 0, field: value}]
+                    self.assert_rejected(snapshot, f"libraries.groups[0].{field} must be a non-negative integer")
+
+    def test_library_counter_validation_preserves_optional_and_large_counts(self):
+        groups = [{"name": "libLegacy"}, {"name": "libHalf", "done": 1},
+                  {"name": "libShared", "shared_sources": "libExample"},
+                  {"name": "libEmpty", "done": 0, "todo": 0},
+                  {"name": "libLarge", "done": 10**200, "todo": 10**200}]
+        snapshot = self.snapshot()
+        snapshot["libraries"]["groups"] = groups
+        with tempfile.TemporaryDirectory() as directory:
+            before, after = Path(directory) / "before.json", Path(directory) / "after.json"
+            before.write_text(json.dumps(self.snapshot()), encoding="utf-8")
+            after.write_text(json.dumps(snapshot), encoding="utf-8")
+            output = io.StringIO()
+            with patch("sys.stdout", output):
+                self.assertEqual(progress.main(["--compare", str(before), str(after)]), 0)
+            self.assertIn("Counts unavailable", output.getvalue())
+            self.assertIn("Shared sources", output.getvalue())
+            self.assertIn("No exports", output.getvalue())
+            self.assertIn("50.00%", output.getvalue())
+
     def snapshot(self):
         return {"libraries": {"percent": 0, "groups": []}, "shaders": {"percent": 0, "groups": []}}
 
@@ -477,6 +504,24 @@ class ProgressTests(unittest.TestCase):
             self.assertEqual(group["done_names"], ["Real"])
             self.assertEqual(group["todo_names"], [])
             self.assertEqual(group["inert_names"], ["Real"])
+
+    def test_explicitly_exported_nid_no_patch_definitions_are_counted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            library = Path(directory) / "libSceExample"
+            library.mkdir()
+            (library / "Functions.cpp").write_text(
+                "int APS5_VABI Pending_nid_no_patch() { NotImplemented_nid_no_patch(__func__); }\n"
+                "int APS5_VABI Ready_nid_no_patch() { return 1; }\n"
+                "int APS5_VABI Helper_nid_no_patch() { NotImplemented_nid_no_patch(__func__); }\n"
+                "int APS5_VABI Cut_nid_no_patch_cut() { NotImplemented_nid_no_patch(__func__); }\n", encoding="utf-8")
+            (library / "Export.cpp").write_text(
+                'APS5_EXPORT("AAAAAAAAAAA", Pending_nid_no_patch);\n'
+                'APS5_EXPORT(\n    "_ZN3sce7Example5ReadyEv",\n    Ready_nid_no_patch);\n'
+                '// APS5_EXPORT("BBBBBBBBBBB", Helper_nid_no_patch);\n'
+                'const char* text = "APS5_EXPORT(\\"CCCCCCCCCCC\\", Cut_nid_no_patch_cut)";\n', encoding="utf-8")
+            group = progress.scan_library(library)
+            self.assertEqual(group["done_names"], ["Ready_nid_no_patch"])
+            self.assertEqual(group["todo_names"], ["Pending_nid_no_patch"])
 
     def test_empty_libraries(self):
         with tempfile.TemporaryDirectory() as directory:

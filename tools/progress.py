@@ -19,6 +19,7 @@ OPCODES = ROOT / "core" / "shader" / "recompiler" / "RdnaDecoder" / "include" / 
 ISA = Path(__file__).resolve().parent / "rdna_isa.txt"
 SOURCE = f'https://github.com/{os.environ.get("GITHUB_REPOSITORY", "boykopovar/AnyPS5")}/blob/main'
 DEFINITION = re.compile(r"\bAPS5_VABI\s+(\w+)\s*\([^;{]*\)\s*(?:noexcept\s*)?(?:try\s*)?\{")
+EXPORT = re.compile(r"\bAPS5_EXPORT\s*\(\s*LITERAL\s*,\s*(\w+)\s*\)")
 STUB = "NotImplemented_nid_no_patch"
 CALL = re.compile(r"\b(\w+)\s*\(")
 KEYWORDS = r"return|else|do|throw|co_return|co_await|co_yield|and|or|not|xor|bitand|bitor|compl"
@@ -163,15 +164,15 @@ def inert_wrappers(text):
 
 def scan_library(path):
     done, todo, inert, live = set(), set(), set(), set()
-    for source in path.rglob("*.cpp"):
-        if "tests" in source.relative_to(path).parts:
-            continue
-        text = code(source.read_text(encoding="utf-8", errors="ignore"))
+    texts = [code(source.read_text(encoding="utf-8", errors="ignore")) for source in path.rglob("*.cpp")
+             if "tests" not in source.relative_to(path).parts]
+    exported = {match.group(1) for text in texts for match in EXPORT.finditer(text)}
+    for text in texts:
         calls = stub_calls(text)
         wrappers = inert_wrappers(text)
         for match in DEFINITION.finditer(text):
             name = match.group(1)
-            if name.endswith(("_nid_no_patch", "_nid_no_patch_cut")):
+            if name.endswith(("_nid_no_patch", "_nid_no_patch_cut")) and name not in exported:
                 continue
             body = text[match.end() - 1:body_end(text, match.end() - 1)]
             if any(call.group(1) in calls and not QUALIFIED.search(body, 0, call.start())
@@ -530,6 +531,10 @@ def validate_snapshot(snapshot):
                 raise ValueError(f"{location} must be an object with a string name")
             if "shared_sources" in group and not isinstance(group["shared_sources"], str):
                 raise ValueError(f"{location}.shared_sources must be a string")
+            if section == "libraries":
+                for field in ("done", "todo"):
+                    if field in group and (type(group[field]) is not int or group[field] < 0):
+                        raise ValueError(f"{location}.{field} must be a non-negative integer")
             for field in ("done_names", "todo_names", "inert_names"):
                 values = group.get(field, [])
                 if not isinstance(values, list) or any(not isinstance(value, str) for value in values):

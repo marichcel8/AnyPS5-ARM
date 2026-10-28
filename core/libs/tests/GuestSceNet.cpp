@@ -281,6 +281,33 @@ static void CheckRandom() {
     Require(std::any_of(values.begin() + 1, values.end(), [&](std::uint32_t value) { return value != values[0]; }));
 }
 
+static void CheckByteOrderConversion() {
+    *sceNetErrnoLoc() = 123;
+    Require(sceNetHtons_nid_postfix(0x1234) == 0x3412);
+    Require(sceNetNtohs_nid_postfix(0x3412) == 0x1234);
+    Require(sceNetHtons_nid_postfix(0x1234) == static_cast<std::uint16_t>(htons(0x1234)));
+    Require(sceNetHtonl_nid_postfix(0x12345678u) == 0x78563412u);
+    Require(sceNetNtohl_nid_postfix(0x78563412u) == 0x12345678u);
+    Require(sceNetHtonl_nid_postfix(0x12345678u) == static_cast<std::uint32_t>(htonl(0x12345678u)));
+    Require(sceNetHtonll(0x0123456789abcdefULL) == 0xefcdab8967452301ULL);
+    Require(sceNetNtohll(0xefcdab8967452301ULL) == 0x0123456789abcdefULL);
+    Require(sceNetHtons_nid_postfix(0x1212) == 0x1212);
+    Require(sceNetHtonl_nid_postfix(0x12343412u) == 0x12343412u);
+    Require(sceNetHtonll(0x0123456767452301ULL) == 0x0123456767452301ULL);
+    for (const std::uint16_t value : {std::uint16_t{0x0000}, std::uint16_t{0x0001}, std::uint16_t{0x00ff}, std::uint16_t{0x8000},
+                                      std::uint16_t{0xff00}, std::uint16_t{0xffff}}) {
+        Require(sceNetNtohs_nid_postfix(sceNetHtons_nid_postfix(value)) == value);
+    }
+    for (const std::uint32_t value : {0x00000000u, 0x00000001u, 0x0000ffffu, 0x80000000u, 0xff000000u, 0xffffffffu}) {
+        Require(sceNetNtohl_nid_postfix(sceNetHtonl_nid_postfix(value)) == value);
+    }
+    for (const std::uint64_t value : {std::uint64_t{0}, std::uint64_t{1}, std::uint64_t{0x00000000ffffffff}, std::uint64_t{0xffffffff00000000},
+                                      std::uint64_t{0x8000000000000000}, UINT64_MAX}) {
+        Require(sceNetNtohll(sceNetHtonll(value)) == value);
+    }
+    Require(*sceNetErrnoLoc() == 123);
+}
+
 static void CheckInitParam() {
     alignas(8) std::array<std::uint8_t, 64> parameter{};
     const auto* initialize = reinterpret_cast<const NetInitializeParameter*>(parameter.data());
@@ -776,6 +803,43 @@ static void CheckMessages(int receiver, int sender, const std::array<std::uint8_
         threw = true;
     }
     Require(threw);
+}
+
+static void CheckOverlappingReceiveVectors(int receiver, int sender, const std::array<std::uint8_t, 16>& address) {
+    constexpr std::size_t page = 0x4000;
+    std::int64_t physical = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page, 0, 0, &physical) == 0);
+    void* blocked = nullptr;
+    Require(sceKernelMapDirectMemory(&blocked, page, 3, 0, physical, 0) == 0);
+    Require(sceKernelMprotect(blocked, page, 0) == 0);
+    char tail[4]{};
+    NetIovec vectors[2]{};
+    vectors[1] = {tail, sizeof(tail)};
+    vectors[0] = {&vectors[1], sizeof(NetIovec)};
+    const NetIovec redirect{blocked, sizeof(tail)};
+    char payload[sizeof(NetIovec) + sizeof(tail)];
+    std::memcpy(payload, &redirect, sizeof(redirect));
+    std::memcpy(payload + sizeof(redirect), "tail", sizeof(tail));
+    std::array<std::uint8_t, 16> destination = address;
+    Require(sceNetSendto(sender, payload, sizeof(payload), 0, destination.data(), destination.size()) == sizeof(payload));
+    std::array<std::uint8_t, 16> source{};
+    NetMsghdr message{source.data(), static_cast<std::uint32_t>(source.size()), vectors, 2, nullptr, 0, -1};
+    Require(sceNetRecvmsg(receiver, &message, 0) == sizeof(payload));
+    Require(std::memcmp(tail, "tail", sizeof(tail)) == 0);
+    Require(std::memcmp(&vectors[1], &redirect, sizeof(redirect)) == 0);
+    Require(message.iov == vectors && message.iov_length == 2 && message.flags == 0 && message.name_length == 16);
+    Require(sceKernelMunmap(reinterpret_cast<std::uint64_t>(blocked), page) == 0);
+    Require(sceKernelReleaseDirectMemory(physical, page) == 0);
+}
+
+static void CheckEmptyReceiveVectors(int receiver, int sender, const std::array<std::uint8_t, 16>& address) {
+    std::array<std::uint8_t, 16> destination = address;
+    Require(sceNetSendto(sender, "x", 1, 0, destination.data(), destination.size()) == 1);
+    std::array<std::uint8_t, 16> source{};
+    NetMsghdr message{source.data(), static_cast<std::uint32_t>(source.size()), nullptr, 0, nullptr, 0, -1};
+    Require(sceNetRecvmsg(receiver, &message, 0) == 0);
+    Require(message.iov == nullptr && message.iov_length == 0 && message.flags == 0x10 && message.name_length == 16);
+    Require(source[0] == 16 && source[1] == 2 && source[4] == 127 && source[7] == 1);
 }
 
 static void CheckEpollWritable() {
@@ -2064,6 +2128,7 @@ int main() {
     CheckPoolStats();
     CheckIfName();
     CheckRandom();
+    CheckByteOrderConversion();
     CheckNetMemory();
     CheckNetstat();
     CheckEmptyEpoll();
@@ -2302,6 +2367,8 @@ int main() {
     CheckStreamReceiveTimeout();
     CheckMicrosecondTimeouts(udp_receiver);
     CheckMessages(udp_receiver, udp_sender, address);
+    CheckOverlappingReceiveVectors(udp_receiver, udp_sender, address);
+    CheckEmptyReceiveVectors(udp_receiver, udp_sender, address);
     Require(sceNetSocketClose(udp_sender) == 0);
     Require(sceNetSocketClose(udp_receiver) == 0);
 

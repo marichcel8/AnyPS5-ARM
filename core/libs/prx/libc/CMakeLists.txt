@@ -129,6 +129,17 @@ target_include_directories(libc PRIVATE
 
 target_link_libraries(libc PRIVATE zarchive)
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(libc PRIVATE -ffp-contract=off)
+    if(BUILD_TESTING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND NOT MSVC)
+        add_test(NAME libc_floating_point_contraction
+                COMMAND ${CMAKE_COMMAND} -DCOMPILER=${CMAKE_CXX_COMPILER}
+                    "-DOPTIONS=$<JOIN:$<TARGET_PROPERTY:libc,COMPILE_OPTIONS>, >"
+                    -DWORK=${CMAKE_CURRENT_BINARY_DIR}/libc_floating_point_contraction
+                    -P ${LIBS_INCLUDE_DIR}/tests/LibcFloatingPointContraction.cmake)
+    endif()
+endif()
+
 if(BUILD_TESTING)
     add_test_executable(guest_update_env_tests ${LIBS_INCLUDE_DIR}/tests/GuestUpdateEnv.cpp)
     target_include_directories(guest_update_env_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -421,6 +432,15 @@ if(BUILD_TESTING)
     add_test(NAME guest_math COMMAND guest_math_tests)
     if(WIN32)
         set_tests_properties(guest_math PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_strtod_subnormal_tests ${LIBS_INCLUDE_DIR}/tests/GuestStrtodSubnormal.cpp)
+    target_include_directories(guest_strtod_subnormal_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_strtod_subnormal_tests PRIVATE libc)
+    configure_windows_unwind(guest_strtod_subnormal_tests)
+    add_test(NAME guest_strtod_subnormal COMMAND guest_strtod_subnormal_tests)
+    if(WIN32)
+        set_tests_properties(guest_strtod_subnormal PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_random_state_tests ${LIBS_INCLUDE_DIR}/tests/GuestRandomState.cpp)
@@ -736,6 +756,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_qsort PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_qsort PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_cxa_guard_tests ${LIBS_INCLUDE_DIR}/tests/GuestCxaGuard.cpp)
+    target_include_directories(guest_cxa_guard_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_cxa_guard_tests PRIVATE libc)
+    configure_windows_unwind(guest_cxa_guard_tests)
+    add_test(NAME guest_cxa_guard COMMAND guest_cxa_guard_tests)
+    set_tests_properties(guest_cxa_guard PROPERTIES TIMEOUT 20)
+    if(WIN32)
+        set_tests_properties(guest_cxa_guard PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_strftime_tests ${LIBS_INCLUDE_DIR}/tests/GuestStrftime.cpp)
@@ -1102,7 +1132,7 @@ if(BUILD_TESTING)
         target_include_directories(cpu_topology_tests PRIVATE ${LIBS_INCLUDE_DIR})
         add_test(NAME cpu_topology COMMAND cpu_topology_tests)
     endif()
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR WIN32)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR APPLE OR WIN32)
         add_test_executable(guest_backtrace_tests ${LIBS_INCLUDE_DIR}/tests/GuestBacktrace.cpp)
         target_include_directories(guest_backtrace_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_backtrace_tests PRIVATE libc)
