@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <string>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
@@ -575,6 +576,32 @@ public:
         });
     }
 
+    static int HostProtect(std::uintptr_t begin, std::uintptr_t end, int& protection) {
+        auto* const address = reinterpret_cast<void*>(begin);
+        int result = ::mprotect(address, end - begin, protection);
+#if defined(__APPLE__) && defined(__aarch64__)
+        if (result != 0 && errno == EACCES && (protection & PROT_EXEC) != 0) {
+            protection &= ~PROT_EXEC;
+            result = ::mprotect(address, end - begin, protection);
+        }
+#endif
+        return result == 0 ? 0 : errno;
+    }
+
+    int Protect(std::uintptr_t begin, std::uintptr_t end, int protection) {
+        if (!_available) return HostProtect(begin, end, protection);
+        const Lock lock(_lock);
+        if (const int error = HostProtect(begin, end, protection); error != 0) return error;
+        const auto first = pageStart(begin);
+        const auto last = pageEnd(end);
+        if (first < last) {
+            forEachPage(first, last, [&](std::uintptr_t, std::uint8_t& state) {
+                state = static_cast<std::uint8_t>(Written | (state & Fresh) | (protection & ProtectionMask));
+            });
+        }
+        return 0;
+    }
+
     void BeginHostWrite(std::uintptr_t begin, std::uintptr_t end) {
         if (!_available || end <= begin) return;
         begin = pageStart(begin);
@@ -1082,6 +1109,18 @@ void GuestWriteWatchProtectionChanged_nid_postfix(const void* pointer, std::size
     static_cast<void>(pointer);
     static_cast<void>(bytes);
     static_cast<void>(protection);
+#endif
+}
+
+int GuestWriteWatchProtect_nid_postfix(void* pointer, std::size_t bytes, int protection) {
+#if defined(__APPLE__)
+    const auto begin = reinterpret_cast<std::uintptr_t>(pointer);
+    return Watch::Get().Protect(begin, begin + bytes, protection);
+#else
+    static_cast<void>(pointer);
+    static_cast<void>(bytes);
+    static_cast<void>(protection);
+    return ENOSYS;
 #endif
 }
 

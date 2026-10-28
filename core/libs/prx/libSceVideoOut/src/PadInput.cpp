@@ -563,6 +563,24 @@ void PadInput::Update(const DisplayWindow& window) {
 
 // Every player's pad from the device seated there; the first player's also from the keyboard,
 // the mouse, the launcher's presses and APS5_PAD_SCRIPT, and published even with no device.
+PadInputState PadInput::handOff(int slot, PadInputState state) {
+    auto& held = heldThroughCapture[static_cast<std::size_t>(slot)];
+    if (ImeCapturesPad_nid_postfix()) {
+        if (slot == 0) ImePublishPad_nid_postfix({state.buttons, state.sticks[0], state.sticks[1], state.analogButtonsL2});
+        held = state.buttons;
+        PadInputState neutral;
+        neutral.hasMotion = false;
+        neutral.deviceKind = state.deviceKind;
+        neutral.intercepted = true;
+        return neutral;
+    }
+    held &= state.buttons;
+    state.buttons &= ~held;
+    if ((held & static_cast<std::uint32_t>(Pad::PadButton::L2)) != 0) state.analogButtonsL2 = 0;
+    if ((held & static_cast<std::uint32_t>(Pad::PadButton::R2)) != 0) state.analogButtonsR2 = 0;
+    return state;
+}
+
 void PadInput::publish(std::uint64_t frame) {
     for (int player = 0; player < PAD_MAX_CONTROLLERS; ++player) {
         std::optional<PadInputState> device;
@@ -589,11 +607,11 @@ void PadInput::publish(std::uint64_t frame) {
                 APS5_LOG_OUT("Pad: player %d joined", player + 1);
             }
             published[static_cast<std::size_t>(player)] = true;
-            PadPublishInputForPort_nid_postfix(player, *device);
+            PadPublishInputForPort_nid_postfix(player, handOff(player, *device));
             continue;
         }
-        auto state = keyboardMouse.Compose(device.value_or(PadInputState{}));
-        state.buttons |= ScriptedButtons() | playerOnePressed;
+        auto state = handOff(0, keyboardMouse.Compose(device.value_or(PadInputState{})));
+        if (!state.intercepted) state.buttons |= ScriptedButtons() | playerOnePressed;
         PadPublishInput_nid_postfix(state);
         if (auto* telemetry = VideoOutTelemetry::Instance(); telemetry != nullptr) VideoOutTelemetry::EmitPadIfChanged(*telemetry, telemetryFilter, frame, state);
     }

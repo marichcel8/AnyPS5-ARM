@@ -27,7 +27,7 @@
 extern "C" int kill(int, int);
 #endif
 
-#if defined(__linux__)
+#ifndef _WIN32
 extern char** environ;
 #endif
 
@@ -384,6 +384,7 @@ int main() {
 #ifndef _WIN32
         if (std::strcmp(role, "child-stop") == 0) {
             std::raise(SIGSTOP);
+            std::this_thread::sleep_for(std::chrono::seconds(2));
             std::_Exit(44);
         }
         if (std::strcmp(role, "child-kill-bus") == 0) std::raise(SIGBUS);

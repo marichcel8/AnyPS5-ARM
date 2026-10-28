@@ -134,6 +134,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     if(BUILD_TESTING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND NOT MSVC)
         add_test(NAME libc_floating_point_contraction
                 COMMAND ${CMAKE_COMMAND} -DCOMPILER=${CMAKE_CXX_COMPILER}
+                    "-DARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}"
                     "-DOPTIONS=$<JOIN:$<TARGET_PROPERTY:libc,COMPILE_OPTIONS>, >"
                     -DWORK=${CMAKE_CURRENT_BINARY_DIR}/libc_floating_point_contraction
                     -P ${LIBS_INCLUDE_DIR}/tests/LibcFloatingPointContraction.cmake)
@@ -149,7 +150,7 @@ if(BUILD_TESTING)
     foreach(bit RANGE 0 5)
         foreach(source RANGE 0 2)
             add_test(NAME guest_update_env_pending_${bit}_${source} COMMAND guest_update_env_tests $<TARGET_FILE:libc> ${bit} ${source})
-            set_tests_properties(guest_update_env_pending_${bit}_${source} PROPERTIES TIMEOUT 10)
+            set_tests_properties(guest_update_env_pending_${bit}_${source} PROPERTIES TIMEOUT 10 SKIP_RETURN_CODE 77)
             if(WIN32)
                 set_tests_properties(guest_update_env_pending_${bit}_${source} PROPERTIES ENVIRONMENT_MODIFICATION
                     "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")

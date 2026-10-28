@@ -16,6 +16,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libSceIme/include/ImeFilterText.hpp"
 #include "prx/libSceIme/include/ImeInput.hpp"
+#include "prx/libSceIme/include/ImeKeyboardView.hpp"
 
 static_assert(sizeof(ImeEditText) == 64);
 static_assert(offsetof(ImeEvent, param) == 8);
@@ -87,6 +88,8 @@ std::set<int32_t> g_openKeyboards;
 std::mutex g_imeMutex;
 std::optional<Session> g_session;
 std::atomic<ImeHostTextSink> g_textSink{nullptr};
+std::atomic<ImeHostPadSink> g_padSink{nullptr};
+std::atomic<ImeKeyboardViewProvider> g_viewProvider{nullptr};
 std::uint64_t g_nextSessionId = 0;
 
 bool IsHighSurrogateUnit(char16_t unit) { return unit >= 0xd800 && unit <= 0xdbff; }
@@ -457,6 +460,27 @@ std::uint32_t ImeGetHostPrompt_nid_postfix(ImeHostPrompt* prompt) {
         else *prompt = ImeHostPrompt{};
     }
     return g_promptRevision.load();
+}
+
+bool ImeCapturesPad_nid_postfix() {
+    return g_padSink.load() != nullptr;
+}
+
+void ImePublishPad_nid_postfix(const ImeHostPad& pad) {
+    if (const ImeHostPadSink sink = g_padSink.load()) sink(pad);
+}
+
+void ImeSetHostPadSink_nid_no_patch(ImeHostPadSink sink) {
+    g_padSink = sink;
+}
+
+void ImeSetKeyboardViewProvider_nid_no_patch(ImeKeyboardViewProvider provider) {
+    g_viewProvider = provider;
+}
+
+bool ImeReadKeyboardView_nid_postfix(ImeKeyboardView& view) {
+    const ImeKeyboardViewProvider provider = g_viewProvider.load();
+    return provider != nullptr && provider(view);
 }
 
 int APS5_VABI sceImeOpen_nid_postfix(const Param* param, const ExtendedParam* extended) {
