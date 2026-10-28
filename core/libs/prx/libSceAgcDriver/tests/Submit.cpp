@@ -443,6 +443,31 @@ void testWaitFreeSubmissionBehindHeldOne() {
     AgcDriverWaitIdle_nid_postfix();
 }
 
+void testQueue0SubmissionAfterEarlierWaitFreeWork() {
+    alignas(64) static volatile std::uint32_t first = 0, second = 0;
+    constexpr std::uint32_t writes = 20000;
+    std::vector<std::uint32_t> words;
+    for (std::uint32_t i = 1; i <= writes; ++i) {
+        const auto write = writeData(&first, i);
+        words.insert(words.end(), write.begin(), write.end());
+    }
+    submit(0x20, words);
+    submit(0, commands(writeData(&second, 1)));
+    waitFor(&second, 1, "queue 0's submission never ran");
+    check(first == writes, "queue 0 ran a submission before another queue's earlier wait-free submission finished");
+    AgcDriverWaitIdle_nid_postfix();
+}
+
+void testQueue0SubmissionBehindWaitingQueue() {
+    alignas(64) static volatile std::uint32_t label = 0, other = 0, done = 0;
+    submit(0x20, commands(waitEqual(&label, 1)));
+    submit(0x20, commands(writeData(&other, 1)));
+    submit(0, commands(writeData(&label, 1), writeData(&done, 1)));
+    check(waitFor(&done, 1, "queue 0 never ran while another queue waited on it") < std::chrono::milliseconds(500), "queue 0 waited for a wait-free submission queued behind another queue's wait on queue 0");
+    waitFor(&other, 1, "the wait-free submission behind the satisfied wait never ran");
+    AgcDriverWaitIdle_nid_postfix();
+}
+
 void testMultiAcbs() {
     alignas(64) static volatile std::uint32_t value = 0, done = 0, gate = 0;
     check(sceAgcDriverSubmitMultiAcbs(0x20, nullptr, nullptr, 0) == 0, "empty multi-ACB submit failed");
@@ -1040,6 +1065,8 @@ int main(int argc, char** argv) {
         testMultiAcbs();
         testWaitFreeSubmissionBehindHeldOne();
         testWaitFreeSubmissionTheCpuWaitsFor();
+        testQueue0SubmissionAfterEarlierWaitFreeWork();
+        testQueue0SubmissionBehindWaitingQueue();
         testMultiSubmissions();
         testShaderHeaderAlignment();
         testHeaderWithoutProgramAddress();
