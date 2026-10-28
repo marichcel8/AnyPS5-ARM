@@ -80,12 +80,14 @@ std::vector<const char*> windowExtensions(SDL_Window* window) {
     (void)window;
     return {};
 #else
-    unsigned extensionCount = 0;
-    if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
-    std::vector<const char*> extensions(extensionCount);
-    if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, extensions.data())) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
-    extensions.resize(extensionCount);
-    return extensions;
+    return OnMainThread([&] {
+        unsigned extensionCount = 0;
+        if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, nullptr)) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
+        std::vector<const char*> extensions(extensionCount);
+        if (!SDL_Vulkan_GetInstanceExtensions(window, &extensionCount, extensions.data())) throw std::runtime_error(std::string("SDL_Vulkan_GetInstanceExtensions failed: ") + SDL_GetError());
+        extensions.resize(extensionCount);
+        return extensions;
+    });
 #endif
 }
 
@@ -824,7 +826,7 @@ void VideoOutDriver::presentLoop(std::stop_token token, std::promise<void>& star
                 processFlip(*current);
                 int windowWidth = 0;
                 int windowHeight = 0;
-                if (window.Handle() != nullptr) SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight);
+                if (window.Handle() != nullptr) OnMainThread([&] { SDL_GetWindowSize(window.Handle(), &windowWidth, &windowHeight); });
                 if (windowWidth > 0 && windowHeight > 0) {
                     const auto presented = AgcDriver::ComputeContainSize_nid_postfix(current->width, current->height, static_cast<std::uint32_t>(windowWidth), static_cast<std::uint32_t>(windowHeight), true);
                     mouseInput->SetPresentation(current->width, current->height, presented.width, presented.height);

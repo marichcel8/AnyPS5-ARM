@@ -152,6 +152,7 @@ bool HasStencil(VkFormat format);
 bool NormalizeUnobservedViewportDepth(const Context& context, State& state, const ShaderRecompiler::ShaderPixelStageInfo& pixel);
 void ValidateViewport(const Context& context, const VkViewport& viewport);
 void ValidateDepthBounds(const Context& context, const State& state);
+void ValidateMeshLimits(const Context& context, const ShaderRecompiler::MeshConfiguration& mesh, std::uint32_t invocations);
 void ValidateProvokingVertex(const Context& context, const State& state, std::span<const CompiledShader> shaders = {});
 // Whether a fragment stage reads flat or per-vertex inputs, so that the provoking vertex shows.
 bool ReadsProvokingVertex(std::span<const CompiledShader> shaders);
