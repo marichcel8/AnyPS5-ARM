@@ -615,68 +615,6 @@ bool LabelRunsPerBatch() {
 }
 std::atomic<std::uint64_t> storeRunsAtSubmit{0}, storeRunsForced{0};
 
-// APS5_PROFILE_DRAW: why open render passes end ([passes] line every 10 s); Commands() callers are
-// counted by return address (module offsets, for atos). Under the GpuMutex.
-enum class PassEnd : std::uint8_t { Submit, Label, Samples, KeyChange, Hazard, Forced, Segment, Commands, Count };
-constexpr const char* PassEndNames[static_cast<std::size_t>(PassEnd::Count)] = {"submit", "label", "samples", "target change", "hazard", "forced", "sample segment", "other command"};
-struct PassEndStats {
-    std::array<std::uint64_t, static_cast<std::size_t>(PassEnd::Count)> reasons{};
-    // Hazard ends by kind (PassHazard order: none, read after write, write after write, write after
-    // read, image, unknown read, unknown write).
-    std::array<std::uint64_t, 7> hazards{};
-    std::unordered_map<std::uintptr_t, std::uint64_t> callers;
-    std::chrono::steady_clock::time_point last = std::chrono::steady_clock::now();
-};
-PassEndStats& PassEnds() {
-    static auto* stats = new PassEndStats;
-    return *stats;
-}
-void CountPassEnd(PassEnd reason, const void* caller = nullptr) {
-    if (!DrawProfiled()) return;
-    auto& stats = PassEnds();
-    ++stats.reasons[static_cast<std::size_t>(reason)];
-    if (caller != nullptr) {
-#ifdef _WIN32
-        // No dladdr on Windows: the profile lists absolute caller addresses there.
-        const std::uintptr_t base = 0;
-#else
-        Dl_info info{};
-        const auto base = dladdr(caller, &info) != 0 ? reinterpret_cast<std::uintptr_t>(info.dli_fbase) : 0;
-#endif
-        ++stats.callers[reinterpret_cast<std::uintptr_t>(caller) - base];
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (now - stats.last < std::chrono::seconds(10)) return;
-    stats.last = now;
-    std::string text;
-    for (std::size_t i = 0; i < stats.reasons.size(); ++i) {
-        char item[48];
-        std::snprintf(item, sizeof(item), " %s %llu", PassEndNames[i], static_cast<unsigned long long>(stats.reasons[i]));
-        text += item;
-    }
-    constexpr std::array<const char*, 7> hazardNames{"none", "read after write", "write after write", "write after read", "image", "unknown read", "unknown write"};
-    text += " (hazards:";
-    for (std::size_t i = 1; i < stats.hazards.size(); ++i) {
-        char item[48];
-        std::snprintf(item, sizeof(item), " %s %llu", hazardNames[i], static_cast<unsigned long long>(stats.hazards[i]));
-        text += item;
-    }
-    text += ")";
-    stats.hazards = {};
-    std::vector<std::pair<std::uint64_t, std::uintptr_t>> top;
-    for (const auto& [offset, count] : stats.callers) top.emplace_back(count, offset);
-    std::sort(top.rbegin(), top.rend());
-    text += "; other commands from:";
-    for (std::size_t i = 0; i < top.size() && i < 12; ++i) {
-        char item[48];
-        std::snprintf(item, sizeof(item), " +0x%llx x%llu", static_cast<unsigned long long>(top[i].second), static_cast<unsigned long long>(top[i].first));
-        text += item;
-    }
-    AgcDriver::ProfilePrint_nid_no_patch("[passes] render pass ends (10 s):%s\n", text.c_str());
-    stats.reasons = {};
-    stats.callers.clear();
-}
-
 // APS5_NO_JOIN_WAW_CHECK=1: a contiguous store joins the pending one without the check against
 // the run's recorded stores, as before (see RecordStore).
 bool JoinWawCheck() {
@@ -1523,10 +1461,7 @@ VkCommandBuffer Recorder::Commands(VkAccessFlags* coveredAccess) {
     // Work recorded after a draw's render pass or an inline store run must see their writes: the
     // pass's end and the run's trailing barrier go in first (a per-batch run waits for Submit, or
     // for a caller whose ranges overlap a queued store: FlushStores).
-    if (open->renderPass.open) {
-        CountPassEnd(PassEnd::Commands, __builtin_return_address(0));
-        endOpenRenderPass();
-    }
+    if (open->renderPass.open) endOpenRenderPass(PassBreak::Command);
     if (open->run.open && !LabelRunsPerBatch()) closeStoreRun();
     if (coveredAccess != nullptr) *coveredAccess = open->coveredAccess;
     open->coveredAccess = 0;
@@ -1576,26 +1511,22 @@ Recorder::DrawPassStart Recorder::StartDrawPass(std::uint64_t key, bool forced, 
     ensureOpen();
     auto& pass = open->renderPass;
     if (!pass.open || forced || (countingSamples && segmentMode() && !segmentSlotReady(*open))) {
-        if (pass.open) {
-            CountPassEnd(forced ? PassEnd::Forced : PassEnd::Segment);
-            endOpenRenderPass();
-        }
+        const auto reason = !pass.open ? pass.closedBy : forced ? PassBreak::Forced : PassBreak::Segment;
         const auto commands = Commands();
         open->passHazards.Clear();
         open->passHazards.BeginPass();
-        return {commands, false, true};
+        return {commands, false, true, reason};
     }
     const auto hazard = open->passHazards.Check(access, pass.key == key);
-    if (hazard == PassHazard::None && pass.key == key) return {open->commands, true, false};
+    if (hazard == PassHazard::None && pass.key == key) return {open->commands, true, false, PassBreak::Continued};
+    const auto reason = PassBreakFor(hazard);
     const bool merge = MergeBarriers() && !fenced && !pass.fenced && !pass.afterPass;
     const bool elide = merge && hazard == PassHazard::None;
-    if (DrawProfiled() && hazard != PassHazard::None) ++PassEnds().hazards[static_cast<std::size_t>(hazard)];
-    CountPassEnd(hazard != PassHazard::None ? PassEnd::Hazard : PassEnd::KeyChange);
-    endOpenRenderPass(!merge);
+    endOpenRenderPass(reason, !merge);
     const auto commands = Commands();
     if (!elide) open->passHazards.Clear();
     open->passHazards.BeginPass();
-    return {commands, false, !elide};
+    return {commands, false, !elide, reason};
 }
 
 void Recorder::LeaveRenderPassOpen(std::uint64_t key, std::uint32_t timing, bool fenced, const PassAccess& access, std::function<void(VkCommandBuffer)> afterPass) {
@@ -1615,7 +1546,7 @@ void Recorder::SealPassWriteOnly() {
     if (open != nullptr) open->passHazards.SealWriteOnly();
 }
 
-void Recorder::endOpenRenderPass(bool barrier) {
+void Recorder::endOpenRenderPass(PassBreak by, bool barrier) {
     auto& pass = open->renderPass;
     if (open->segmentActive) endSegment(*open);
     EndRenderPass(context, open->commands);
@@ -1630,6 +1561,7 @@ void Recorder::endOpenRenderPass(bool barrier) {
     open->coveredAccess = barrier ? VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT : 0;
     open->hostReadOwed = true;
     pass = {};
+    pass.closedBy = by;
 }
 
 void Recorder::QueueKeyStore(VkBuffer buffer, VkDeviceSize first, VkDeviceSize last, std::shared_ptr<void> seed, std::uint64_t begin, std::uint64_t end) {
@@ -1770,10 +1702,7 @@ void Recorder::RecordStore(VkBuffer buffer, VkDeviceSize offset, std::span<const
     // A label says the work before it is done: the queued key stores (results of that work) land
     // ahead of every store of the run.
     if (!open->keyStores.empty()) recordKeyStores(true);
-    if (open->renderPass.open) {
-        CountPassEnd(PassEnd::Label);
-        endOpenRenderPass();
-    }
+    if (open->renderPass.open) endOpenRenderPass(PassBreak::Label);
     open->coveredAccess = 0;
     // Two transfers to the same bytes have no order of their own within the run.
     const auto overlapsRecorded = [&] { return std::any_of(run.recorded.begin(), run.recorded.end(), [&](const auto& store) { return std::get<0>(store) == buffer && offset < std::get<2>(store) && std::get<1>(store) < end; }); };
@@ -1846,10 +1775,7 @@ bool Recorder::closeStoreRun(bool atSubmit) {
         // land ahead of every store of the run, and the pass a draw left open ends.
         if (!open->keyStores.empty()) recordKeyStores(true);
         const bool passEndLast = open->renderPass.open && !open->renderPass.afterPass;
-        if (open->renderPass.open) {
-            CountPassEnd(atSubmit ? PassEnd::Submit : PassEnd::Label);
-            endOpenRenderPass();
-        }
+        if (open->renderPass.open) endOpenRenderPass(PassBreak::Label);
         const auto commands = open->commands;
         run.timing = beginTiming(ClassKey(CommandClass::LabelRun));
         if (BarrierValidate()) {
@@ -2252,10 +2178,7 @@ void Recorder::CountSamples() {
     gpuSampleCounter();
     countingSamples = true;
     if (segmentMode() || open == nullptr || open->samples != VK_NULL_HANDLE) return;
-    if (open->renderPass.open) {
-        CountPassEnd(PassEnd::Samples);
-        endOpenRenderPass();
-    }
+    if (open->renderPass.open) endOpenRenderPass(PassBreak::Samples);
     beginSamples(*open);
 }
 
@@ -3779,10 +3702,7 @@ void Recorder::Submit() {
     if (open == nullptr) return;
     GuestMemory::AssertGpuLockHeld("Recorder::Submit");
     if (!open->keyStores.empty()) recordKeyStores(false);
-    if (open->renderPass.open) {
-        CountPassEnd(PassEnd::Submit);
-        endOpenRenderPass();
-    }
+    if (open->renderPass.open) endOpenRenderPass(PassBreak::NewBatch);
     const bool segments = segmentMode();
     if (!segments) {
         endSamples(*open);
