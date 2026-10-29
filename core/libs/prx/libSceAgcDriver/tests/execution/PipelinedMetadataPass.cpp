@@ -136,6 +136,10 @@ int main() {
             if (!device) return VulkanTestSkipped;
         }
         {
+            const auto device = OpenVulkanTestDevice();
+            if (!device) return VulkanTestSkipped;
+        }
+        {
             GuestAllocations::Mutation mutation;
             mutation.Add(Surface.data(), Surface.size_bytes(), true, true, true);
             mutation.Add(Cmask.data(), Cmask.size(), true, true, true);

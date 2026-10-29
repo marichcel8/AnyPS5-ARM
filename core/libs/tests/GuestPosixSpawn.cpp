@@ -26,6 +26,9 @@
 #else
 extern "C" int kill(int, int);
 #endif
+#ifdef __APPLE__
+#include <mach-o/dyld.h>
+#endif
 
 #ifndef _WIN32
 extern char** environ;
@@ -389,6 +392,7 @@ int main() {
         }
         if (std::strcmp(role, "child-kill-bus") == 0) std::raise(SIGBUS);
         if (std::strcmp(role, "child-kill-sys") == 0) std::raise(SIGSYS);
+        if (std::strcmp(role, "child-kill-usr1") == 0) std::raise(SIGUSR1);
 #endif
         if (std::strcmp(role, "child-sleep") == 0) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -411,6 +415,7 @@ int main() {
     CheckStoppedChild();
     CheckKilledChild("child-kill-bus", 10);
     CheckKilledChild("child-kill-sys", 12);
+    CheckKilledChild("child-kill-usr1", 30);
 #else
     CheckTerminatedChild("child-laze", 0xC0000005u, 11);
     CheckTerminatedChild("child-laze", 0xC0000096u, 4);
