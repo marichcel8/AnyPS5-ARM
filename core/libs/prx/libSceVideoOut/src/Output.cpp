@@ -51,11 +51,17 @@ int ValidateVideoOutOutputMode_nid_no_patch(uint64_t mode, const VideoOutOutputO
     return 0;
 }
 
+int VideoOutOutputSupport_nid_no_patch(uint64_t mode, const VideoOutOutputOptions* options, int displayRefreshRate) {
+    const int result = ValidateVideoOutOutputMode_nid_no_patch(mode, options, displayRefreshRate);
+    if (mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ && result == VIDEO_OUT_ERROR_UNSUPPORTED_OUTPUT_MODE) return 0;
+    return result != 0 ? result : 1;
+}
+
 static int validateOutputConfig(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) {
     if (!VideoOutDriver::Get().HasConfig(handle) || !VideoOutDriver::Get().IsOpen(handle)) return VIDEO_OUT_ERROR_INVALID_HANDLE;
     if (reservedPtr != nullptr || reserved != 0) return VIDEO_OUT_ERROR_INVALID_VALUE;
     auto& driver = VideoOutDriver::Get();
-    return ValidateVideoOutOutputMode_nid_no_patch(mode, options, driver.SupportsHighFrameRate() ? 120 : driver.GetDisplayRefreshRate());
+    return VideoOutOutputSupport_nid_no_patch(mode, options, driver.SupportsHighFrameRate() ? 120 : driver.GetDisplayRefreshRate());
 }
 
 static void validateOpenParam(const void* param) {
@@ -296,11 +302,7 @@ int APS5_VABI sceVideoOutInitializeOutputOptions(VideoOutOutputOptions* options)
 }
 
 int APS5_VABI sceVideoOutIsOutputSupported(int handle, uint64_t mode, const VideoOutOutputOptions* options, void* reservedPtr, uint64_t reserved) try {
-    const int result = validateOutputConfig(handle, mode, options, reservedPtr, reserved);
-    if (result != 0) {
-        return result;
-    }
-    return 1;
+    return validateOutputConfig(handle, mode, options, reservedPtr, reserved);
 } catch (const ProcessShutdown&) {
     LibcAwaitExit_nid_postfix();
 }
@@ -311,6 +313,7 @@ int APS5_VABI sceVideoOutConfigureOutput(int handle, uint64_t mode, const VideoO
         return supported;
     }
     if (mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ && (GetAppAttribute3_nid_no_patch() & 0x40u) == 0) return VIDEO_OUT_ERROR_UNSUPPORTED_OUTPUT_MODE;
+    if (supported == 0) return VIDEO_OUT_ERROR_UNAVAILABLE_OUTPUT_MODE;
     auto cfg = VideoOutDriver::Get().GetConfig(handle);
     if (cfg == nullptr) {
         throw std::runtime_error(std::string(__func__) + ": VIDEO_OUT_ERROR_INVALID_HANDLE");

@@ -767,7 +767,7 @@ private:
         }
         FatalLine::Write(signal, info, context);
         ::signal(signal, SIG_DFL);
-        ::raise(signal);
+        if (previous.sa_handler == SIG_DFL) ::raise(signal);
     }
 
     bool record(std::uintptr_t address) {
