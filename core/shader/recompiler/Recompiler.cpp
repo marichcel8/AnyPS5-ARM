@@ -743,6 +743,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     targetOptions.waveLdsMemoryBarriers = request.target.waveLdsMemoryBarriers;
     targetOptions.deviceScopeLdsMemoryBarriers = request.target.deviceScopeLdsMemoryBarriers;
     targetOptions.ldsLockFences = request.target.ldsLockFences;
+    targetOptions.meshWindowBuffer = request.target.meshWindowBuffer;
 
     constexpr SpirvEmitter spirvEmitter;
     CompiledShaderArtifact result;
@@ -783,6 +784,7 @@ CompiledVariant emitVariant(const RecompileRequest& request, IrProgram& program)
     result.hostSubgroupSize = HostSubgroupSize(request);
     result.fullSubgroups = emitted.fullSubgroups;
     result.functionLdsBuffer = emitted.functionLdsBuffer;
+    result.meshWindowBuffer = emitted.meshWindowBuffer;
     result.vertexOffsetSgpr = program.Info().vertexOffsetSgpr;
     result.instanceOffsetSgpr = program.Info().instanceOffsetSgpr;
     result.vertexOffsetShared = program.Info().vertexOffsetShared;
@@ -960,8 +962,8 @@ SpecializedSpirv buildSpecializedModule(const CompiledShaderArtifact& artifact, 
         const auto count = materialized[cursor] >> 16u;
         const auto op = static_cast<spv::Op>(materialized[cursor] & 0xffffu);
         if (op == spv::OpDecorate && count == 4u && materialized[cursor + 2u] == spv::DecorationBinding) bindingNumbers.emplace(materialized[cursor + 1u], materialized[cursor + 3u]);
-        if (op == spv::OpDecorate && count == 4u && materialized[cursor + 2u] == spv::DecorationDescriptorSet && (materialized[cursor + 3u] == PixelFunctionLdsDescriptorSet || materialized[cursor + 3u] == MeshEmulationDescriptorSet)) ownSetBuffers.insert(materialized[cursor + 1u]);
-        if (op == spv::OpVariable && count >= 4u && !ownSetBuffers.contains(materialized[cursor + 2u])) {
+        if (op == spv::OpDecorate && count == 4u && materialized[cursor + 2u] == spv::DecorationDescriptorSet && (materialized[cursor + 3u] == PixelFunctionLdsDescriptorSet || materialized[cursor + 3u] == MeshWindowDescriptorSet)) functionLdsBuffer.insert(materialized[cursor + 1u]);
+        if (op == spv::OpVariable && count >= 4u && !functionLdsBuffer.contains(materialized[cursor + 2u])) {
             if (const auto found = bindingNumbers.find(materialized[cursor + 2u]); found != bindingNumbers.end()) module->bindings.push_back(found->second);
             module->pushData |= materialized[cursor + 3u] == spv::StorageClassPushConstant;
         }
@@ -1192,6 +1194,7 @@ RecompileResult materializeResult(const CompiledVariant& variant, const Recompil
         .fullSubgroups = artifact.fullSubgroups,
         .hostThreadgroup = artifact.hostThreadgroup,
         .functionLdsBuffer = artifact.functionLdsBuffer,
+        .meshWindowBuffer = artifact.meshWindowBuffer,
         .parameterExports = artifact.parameterExports,
         .fragmentParameters = artifact.fragmentParameters,
         .barycentricEmulation = artifact.barycentricEmulation,
@@ -1885,6 +1888,17 @@ std::uint64_t snapshotHash(const RecompileRequest& request, const ResourceSnapsh
         mix(merge.mask);
         mix(merge.samples);
         for (const auto word : merge.descriptor) mix(word);
+        if (merge.blend.enabled) {
+            mix(merge.blend.snorm);
+            mix(merge.blend.colorSource);
+            mix(merge.blend.colorDestination);
+            mix(merge.blend.colorOperation);
+            mix(merge.blend.alphaSource);
+            mix(merge.blend.alphaDestination);
+            mix(merge.blend.alphaOperation);
+            mix(merge.blend.writeMask);
+            for (const auto word : merge.blend.constants) mix(word);
+        }
     }
     if (request.context.vertex) {
         const auto& vertex = *request.context.vertex;

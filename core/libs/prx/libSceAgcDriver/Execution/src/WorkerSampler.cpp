@@ -340,9 +340,13 @@ void StartCallingThreadSampler(const char* path, std::jthread& slot) {
 
 }
 
-void StartWorkerSampler() {
-    StartProcessSampler();
-    StartCallingThreadSampler(std::getenv("APS5_SAMPLE_WORKER"), workerSamplerThread);
+void StartWorkerSampler(std::uint32_t queue) {
+    if (queue == 0) StartProcessSampler();
+    static const auto sampledQueue = [] {
+        const char* value = std::getenv("APS5_SAMPLE_WORKER_QUEUE");
+        return value != nullptr ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
+    }();
+    if (queue == sampledQueue) StartCallingThreadSampler(std::getenv("APS5_SAMPLE_WORKER"), workerSamplerThread);
 }
 
 void StartCommitterSampler() {
@@ -517,7 +521,7 @@ void StopWorkerSampler() {
 // The draw committer registers itself through SampleCurrentThread.
 void StartCommitterSampler() {}
 #else
-void StartWorkerSampler() {}
+void StartWorkerSampler(std::uint32_t) {}
 void StartCommitterSampler() {}
 void StopWorkerSampler() {}
 void SampleCurrentThread(const char*) {}
