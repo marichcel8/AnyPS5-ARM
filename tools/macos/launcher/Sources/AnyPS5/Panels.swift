@@ -202,8 +202,7 @@ extension AppModel {
                      }),
         ]
 
-        let library: [PanelRow] = [
-            PanelRow(id: "folder", title: T.text(.folder), detail: preferences.gamesFolder ?? "—", symbol: "folder", kind: .action(destructive: false) { [weak self] in self?.pickGamesFolder() }),
+        let library: [PanelRow] = libraryFolderRows() + [
             PanelRow(id: "rescan", title: T.text(.rescan), detail: T.format(.gamesFound, games.count), symbol: "arrow.clockwise", kind: .action(destructive: false) { [weak self] in
                 self?.rescan()
                 Sounds.shared.play(.select)
@@ -343,6 +342,7 @@ extension AppModel {
             PanelCategory(id: "behaviour", title: T.text(.behaviour), symbol: "slider.horizontal.3", rows: behaviour),
             PanelCategory(id: "power", title: TPow.text(.title), symbol: "battery.75percent", rows: powerRows()),
             PanelCategory(id: "controllers", title: TP.text(.title), symbol: "gamecontroller", rows: controllerRows()),
+            PanelCategory(id: "display", title: T.text(.displayDefaults), symbol: "macwindow", rows: displayDefaultRows()),
             PanelCategory(id: "presets", title: TPresets.text(.title), symbol: "dial.medium", rows: gamePresetRows()),
             PanelCategory(id: "shortcuts", title: TH.text(.shortcuts), symbol: "command", rows: shortcutRows()),
             PanelCategory(id: "together", title: "AnyTogether", symbol: "person.2.circle", rows: togetherRows()),
@@ -371,15 +371,7 @@ extension AppModel {
         rows.append(PanelRow(id: "outputResolution", title: T.text(.outputResolution), detail: T.text(.outputResolutionDetail), symbol: "arrow.down.right.and.arrow.up.left", kind: .choice(options: outputNames, selected: outputHeights.firstIndex(of: settings.outputHeight) ?? 0) { [weak self] index in
             self?.update(game) { $0.outputHeight = outputHeights[index] }
         }))
-        rows.append(PanelRow(id: "display", title: T.text(.display), symbol: "macwindow", kind: .choice(options: [T.text(.windowed), T.text(.fullscreen)], selected: settings.fullscreen ? 1 : 0) { [weak self] index in
-            self?.update(game) { $0.fullscreen = index == 1 }
-        }))
-        if !settings.fullscreen {
-            rows.append(PanelRow(id: "size", title: T.text(.windowSize), symbol: "arrow.up.left.and.arrow.down.right", kind: .stepper(value: settings.windowSize, range: 40...100, step: 5, format: { "\($0)%" }) { [weak self] value in
-                self?.update(game) { $0.windowSize = value }
-            }))
-        }
-        rows.append(PanelRow(id: "vsync", title: T.text(.vsync), symbol: "waveform.path", kind: .toggle(settings.vsync || settings.frameGeneration == true) { [weak self] value in self?.update(game) { $0.vsync = value } }))
+        rows += gameDisplayRows(game, settings)
         rows.append(PanelRow(id: "frameGeneration", title: T.text(.frameGeneration), detail: T.text(lowPowerNotice != nil ? .frameGenerationLowPower : .frameGenerationDetail), symbol: "square.stack.3d.forward.dottedline",
                              kind: .toggle(settings.frameGeneration == true) { [weak self] value in self?.update(game) { $0.frameGeneration = value ? true : nil } }))
         rows.append(PanelRow(id: "controls", title: T.text(.controls), symbol: "keyboard", kind: .action(destructive: false) { [weak self] in self?.open(.controls) }))
@@ -508,6 +500,26 @@ extension AppModel {
         ]
     }
 
+    /// Settings → Game Library's folders: one row each (where, and how many games or not
+    /// connected), pressed to remove it after asking, then Add Folder.
+    func libraryFolderRows() -> [PanelRow] {
+        let statuses = libraryFolders
+        var rows: [PanelRow] = []
+        for path in preferences.libraryFolders {
+            let url = URL(fileURLWithPath: path)
+            let status = statuses.first { $0.url.standardizedFileURL == url.standardizedFileURL }
+            let connected = status?.connected ?? true
+            let state = !connected ? T.text(.folderNotConnected) : status.map { $0.games == 1 ? T.text(.folderOneGame) : T.format(.folderGames, $0.games) } ?? T.text(.scanning)
+            let name = url.lastPathComponent.isEmpty ? path : url.lastPathComponent
+            rows += askingFirst(PanelRow(id: "folder-" + path, title: name, detail: url.abbreviatedPath + " · " + state,
+                                         symbol: connected ? "folder" : "externaldrive.badge.xmark", kind: .action(destructive: false) { [weak self] in self?.removeFolder(path) }),
+                                question: T.format(.removeFolderAsk, name), confirm: T.text(.removeFolder))
+        }
+        rows.append(PanelRow(id: "addFolder", title: T.text(.addFolder), detail: T.text(.addFolderDetail), symbol: "folder.badge.plus",
+                             kind: .action(destructive: false) { [weak self] in self?.pickGamesFolder() }))
+        return rows
+    }
+
     /// From the controls or the advanced page back to the game's settings, on the row that opened it.
     func backToGameSettings() {
         let opener = overlay == .advanced ? "advanced" : "controls"
@@ -518,14 +530,15 @@ extension AppModel {
         panelInRows = true
     }
 
-    func pickGamesFolder() {
+    /// Picks a games folder: added to the list, or as the first one (`first`, the first-run setup).
+    func pickGamesFolder(first: Bool = false) {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
         panel.prompt = T.text(.pickFolder)
-        if let root { panel.directoryURL = root }
-        if panel.runModal() == .OK, let url = panel.url { chooseFolder(url) }
+        if let root = libraryRoots.first { panel.directoryURL = root }
+        if panel.runModal() == .OK, let url = panel.url { chooseFolder(url, first: first) }
     }
 
     func chooseBackdrop(_ kind: Preferences.Backdrop) {
