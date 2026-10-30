@@ -671,6 +671,18 @@ static void CheckSavedDirectMemorySurvivesCachePressure() {
 #endif
 }
 
+static void CheckAllocateMainDirectMemory() {
+    constexpr std::size_t page = 0x4000;
+    std::int64_t physical = -1;
+    Require(sceKernelAllocateMainDirectMemory(page * 2, page * 2, 3, &physical) == 0);
+    Require(physical >= 0 && physical % static_cast<std::int64_t>(page * 2) == 0 && static_cast<std::size_t>(physical) + page * 2 <= sceKernelGetDirectMemorySize());
+    int type = -1;
+    std::int64_t start = -1;
+    std::int64_t end = -1;
+    Require(sceKernelGetDirectMemoryType(physical, &type, &start, &end) == 0 && type == 3 && start == physical && end == physical + static_cast<std::int64_t>(page * 2));
+    Require(sceKernelReleaseDirectMemory(physical, page * 2) == 0);
+}
+
 static void CheckReusedDirectMemorySections() {
 #ifdef _WIN32
     constexpr std::size_t page = 0x4000;
@@ -1874,6 +1886,31 @@ static void CheckHeapAlignment() {
         for (std::size_t at = 0; at < bytes; ++at) Require(pointer[at] == static_cast<unsigned char>(index & 0xffu));
         GuestHeap::GuestHeapFree_nid_postfix(pointer);
     }
+}
+
+static void CheckHeapReallocWithinTheBlock() {
+    auto* pointer = static_cast<unsigned char*>(GuestHeap::GuestHeapAllocate_nid_postfix(1000));
+    std::memset(pointer, 0x6b, 1000);
+    auto* shrunk = static_cast<unsigned char*>(GuestHeap::GuestHeapReallocate_nid_postfix(pointer, 920));
+    Require(shrunk == pointer && GuestHeap::GuestHeapUsableSize_nid_postfix(shrunk) == 920);
+    for (std::size_t at = 0; at < 920; ++at) Require(shrunk[at] == 0x6b);
+    auto* regrown = static_cast<unsigned char*>(GuestHeap::GuestHeapReallocate_nid_postfix(shrunk, 1000));
+    Require(regrown == pointer && GuestHeap::GuestHeapUsableSize_nid_postfix(regrown) == 1000);
+    auto* aligned = static_cast<unsigned char*>(GuestHeap::GuestHeapRealign_nid_postfix(regrown, 920, 16));
+    Require(aligned == pointer && GuestHeap::GuestHeapUsableSize_nid_postfix(aligned) == 920);
+    auto* smaller = static_cast<unsigned char*>(GuestHeap::GuestHeapReallocate_nid_postfix(aligned, 40));
+    Require(smaller != pointer && GuestHeap::GuestHeapUsableSize_nid_postfix(smaller) == 40);
+    for (std::size_t at = 0; at < 40; ++at) Require(smaller[at] == 0x6b);
+    auto* moved = static_cast<unsigned char*>(GuestHeap::GuestHeapReallocate_nid_postfix(smaller, std::size_t{1} << 20u));
+    Require(moved != nullptr && GuestHeap::GuestHeapUsableSize_nid_postfix(moved) == std::size_t{1} << 20u);
+    for (std::size_t at = 0; at < 40; ++at) Require(moved[at] == 0x6b);
+    std::memset(moved, 0x2c, std::size_t{1} << 20u);
+    auto* big = static_cast<unsigned char*>(GuestHeap::GuestHeapReallocate_nid_postfix(moved, (std::size_t{1} << 20u) + 1000));
+    Require(big == moved && GuestHeap::GuestHeapUsableSize_nid_postfix(big) == (std::size_t{1} << 20u) + 1000);
+    auto* shrunk4k = static_cast<unsigned char*>(GuestHeap::GuestHeapReallocate_nid_postfix(big, 4096));
+    Require(shrunk4k != big && GuestHeap::GuestHeapUsableSize_nid_postfix(shrunk4k) == 4096);
+    for (std::size_t at = 0; at < 4096; ++at) Require(shrunk4k[at] == 0x2c);
+    GuestHeap::GuestHeapFree_nid_postfix(shrunk4k);
 }
 
 static void CheckHeapAfterMappingReuse() {
@@ -3737,6 +3774,7 @@ int main(int argc, char** argv) {
     CheckSparseDirectMemoryBacking();
     CheckSavedDirectMemorySurvivesCachePressure();
     CheckReusedDirectMemorySections();
+    CheckAllocateMainDirectMemory();
     CheckReleaseDirectMemoryClearsMappings();
     CheckReleaseDirectMemoryRejectsInvalidRanges();
     CheckFixedMappingReplacesPartialOverlap();
@@ -3761,6 +3799,7 @@ int main(int argc, char** argv) {
     CheckDirectMemoryQuery();
     CheckMtypeprotect();
     CheckHeapAlignment();
+    CheckHeapReallocWithinTheBlock();
     CheckHeapAfterMappingReuse();
     // macOS reserves no guest arena, so the arena placement checks do not apply there.
 #ifndef __APPLE__

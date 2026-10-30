@@ -16,6 +16,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
+#include "prx/libScePad/include/PadRumbleIntensity.hpp"
 #include "prx/libSceUserService/UserService.hpp"
 #include "prx/libc/include/General.hpp"
 #include <chrono>
@@ -83,11 +84,13 @@ std::uint32_t ScriptedButtons() {
 
 }
 #include "prx/libSceIme/include/ImeInput.hpp"
+#include "prx/libSceIme/include/ModalDialog.hpp"
 
 PadInput::PadInput() : PadInput(Pad::LoadInputLayouts()) {
 }
 
 PadInput::PadInput(Pad::InputLayouts layouts) : keyboardMouse(std::move(layouts)) {
+    static_cast<void>(Pad::RumblePercent());
     mouseLookArmed = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
     APS5_LOG_OUT("[input] layout %s (F8 switches)", mouseLookArmed ? "Shooter" : "Classic");
     for (auto& channel : RemotePad::OpenAllFromEnvironment()) remotes.push_back(Remote{std::move(channel)});
@@ -267,8 +270,11 @@ void PadInput::applyOutput(Controller& pad, const PadOutputState& outputState, i
     const bool isPs5 = SDL_GameControllerGetType(controller) == SDL_CONTROLLER_TYPE_PS5;
     const auto large = std::max(outputState.vibrationLarge, outputState.audioVibrationLarge);
     const auto small = std::max(outputState.vibrationSmall, outputState.audioVibrationSmall);
-    const bool rumbling = large != 0 || small != 0;
-    const bool triggerRumble = outputState.trigger[0].fallback != 0 || outputState.trigger[1].fallback != 0;
+    const unsigned rumblePercent = Pad::RumblePercent();
+    const auto motors = Pad::MakeRumbleCommand(large, small, rumblePercent, 2000);
+    const auto triggers = Pad::MakeRumbleCommand(outputState.trigger[0].fallback, outputState.trigger[1].fallback, rumblePercent, 2000);
+    const bool rumbling = motors.Active();
+    const bool triggerRumble = triggers.Active();
     if (SDL_GameControllerHasLED(controller) == SDL_TRUE) {
         const LightBarPacer::Color color = outputState.lightBarValid
             ? LightBarPacer::Color{outputState.lightBar[0], outputState.lightBar[1], outputState.lightBar[2]}
@@ -281,8 +287,7 @@ void PadInput::applyOutput(Controller& pad, const PadOutputState& outputState, i
     }
     pad.outputPending = false;
     pad.nextRumbleRefresh = now + std::chrono::milliseconds(700);
-    constexpr Uint32 rumbleMs = 2000;
-    SDL_GameControllerRumble(controller, static_cast<Uint16>(large * 257), static_cast<Uint16>(small * 257), rumbling ? rumbleMs : 0);
+    SDL_GameControllerRumble(controller, motors.low, motors.high, motors.durationMs);
     if (outputState.triggerTouched) {
         if (isPs5) {
             TriggerEffectCache::Effect effect{};
@@ -293,7 +298,7 @@ void PadInput::applyOutput(Controller& pad, const PadOutputState& outputState, i
                 pad.triggerEffect.Result(effect, SDL_GameControllerSendEffect(controller, effect.data(), static_cast<int>(effect.size())) == 0);
             }
         } else if (SDL_GameControllerHasRumbleTriggers(controller) == SDL_TRUE) {
-            SDL_GameControllerRumbleTriggers(controller, static_cast<Uint16>(outputState.trigger[0].fallback * 257), static_cast<Uint16>(outputState.trigger[1].fallback * 257), triggerRumble ? rumbleMs : 0);
+            SDL_GameControllerRumbleTriggers(controller, triggers.low, triggers.high, triggers.durationMs);
         }
     }
 }
@@ -409,6 +414,7 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
         event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP;
     if (!input || ignoreInput) return;
     if (event.type == SDL_KEYDOWN && ImeCapturesKeyboard_nid_postfix()) return;
+    if (event.type != SDL_KEYUP && event.type != SDL_MOUSEBUTTONUP && ModalDialogCapturesInput_nid_postfix()) return;
     keyboardMouse.SetTitleReadsMouse(MouseIsOpen_nid_no_patch());
     if (mouseLookArmed && (event.type == SDL_KEYDOWN || event.type == SDL_MOUSEBUTTONDOWN) && !keyboardMouse.MouseMode() && !MouseIsOpen_nid_no_patch()) {
         mouseLookArmed = false;
@@ -565,8 +571,10 @@ void PadInput::Update(const DisplayWindow& window) {
 // the mouse, the launcher's presses and APS5_PAD_SCRIPT, and published even with no device.
 PadInputState PadInput::handOff(int slot, PadInputState state) {
     auto& held = heldThroughCapture[static_cast<std::size_t>(slot)];
-    if (ImeCapturesPad_nid_postfix()) {
-        if (slot == 0) ImePublishPad_nid_postfix({state.buttons, state.sticks[0], state.sticks[1], state.analogButtonsL2});
+    const bool imeCaptures = ImeCapturesPad_nid_postfix();
+    if (imeCaptures || ModalDialogCapturesInput_nid_postfix()) {
+        if (slot == 0 && imeCaptures) ImePublishPad_nid_postfix({state.buttons, state.sticks[0], state.sticks[1], state.analogButtonsL2});
+        else if (slot == 0) ModalDialogPublishPad_nid_postfix({state.buttons, state.sticks[0], state.sticks[1], state.analogButtonsL2});
         held = state.buttons;
         PadInputState neutral;
         neutral.hasMotion = false;

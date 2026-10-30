@@ -20,6 +20,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/SandboxCertificates.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/File/src/Stdio.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/../libc/src/Rename.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Semaphore/src/Ksem.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Semaphore/src/Semaphore.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/SyncOnAddress/src/SyncOnAddress.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/DirectMemory/Export.cpp
@@ -70,6 +71,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Process.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Sandbox.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/HostCpu.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/System/src/MimallocMacOs.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SystemConfiguration.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Login.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Getlogin.cpp
@@ -141,7 +143,7 @@ if(BUILD_TESTING)
     set_target_properties(guest_exec_host PROPERTIES PREFIX "" SUFFIX ".prx" BUILD_RPATH "$ORIGIN")
     configure_windows_unwind(guest_exec_host)
     find_package(Python3 COMPONENTS Interpreter QUIET)
-    if(Python3_FOUND)
+    if(Python3_FOUND AND ANYPS5_RELINKER_CLI)
         add_test(NAME exec_arguments COMMAND ${Python3_EXECUTABLE}
             ${CMAKE_SOURCE_DIR}/core/relinker/relinker/tests/test_exec_arguments.py
             $<TARGET_FILE:relinker> $<TARGET_FILE:guest_exec_host>
@@ -241,9 +243,11 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME guest_process_time_tsc COMMAND guest_process_time_tests tsc)
     add_test(NAME guest_process_time_tsc_scaled COMMAND guest_process_time_tests tsc)
-    set_tests_properties(guest_process_time_tsc_scaled PROPERTIES ENVIRONMENT "APS5_TIME_SCALE=0.5")
+    add_test(NAME guest_process_time_rdtsc COMMAND guest_process_time_tests rdtsc)
+    add_test(NAME guest_process_time_rdtsc_scaled COMMAND guest_process_time_tests rdtsc)
+    set_tests_properties(guest_process_time_tsc_scaled guest_process_time_rdtsc_scaled PROPERTIES ENVIRONMENT "APS5_TIME_SCALE=0.5")
     if(WIN32)
-        set_tests_properties(guest_process_time_tsc guest_process_time_tsc_scaled PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_process_time_tsc guest_process_time_tsc_scaled guest_process_time_rdtsc guest_process_time_rdtsc_scaled PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_process_arguments_tests ${LIBS_INCLUDE_DIR}/tests/GuestProcessArguments.cpp)
@@ -256,7 +260,7 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     find_package(Python3 QUIET COMPONENTS Interpreter)
-    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND Python3_Interpreter_FOUND)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND Python3_Interpreter_FOUND AND ANYPS5_RELINKER_CLI)
         add_test_executable(guest_runtime_lifecycle_tests ${LIBS_INCLUDE_DIR}/tests/GuestRuntimeLifecycle.cpp)
         target_include_directories(guest_runtime_lifecycle_tests PRIVATE ${LIBS_INCLUDE_DIR})
         target_link_libraries(guest_runtime_lifecycle_tests PRIVATE libkernel libc ${CMAKE_DL_LIBS})
@@ -593,6 +597,13 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_kernel_is_stack PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    if(APPLE)
+        add_test_executable(guest_main_stack_move_tests ${LIBS_INCLUDE_DIR}/tests/GuestMainStackMove.cpp)
+        target_include_directories(guest_main_stack_move_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_main_stack_move_tests PRIVATE libkernel libc)
+        add_test(NAME guest_main_stack_move COMMAND guest_main_stack_move_tests)
+        set_tests_properties(guest_main_stack_move PROPERTIES TIMEOUT 20)
     endif()
     add_test_executable(guest_app_icon_tests ${LIBS_INCLUDE_DIR}/tests/GuestAppIcon.cpp)
     target_include_directories(guest_app_icon_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -1553,6 +1564,13 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
         set_tests_properties(guest_shm_open PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+        add_test_executable(guest_named_shm_windows_mapping_tests ${LIBS_INCLUDE_DIR}/tests/GuestNamedShmWindowsMapping.cpp)
+        target_include_directories(guest_named_shm_windows_mapping_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_named_shm_windows_mapping_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_named_shm_windows_mapping_tests)
+        add_test(NAME guest_named_shm_windows_mapping COMMAND guest_named_shm_windows_mapping_tests)
+        set_tests_properties(guest_named_shm_windows_mapping PROPERTIES TIMEOUT 20 ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_jit_shared_memory_tests ${LIBS_INCLUDE_DIR}/tests/GuestJitSharedMemory.cpp)
     target_include_directories(guest_jit_shared_memory_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -1581,6 +1599,18 @@ if(BUILD_TESTING)
     if(WIN32)
         set_tests_properties(guest_system_configuration PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    if(APPLE AND TARGET mimalloc)
+        add_test_executable(mimalloc_restart_tests ${LIBS_INCLUDE_DIR}/tests/MimallocRestart.cpp)
+        target_link_libraries(mimalloc_restart_tests PRIVATE libkernel libc)
+        add_custom_command(TARGET mimalloc_restart_tests POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:mimalloc> $<TARGET_FILE_DIR:libkernel>/libmimalloc.dylib)
+        add_test(NAME mimalloc_restart_off COMMAND mimalloc_restart_tests off)
+        set_tests_properties(mimalloc_restart_off PROPERTIES ENVIRONMENT_MODIFICATION "APS5_MIMALLOC=unset:")
+        add_test(NAME mimalloc_restart_on COMMAND mimalloc_restart_tests on)
+        set_tests_properties(mimalloc_restart_on PROPERTIES ENVIRONMENT "APS5_MIMALLOC=1")
+        add_test(NAME mimalloc_restart_once COMMAND mimalloc_restart_tests once)
+        set_tests_properties(mimalloc_restart_once PROPERTIES ENVIRONMENT "APS5_MIMALLOC=1;APS5_MIMALLOC_RESTARTED=1")
     endif()
     add_test_executable(guest_software_version_tests ${LIBS_INCLUDE_DIR}/tests/GuestSoftwareVersion.cpp)
     target_include_directories(guest_software_version_tests PRIVATE ${LIBS_INCLUDE_DIR})
@@ -1774,9 +1804,11 @@ if(BUILD_TESTING)
     configure_windows_unwind(guest_kqueue_tests)
     add_test(NAME guest_kqueue COMMAND guest_kqueue_tests)
     set_tests_properties(guest_kqueue PROPERTIES TIMEOUT 20)
+    add_test(NAME guest_kqueue_cleared_race COMMAND guest_kqueue_tests cleared-race)
+    set_tests_properties(guest_kqueue_cleared_race PROPERTIES TIMEOUT 30)
     if(WIN32)
         target_link_libraries(guest_kqueue_tests PRIVATE advapi32)
-        set_tests_properties(guest_kqueue PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_kqueue guest_kqueue_cleared_race PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_socket_descriptors_tests ${LIBS_INCLUDE_DIR}/tests/GuestSocketDescriptors.cpp)
@@ -2280,7 +2312,7 @@ if(BUILD_TESTING)
     target_include_directories(guest_timed_join_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_timed_join_tests PRIVATE libkernel libc ${CMAKE_DL_LIBS})
     configure_windows_unwind(guest_timed_join_tests)
-    if(WIN32 AND Python3_Interpreter_FOUND)
+    if(WIN32 AND Python3_Interpreter_FOUND AND ANYPS5_RELINKER_CLI)
         foreach(joinProvider IN ITEMS libkernel_sys libkernel_web)
             add_test(NAME guest_timed_join_import_${joinProvider} COMMAND ${Python3_EXECUTABLE}
                 ${LIBS_INCLUDE_DIR}/tests/test_windows_timed_join_imports.py $<TARGET_FILE:relinker> ${PATCHED_DIR}

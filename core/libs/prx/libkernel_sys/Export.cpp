@@ -751,6 +751,26 @@ int APS5_VABI kldunload_nid_postfix(int fileid) {
     return static_cast<int>(Fail(GuestEperm));
 }
 
+int APS5_VABI kldstat_nid_postfix(int fileid, void* stat) {
+    struct FileStatus {
+        std::int32_t version;
+        char name[GuestPathMax];
+        std::int32_t refs;
+        std::int32_t id;
+        std::uint64_t address;
+        std::uint64_t size;
+        char pathname[GuestPathMax];
+    };
+    constexpr auto Version1 = static_cast<std::int32_t>(offsetof(FileStatus, pathname));
+    constexpr auto Version2 = static_cast<std::int32_t>(sizeof(FileStatus));
+    static_assert(Version1 == 1056 && Version2 == 2080);
+    std::int32_t version = 0;
+    if (!GuestCopyIn_nid_no_patch(&version, stat, sizeof(version))) return static_cast<int>(Fail(GuestEfault));
+    if (version != Version1 && version != Version2) return static_cast<int>(Fail(GuestEinval));
+    (void)fileid;
+    return static_cast<int>(Fail(GuestEnoent));
+}
+
 int APS5_VABI kldsym_nid_postfix(int fileid, int cmd, void* data) {
     struct SymbolLookup {
         std::int32_t version;
@@ -966,9 +986,8 @@ int APS5_VABI sched_rr_get_interval_nid_postfix(int pid, KernelTimespec* interva
     constexpr int GuestEsrch = 3;
     const int self = getpid_nid_postfix();
     if (pid != 0 && pid != self) return static_cast<int>(Fail(GuestEsrch));
-    if (interval == nullptr) return static_cast<int>(Fail(GuestEfault));
-    interval->tv_sec = 0;
-    interval->tv_nsec = 94000000;
+    const KernelTimespec quantum{0, 94000000};
+    if (interval == nullptr || !GuestCopyOut_nid_no_patch(interval, &quantum, sizeof(quantum))) return static_cast<int>(Fail(GuestEfault));
     return 0;
 }
 

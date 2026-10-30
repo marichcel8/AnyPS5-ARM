@@ -39,6 +39,7 @@
 #include <setjmp.h>
 #include <sys/mman.h>
 #include <type_traits>
+#include <sys/ucontext.h>
 #include <unistd.h>
 #include <unordered_map>
 #endif
@@ -745,6 +746,24 @@ private:
         _available = true;
     }
 
+    static bool isWriteFault(const siginfo_t* info, void* context) {
+        if (info->si_code <= 0 || info->si_code >= SI_USER || context == nullptr) return false;
+        const auto state = static_cast<ucontext_t*>(context)->uc_mcontext;
+        if (state == nullptr) return false;
+#if defined(__x86_64__)
+        constexpr unsigned PageFault = 14;
+        constexpr unsigned WriteAccess = 1u << 1;
+        return state->__es.__trapno == PageFault && (state->__es.__err & WriteAccess) != 0;
+#elif defined(__aarch64__)
+        constexpr unsigned DataAbort = 0x24;
+        constexpr unsigned ExceptionClassShift = 26;
+        constexpr unsigned WriteAccess = 1u << 6;
+        return (state->__es.__esr >> ExceptionClassShift) == DataAbort && (state->__es.__esr & WriteAccess) != 0;
+#else
+        return false;
+#endif
+    }
+
     static void fault(int signal, siginfo_t* info, void* context) {
         if (t_reading != nullptr) {
             sigset_t faults;
@@ -755,7 +774,7 @@ private:
             siglongjmp(*t_reading, 1);
         }
         auto& watch = Get();
-        if (watch.record(reinterpret_cast<std::uintptr_t>(info->si_addr))) return;
+        if (isWriteFault(info, context) && watch.record(reinterpret_cast<std::uintptr_t>(info->si_addr))) return;
         const auto& previous = signal == SIGBUS ? watch._previousBus : watch._previousSegv;
         if ((previous.sa_flags & SA_SIGINFO) != 0 && previous.sa_sigaction != nullptr) {
             previous.sa_sigaction(signal, info, context);

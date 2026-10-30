@@ -900,7 +900,7 @@ uint64_t APS5_VABI sceKernelReadTsc(void) {
     return origin + static_cast<std::uint64_t>(static_cast<double>(ReadTimestamp() - origin) * TimeScale());
 }
 
-uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
+std::uint64_t APS5_VABI HostTscFrequency_nid_no_patch() {
     static const std::uint64_t frequency = [] {
         const CurrentCpuPin pin;
         const std::uint64_t startNanos = RawMonotonicNanos();
@@ -910,6 +910,11 @@ uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
         const std::uint64_t elapsedTicks = ReadTimestamp() - startTicks;
         return static_cast<std::uint64_t>(static_cast<long double>(elapsedTicks) * 1000000000.0L / static_cast<long double>(elapsedNanos));
     }();
+    return frequency;
+}
+
+uint64_t APS5_VABI sceKernelGetTscFrequency(void) {
+    static const std::uint64_t frequency = static_cast<std::uint64_t>(static_cast<double>(HostTscFrequency_nid_no_patch()) / TimeScale());
     return frequency;
 }
 
