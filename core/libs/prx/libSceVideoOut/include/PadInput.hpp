@@ -7,12 +7,14 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/Pad.hpp"
 #include "prx/libSceVideoOut/include/PadOutputPacing.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PadStatus.hpp"
 #include "prx/libSceVideoOut/include/GyroAim.hpp"
 #include "prx/libSceVideoOut/include/RemotePad.hpp"
 #include <array>
 #include <chrono>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 #include "prx/libSceVideoOut/include/Telemetry.hpp"
 
@@ -27,6 +29,8 @@ class PadInput {
 public:
     PadInput();
     ~PadInput();
+    PadInput(const PadInput&) = delete;
+    PadInput& operator=(const PadInput&) = delete;
     void HandleEvent(const SDL_Event& event, DisplayWindow& window);
     void Update(const DisplayWindow& window);
     bool MouseModeEnabled() const { return keyboardMouse.MouseMode(); }
@@ -44,6 +48,8 @@ private:
         TriggerEffectCache triggerEffect;
         // Helps the first player (assist) rather than holding a seat.
         bool helping = false;
+        AgcDriver::PadKind kind = AgcDriver::PadKind::Unknown;
+        std::string name;
         // What the game reads: the state with gyro aiming's turn on the right stick.
         PadInputState aimed{};
         std::optional<GyroAim::Aim> aim;
@@ -79,6 +85,8 @@ private:
     void applyOutput();
     void applyOutput(Controller& controller, const PadOutputState& output, int player);
     void enableSensors(Controller& controller, bool wanted);
+    AgcDriver::PadStatusSnapshot statusSnapshot() const;
+    void reportStatus();
     void updateRemotes();
     void answer(Remote& remote, int player);
     void leave(std::uint32_t device);
@@ -107,6 +115,8 @@ private:
     // Gyro aiming for every device (ANYPS5_GYRO_AIM), nil while off.
     std::optional<GyroAim::Settings> gyro;
     VideoOutTelemetry::PadChangeFilter telemetryFilter;
+    AgcDriver::PadStatusProvider statusProvider;
+    bool padCaptured = false;
 };
 
 #endif

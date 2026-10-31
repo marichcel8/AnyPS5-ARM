@@ -292,6 +292,7 @@ Pad::InputRequests Pad::KeyboardMouse::HandleEvent(const SDL_Event& event, Clock
         if (binding.control == InputControl::ToggleFullscreen && keyboard && down && !pressed[index]) requests.toggleFullscreen = true;
         if (binding.control == InputControl::TogglePerformanceOverlay && keyboard && down && !pressed[index]) requests.togglePerformanceOverlay = true;
         if (binding.control == InputControl::Screenshot && keyboard && down && !pressed[index]) requests.screenshot = true;
+        if (binding.control == InputControl::ShowPadStatus && keyboard && down && !pressed[index]) requests.showPadStatus = true;
         if (binding.control == InputControl::ToggleMouse && down && !pressed[index]) requests.toggleMouse = true;
         if (binding.control == InputControl::SwitchLayout && keyboard && down && !pressed[index]) requests.switchLayout = true;
         pressed[index] = down;
@@ -334,6 +335,7 @@ PadInputState Pad::KeyboardMouse::Compose(const PadInputState& controller) const
             case InputControl::ToggleFullscreen: break;
             case InputControl::TogglePerformanceOverlay: break;
             case InputControl::Screenshot: break;
+            case InputControl::ShowPadStatus: break;
         }
     }
     const auto input = stickInput();

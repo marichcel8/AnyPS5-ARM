@@ -10,10 +10,12 @@
 
 #include "SDL.h"
 #include "prx/libSceVideoOut/include/PadInput.hpp"
+#include "prx/libSceVideoOut/include/PadStatusSdl.hpp"
 #include "prx/libSceMouse/include/MouseState.hpp"
 #include "prx/libSceVideoOut/include/DisplayWindow.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Presentation.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PadStatusOverlay.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libScePad/include/PadRumbleIntensity.hpp"
@@ -89,7 +91,9 @@ std::uint32_t ScriptedButtons() {
 PadInput::PadInput() : PadInput(Pad::LoadInputLayouts()) {
 }
 
-PadInput::PadInput(Pad::InputLayouts layouts) : keyboardMouse(std::move(layouts)) {
+static_assert(PAD_MAX_CONTROLLERS == AgcDriver::PadStatusSlots, "the pad status panel lists one line per controller slot");
+
+PadInput::PadInput(Pad::InputLayouts layouts) : keyboardMouse(std::move(layouts)), statusProvider{[this] { return statusSnapshot(); }} {
     static_cast<void>(Pad::RumblePercent());
     mouseLookArmed = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
     APS5_LOG_OUT("[input] layout %s (F8 switches)", mouseLookArmed ? "Shooter" : "Classic");
@@ -139,6 +143,8 @@ void PadInput::openController(int deviceIndex) {
     Controller controller;
     controller.handle = handle;
     controller.id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(handle));
+    controller.kind = PadKindFromSdl(SDL_GameControllerGetType(handle));
+    controller.name = name != nullptr ? name : "";
     controllers.push_back(std::move(controller));
     enableSensors(controllers.back(), true);
 }
@@ -209,6 +215,24 @@ int PadInput::playerOf(const Controller& controller) const {
 
 // Controllers help the first player (AssistControllers) or are players of their own again: one
 // that holds player 2 to 4 gives it up to help, and helpers take a seat on their next press.
+AgcDriver::PadStatusSnapshot PadInput::statusSnapshot() const {
+    AgcDriver::PadStatusSnapshot snapshot;
+    for (const auto& controller : controllers) {
+        const int player = playerOf(controller);
+        if (player < 0 || player >= PAD_MAX_CONTROLLERS) continue;
+        auto& status = snapshot.slots[static_cast<std::size_t>(player)];
+        status.connected = true;
+        status.kind = controller.kind;
+        status.name = controller.name;
+        status.power = PadPowerFromSdl(SDL_JoystickCurrentPowerLevel(SDL_GameControllerGetJoystick(controller.handle)));
+    }
+    return snapshot;
+}
+
+void PadInput::reportStatus() {
+    AgcDriverPadStatusPoll_nid_postfix(&statusProvider);
+}
+
 void PadInput::setControllersHelp(bool help) {
     if (help == controllersHelp) return;
     controllersHelp = help;
@@ -424,6 +448,10 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
     if (requests.toggleFullscreen && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) window.ToggleFullscreen();
     if (requests.togglePerformanceOverlay && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) AgcDriverTogglePerformanceOverlay_nid_postfix();
     if (requests.screenshot && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) AgcDriverRequestScreenshot_nid_postfix();
+    if (requests.showPadStatus && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) {
+        AgcDriverPadStatusShow_nid_postfix();
+        reportStatus();
+    }
     if (requests.toggleMouse) setMouseMode(!keyboardMouse.MouseMode());
     if (requests.switchLayout && keyboardMouse.SwitchLayout()) {
         const bool shooter = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
@@ -533,6 +561,7 @@ void PadInput::type(const RemotePad::TypedText& text) {
 
 void PadInput::Update(const DisplayWindow& window) {
     if (!controllers.empty()) SDL_GameControllerUpdate();
+    reportStatus();
     applyOutput();
     updatePrompt(std::chrono::steady_clock::now());
     std::vector<PadInputState> remotesBefore;
@@ -564,7 +593,9 @@ void PadInput::Update(const DisplayWindow& window) {
         return;
     }
     const bool changed = keyboardMouse.Advance(std::chrono::steady_clock::now());
-    if (!controllers.empty() || keyboardMouse.MouseMode() || changed) publish(window.FrameNumber());
+    const bool captured = ImeCapturesPad_nid_postfix() || ModalDialogCapturesInput_nid_postfix();
+    const bool captureChanged = std::exchange(padCaptured, captured) != captured;
+    if (!controllers.empty() || keyboardMouse.MouseMode() || changed || captured || captureChanged) publish(window.FrameNumber());
 }
 
 // Every player's pad from the device seated there; the first player's also from the keyboard,
@@ -573,6 +604,7 @@ PadInputState PadInput::handOff(int slot, PadInputState state) {
     auto& held = heldThroughCapture[static_cast<std::size_t>(slot)];
     const bool imeCaptures = ImeCapturesPad_nid_postfix();
     if (imeCaptures || ModalDialogCapturesInput_nid_postfix()) {
+        if (slot == 0) PadApplyInjectedInput_nid_postfix(&state);
         if (slot == 0 && imeCaptures) ImePublishPad_nid_postfix({state.buttons, state.sticks[0], state.sticks[1], state.analogButtonsL2});
         else if (slot == 0) ModalDialogPublishPad_nid_postfix({state.buttons, state.sticks[0], state.sticks[1], state.analogButtonsL2});
         held = state.buttons;
