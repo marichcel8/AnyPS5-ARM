@@ -25,9 +25,11 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <filesystem>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <stop_token>
 #include <system_error>
@@ -43,6 +45,20 @@ namespace {
 std::jthread processSamplerThread;
 std::jthread workerSamplerThread;
 std::jthread committerSamplerThread;
+
+std::optional<std::string> ConfiguredPath(const wchar_t* value) {
+    if (value == nullptr) return std::nullopt;
+    const auto text = std::filesystem::path(value).u8string();
+    return std::string(reinterpret_cast<const char*>(text.data()), text.size());
+}
+
+std::filesystem::path NativePath(const std::string& path) {
+    return std::filesystem::path(reinterpret_cast<const char8_t*>(path.c_str()));
+}
+
+std::FILE* OpenForWriting(const std::string& path) {
+    return _wfopen(NativePath(path).c_str(), L"w");
+}
 
 // Debug aid: APS5_SAMPLE_WORKER=<file> samples the calling thread every millisecond and, every 20 s,
 // writes "module+offset self inclusive" lines to <file> for offline symbolization with nm.
@@ -187,7 +203,7 @@ struct Sampler {
 
     void write() {
         std::lock_guard lock(mutex);
-        std::FILE* file = std::fopen(path.c_str(), "w");
+        std::FILE* file = OpenForWriting(path);
         if (file == nullptr) return;
         std::fprintf(file, "# %llu samples\n", static_cast<unsigned long long>(samples));
         std::map<std::uint64_t, std::string> loaded;
@@ -213,7 +229,7 @@ struct Sampler {
         std::map<std::uint64_t, std::string> names;
         std::map<std::uint64_t, std::string> loaded;
         for (const auto& [address, count] : counts) names.emplace(address, frameName(address, loaded));
-        std::FILE* file = std::fopen(temporary.c_str(), "w");
+        std::FILE* file = OpenForWriting(temporary);
         if (file == nullptr) return;
         LARGE_INTEGER frequency{};
         QueryPerformanceFrequency(&frequency);
@@ -224,7 +240,7 @@ struct Sampler {
         const auto text = stacks.Format([&](std::uint64_t address) { return names.at(address); });
         const bool written = std::fwrite(text.data(), 1, text.size(), file) == text.size();
         if (std::fclose(file) != 0 || !written) return;
-        MoveFileExA(temporary.c_str(), collapsed.c_str(), MOVEFILE_REPLACE_EXISTING);
+        MoveFileExW(NativePath(temporary).c_str(), NativePath(collapsed).c_str(), MOVEFILE_REPLACE_EXISTING);
     }
 };
 
@@ -264,7 +280,7 @@ struct ProcessSampler {
     }
 
     void write() {
-        std::FILE* file = std::fopen(path.c_str(), "w");
+        std::FILE* file = OpenForWriting(path);
         if (file == nullptr) return;
         std::fprintf(file, "# %llu rounds\n", static_cast<unsigned long long>(rounds));
         std::map<std::uint64_t, std::string> loaded;
@@ -292,9 +308,9 @@ struct ProcessSampler {
 };
 
 void StartProcessSampler() {
-    const char* path = std::getenv("APS5_SAMPLE_THREADS");
-    if (path == nullptr) return;
-    processSamplerThread = std::jthread([path = std::string(path)](std::stop_token token) {
+    const auto path = ConfiguredPath(_wgetenv(L"APS5_SAMPLE_THREADS"));
+    if (!path) return;
+    processSamplerThread = std::jthread([path = *path](std::stop_token token) {
         auto sampler = std::make_unique<ProcessSampler>();
         sampler->path = path;
         sampler->self = GetCurrentThreadId();
@@ -311,10 +327,10 @@ void StartProcessSampler() {
     });
 }
 
-void StartCallingThreadSampler(const char* path, std::jthread& slot) {
-    if (path == nullptr) return;
+void StartCallingThreadSampler(const std::optional<std::string>& path, std::jthread& slot) {
+    if (!path) return;
     auto sampler = std::make_unique<Sampler>();
-    sampler->path = path;
+    sampler->path = *path;
     sampler->depth = Sampler::WorkerDepth;
     sampler->keepStacks = true;
     const auto* block = reinterpret_cast<const NT_TIB*>(NtCurrentTeb());
@@ -346,11 +362,11 @@ void StartWorkerSampler(std::uint32_t queue) {
         const char* value = std::getenv("APS5_SAMPLE_WORKER_QUEUE");
         return value != nullptr ? static_cast<std::uint32_t>(std::strtoul(value, nullptr, 0)) : 0u;
     }();
-    if (queue == sampledQueue) StartCallingThreadSampler(std::getenv("APS5_SAMPLE_WORKER"), workerSamplerThread);
+    if (queue == sampledQueue) StartCallingThreadSampler(ConfiguredPath(_wgetenv(L"APS5_SAMPLE_WORKER")), workerSamplerThread);
 }
 
 void StartCommitterSampler() {
-    StartCallingThreadSampler(std::getenv("APS5_SAMPLE_COMMITTER"), committerSamplerThread);
+    StartCallingThreadSampler(ConfiguredPath(_wgetenv(L"APS5_SAMPLE_COMMITTER")), committerSamplerThread);
 }
 
 void StopWorkerSampler() {
