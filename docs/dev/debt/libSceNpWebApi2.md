@@ -20,3 +20,14 @@
 ### Functional
 
 - [Requests through the online bridge](../../../core/libs/prx/libSceNpWebApi2/Export.cpp) (libSceNpWebApi2) - unmeasured on a console: with `ANYPS5_ONLINE` set ([online play](../ONLINE_PLAY.md)) `sceNpWebApi2SendRequest` passes the user context's user (-1 if unknown), group, path, method, up to 64 added headers and up to 8 MiB of body to the launcher and waits 30 s. A status returns 0 with `http_status` and `response_data_size` written; `error_object` is left untouched. Status 0, a timeout or no launcher return `UNAVAILABLE` as before. `sceNpWebApi2ReadData` returns the bytes copied, 0 at the end. Header lookups ignore case; a missing header is `UNAVAILABLE`, a buffer without room for the zero `INVALID_ARGUMENT`. `content_parameter` is not read and `sceNpWebApi2SetRequestTimeout` does not change the 30 s (layouts and units unknown). Push events are not passed
+
+### Additional callable exports
+
+- [Additional callable exports](../../../core/libs/prx/libSceNpWebApi2/Export.cpp) - 4 entries observed in the 3.20 export inventory and present in the later 13.60-labelled inventory are import-resolution declarations only. The later inventory label does not authenticate a retail firmware version. Parameter lists, return types and behavior are unverified; parameterless `int` declarations are placeholders, not verified ABI contracts. Every entry throws through `NotImplemented_nid_no_patch`. Unidentified names use literal NID aliases. No runtime functionality is implemented. Data exports require separate layout and ownership analysis. Identified candidate names match their NIDs in the [public symbol database](https://github.com/zecoxao/sce_symbols/blob/2883963a0a514ba6e77407a08ef4730a65e88254/aerolib.csv) or [supplemental catalog](https://github.com/claimore22/ps5rs/blob/2304be5131221bae0dac24b9767cabffda33f747/data/nids.csv).
+
+| Name | NID |
+| --- | --- |
+| `Unknown` | `4N85o28Ifbk` |
+| `Unknown` | `A9IoYzANK3M` |
+| `Unknown` | `lylvdXiq1UE` |
+| `Unknown` | `qaMcX2+6ZiA` |

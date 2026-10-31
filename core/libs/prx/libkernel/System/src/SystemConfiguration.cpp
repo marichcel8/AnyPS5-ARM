@@ -206,6 +206,15 @@ struct GuestKinfoProc {
 };
 static_assert(offsetof(GuestKinfoProc, pid) == 72 && offsetof(GuestKinfoProc, parentPid) == 76 && offsetof(GuestKinfoProc, flag) == 368 && offsetof(GuestKinfoProc, command) == 447 && sizeof(GuestKinfoProc) == 1088);
 
+GuestKinfoProc GuestProcessRecord() {
+    GuestKinfoProc process{};
+    process.structSize = sizeof(process);
+    process.pid = getpid_nid_postfix();
+    process.parentPid = getppid_nid_postfix();
+    std::memcpy(process.command, "eboot.bin", sizeof("eboot.bin"));
+    return process;
+}
+
 std::vector<GuestVmEntry> GuestVmEntries() {
     std::vector<GuestVmEntry> entries;
 #ifdef __APPLE__
@@ -463,6 +472,18 @@ int APS5_VABI sysctl_nid_postfix(const int* name, std::uint32_t nameLength, void
         static constexpr char path[] = "/app0/eboot.bin";
         return CopyOut(path, sizeof(path), oldValue, oldLength);
     }
+    if (nameLength >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 8) {
+        if (newValue != nullptr) {
+            *__error_nid_postfix() = 1;
+            return -1;
+        }
+        if (nameLength > 4) {
+            *__error_nid_postfix() = 22;
+            return -1;
+        }
+        const GuestKinfoProc process = GuestProcessRecord();
+        return CopyOut(&process, sizeof(process), oldValue, oldLength);
+    }
     if (nameLength >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 1) {
         if (newValue != nullptr) {
             *__error_nid_postfix() = 1;
@@ -476,11 +497,7 @@ int APS5_VABI sysctl_nid_postfix(const int* name, std::uint32_t nameLength, void
             *__error_nid_postfix() = 3;
             return -1;
         }
-        GuestKinfoProc process{};
-        process.structSize = sizeof(process);
-        process.pid = name[3];
-        process.parentPid = getppid_nid_postfix();
-        std::memcpy(process.command, "eboot.bin", sizeof("eboot.bin"));
+        const GuestKinfoProc process = GuestProcessRecord();
         return CopyOut(&process, sizeof(process), oldValue, oldLength);
     }
     if (nameLength >= 3 && name[0] == 1 && name[1] == 14 && name[2] == 35) {

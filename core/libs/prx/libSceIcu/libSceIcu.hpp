@@ -1,5 +1,6 @@
 #pragma once
 #include "Invariant.hpp"
+#include "Iterator.hpp"
 #include "Utf8.hpp"
 #include "Version.hpp"
 #include "ConverterCallbacks.hpp"
