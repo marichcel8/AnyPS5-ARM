@@ -1518,9 +1518,22 @@ final class AppModel: ObservableObject {
                     try? GameLog.writeUnlockLog(self.installLog[id] ?? [], failure: error.localizedDescription, titleID: game.titleID)
                 }
                 done(result)
+                // Ready without some of the dump's modules: one short sentence.
+                if case .success = result, let text = AppModel.leftOutText(game.name, installer.leftOut) {
+                    self.show(text, symbol: "exclamationmark.triangle.fill")
+                }
             }
         }
         return installer
+    }
+
+    /// What an unlock that left modules of the dump out says once the game is ready: one short
+    /// sentence, encrypted files first since dumping again fixes those. The files themselves are in
+    /// the unlock's log; a list of them here was too long to read before the notice went.
+    nonisolated static func leftOutText(_ name: String, _ leftOut: [LeftOutModule]) -> String? {
+        guard !leftOut.isEmpty else { return nil }
+        let encrypted = leftOut.contains { $0.reason == .encrypted }
+        return T.format(encrypted ? .unlockLeftOutEncrypted : .unlockLeftOutNotRelinked, name)
     }
 
     /// The update the Play prompt offers: unlock the game again, then start it.
@@ -2054,6 +2067,8 @@ final class AppModel: ObservableObject {
     /// NSWorkspace sends no termination notice for it: the process itself is watched.
     private func watchForExit(of pid: pid_t) {
         exitWatch?.cancel()
+        // A game that has already quit reports -1, and makeProcessSource traps on a negative pid.
+        guard pid > 0 else { return applicationEnded(pid) }
         let source = DispatchSource.makeProcessSource(identifier: pid, eventMask: .exit, queue: .main)
         source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.applicationEnded(pid) } }
         source.resume()
