@@ -57,7 +57,8 @@ constexpr auto actions = std::array{
     InputAction{"SwitchLayout", Pad::InputControl::SwitchLayout, Pad::PadButton::None},
     InputAction{"ToggleFullscreen", Pad::InputControl::ToggleFullscreen, Pad::PadButton::None},
     InputAction{"TogglePerformanceOverlay", Pad::InputControl::TogglePerformanceOverlay, Pad::PadButton::None},
-    InputAction{"Screenshot", Pad::InputControl::Screenshot, Pad::PadButton::None}
+    InputAction{"Screenshot", Pad::InputControl::Screenshot, Pad::PadButton::None},
+    InputAction{"ShowPadStatus", Pad::InputControl::ShowPadStatus, Pad::PadButton::None}
 };
 
 std::string upper(std::string_view value) {
@@ -124,6 +125,9 @@ Pad::InputBinding parseBinding(const InputAction& action, std::string_view sourc
         }
         if (action.control == Pad::InputControl::Screenshot) {
             throw std::runtime_error("Screenshot can only use a keyboard key");
+        }
+        if (action.control == Pad::InputControl::ShowPadStatus) {
+            throw std::runtime_error("ShowPadStatus can only use a keyboard key");
         }
         return {SDL_SCANCODE_UNKNOWN, parseMouseButton(value), action.control, action.button, 0};
     }
