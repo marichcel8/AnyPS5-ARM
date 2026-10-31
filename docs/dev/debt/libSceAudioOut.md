@@ -1,5 +1,45 @@
 # libSceAudioOut technical debt
 
+### Additional callable exports
+
+- [Additional callable exports](../../../core/libs/prx/libSceAudioOut/src/InventoryExports.cpp) - 33 import-resolution declarations throw through `NotImplemented_nid_no_patch`; prototypes and behavior are unverified. Both version-labelled images contain these NIDs in module `libSceAudioOut`: six under logical library `libSceAudioOut` and 27 under `libSceAudioOut2`. The labels do not independently authenticate firmware provenance; the NIDs are absent from the pinned public 3.20 catalogue. Identified names match their NIDs in the [public symbol database](https://github.com/zecoxao/sce_symbols/blob/2883963a0a514ba6e77407a08ef4730a65e88254/aerolib.csv) or [supplemental catalog](https://github.com/claimore22/ps5rs/blob/2304be5131221bae0dac24b9767cabffda33f747/data/nids.csv).
+
+| Name | NID |
+| --- | --- |
+| `Unknown` | `-3HTIXaIx7U` |
+| `Unknown` | `0Oz9yG27ovw` |
+| `Unknown` | `1pWftEwJg6w` |
+| `Unknown` | `4Ac+2ezx1lY` |
+| `Unknown` | `6hw5LpQh6-M` |
+| `Unknown` | `87IcZgIbuxQ` |
+| `Unknown` | `8qn2ceJ4HVg` |
+| `Unknown` | `96EqlBA6q4I` |
+| `Unknown` | `B88xqT6vI88` |
+| `Unknown` | `DEpjrJh-flc` |
+| `Unknown` | `GIcJie+rjvM` |
+| `Unknown` | `KeHpCnAvtGw` |
+| `Unknown` | `Oqn65W-w8bo` |
+| `Unknown` | `PNeVjMfwq1M` |
+| `Unknown` | `PSg2qlLNCqM` |
+| `Unknown` | `UAk5DtTuUMo` |
+| `Unknown` | `WKpJvbBdcbU` |
+| `Unknown` | `WOfIge9NmBA` |
+| `Unknown` | `YSm2BXd3gfE` |
+| `Unknown` | `Zk1Cn7Z2tVs` |
+| `Unknown` | `bd5H255vnsk` |
+| `Unknown` | `f3xQNbru2m8` |
+| `Unknown` | `g33sQzMRRmQ` |
+| `Unknown` | `gaUU6uC15vs` |
+| `Unknown` | `jEcHKuQ4k8I` |
+| `Unknown` | `lyHeaetMYXg` |
+| `Unknown` | `r5LqvBxfG+0` |
+| `Unknown` | `rSyeebu6wWI` |
+| `Unknown` | `rzjbvXzvDtE` |
+| `Unknown` | `spvw78DsDzU` |
+| `Unknown` | `tqTyWw6NgyU` |
+| `Unknown` | `tvPlXmc4MHs` |
+| `Unknown` | `yt9g5kdJy1o` |
+
 ### Silent stubs
 
 - [sceAudioOut2LoTerminate](../../../core/libs/prx/libSceAudioOut/src/AudioOut2Low.cpp) (libSceAudioOut) - returns 0, as the PS5 13.60 module (0x248d0) does whether or not the low-latency service runs. The module disconnects from the audio server and clears the service tables; here `sceAudioOut2LoInit` starts no service and open contexts and ports are left as they are

@@ -1,5 +1,25 @@
 # libScePad technical debt
 
+### Additional callable exports
+
+- [Additional callable exports](../../../core/libs/prx/libScePad/InventoryExports.cpp) - 13 entries present in both version-labelled images are import-resolution declarations only. Neither label independently authenticates retail firmware provenance. These NIDs are absent from the pinned public 3.20 catalogue. Parameter lists, return types and behavior are unverified; parameterless `int` declarations are placeholders, not verified ABI contracts. Every entry throws through `NotImplemented_nid_no_patch`. Unidentified names use literal NID aliases. No runtime functionality is implemented. Data exports require separate layout and ownership analysis. Identified candidate names match their NIDs in the [public symbol database](https://github.com/zecoxao/sce_symbols/blob/2883963a0a514ba6e77407a08ef4730a65e88254/aerolib.csv) or [supplemental catalog](https://github.com/claimore22/ps5rs/blob/2304be5131221bae0dac24b9767cabffda33f747/data/nids.csv).
+
+| Name | NID |
+| --- | --- |
+| `Unknown` | `1YXygubV1Gc` |
+| `Unknown` | `3LNwlXW4f54` |
+| `Unknown` | `7xA+hFtvBCA` |
+| `Unknown` | `KY0hSB+Uyfo` |
+| `Unknown` | `Ql4q5ePNaw0` |
+| `Unknown` | `UeUUvNOgXKU` |
+| `Unknown` | `XFqNcPu1meI` |
+| `Unknown` | `eqldkyw7GAo` |
+| `Unknown` | `ickjfjk9okM` |
+| `Unknown` | `qJgegDoE0g8` |
+| `Unknown` | `r2S7Nuicg8s` |
+| `Unknown` | `wMvV6XbeFd0` |
+| `Unknown` | `ybhL4IoyGZA` |
+
 ### Silent stubs
 
 - [scePadEnableExtensionPort](../../../core/libs/prx/libScePad/Export.cpp) returns success without changing extension-port state. The boolean argument is recovered; connected-device behavior is not modeled.

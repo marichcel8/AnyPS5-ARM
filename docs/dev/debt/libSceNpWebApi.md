@@ -1,5 +1,50 @@
 # libSceNpWebApi technical debt
 
+### Additional callable exports
+
+- [Additional callable exports](../../../core/libs/prx/libSceNpWebApi/InventoryExports.cpp) - 38 NIDs occur as functions under the same module and logical library in both version-labelled images. The labels do not independently authenticate retail firmware provenance; the NIDs are absent from the pinned public 3.20 catalogue. Names, prototypes and behavior are unverified. These import-resolution declarations throw through `NotImplemented_nid_no_patch` and implement no runtime functionality.
+
+| Name | NID |
+| --- | --- |
+| Unknown | `+aMuhoVidDY` |
+| Unknown | `0cCtt7Uv6rU` |
+| Unknown | `4yR2XRjuTRI` |
+| Unknown | `54n5gNkHtlM` |
+| Unknown | `B4OVXU6VY9o` |
+| Unknown | `BkxO0e2+ueg` |
+| Unknown | `Gm138-2DI6g` |
+| Unknown | `HgaTom-g+VQ` |
+| Unknown | `JKm18ddwAM8` |
+| Unknown | `JNiFPWtH-Hk` |
+| Unknown | `KEYeKen41pc` |
+| Unknown | `PCliRwT6ueA` |
+| Unknown | `PwJ4BO0uwR4` |
+| Unknown | `QGbJTngpl80` |
+| Unknown | `U2KAvj2rtSE` |
+| Unknown | `V6DhvHJCGfM` |
+| Unknown | `WBl0nAQLZjc` |
+| Unknown | `YZjQyCXoYxk` |
+| Unknown | `YfK56KsJN0M` |
+| Unknown | `a8OI5hE-DUQ` |
+| Unknown | `daA4FMfpA58` |
+| Unknown | `eJ1gJsUhQW4` |
+| Unknown | `fe1j0GOZ7-8` |
+| Unknown | `flWi3MA9OVo` |
+| Unknown | `fwS31KfUHoA` |
+| Unknown | `jhZyUt+lyVc` |
+| Unknown | `ldAEblBOOwk` |
+| Unknown | `lyhL-aTxj98` |
+| Unknown | `meMsH0c36rQ` |
+| Unknown | `nP9mHqC8v4M` |
+| Unknown | `nrDh9GesOyk` |
+| Unknown | `ojGP5vur+qM` |
+| Unknown | `ugei4b97OXE` |
+| Unknown | `vQgD7uDMKaA` |
+| Unknown | `vm9OVSS7E18` |
+| Unknown | `wNSQ60gepNA` |
+| Unknown | `wXXTksptCEo` |
+| Unknown | `zQE2rxZdLy8` |
+
 ### Unknown function info
 
 - [sceNpWebApiGetHttpStatusCode, sceNpWebApiReadData](../../../core/libs/prx/libSceNpWebApi/Export.cpp) - throw through `NotImplemented_nid_no_patch`; behaviour and the PS5 prototypes are unmeasured. The only source of the parameter lists is shadPS4's PS4-derived prototypes (GPLv2, used as a reference only), with no second reference; structure pointers are `void*` because no layout is known.

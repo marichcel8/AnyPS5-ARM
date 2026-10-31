@@ -7620,6 +7620,7 @@ struct ModuleShape {
     std::uint32_t floatControlsWidth = 0;
     std::uint32_t clipDistanceLength = 0;
     std::uint32_t cullDistanceLength = 0;
+    std::optional<spv::ExecutionModel> tessellationModel;
     bool layerOutput = false;
     bool terminateInvocation = false;
     bool omitTerminateExtension = false;
@@ -7825,6 +7826,7 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
     if (shape.layer) emit(words, spv::OpCapability, {spv::CapabilityGeometry});
     if (shape.clipDistanceLength != 0) emit(words, spv::OpCapability, {spv::CapabilityClipDistance});
     if (shape.cullDistanceLength != 0) emit(words, spv::OpCapability, {spv::CapabilityCullDistance});
+    if (shape.tessellationModel) emit(words, spv::OpCapability, {spv::CapabilityTessellation});
     if (shape.layerOutput) {
         emit(words, spv::OpCapability, {spv::CapabilityShaderViewportIndexLayerEXT});
         const std::string extension = "SPV_EXT_shader_viewport_index_layer";
@@ -7854,10 +7856,14 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
     emit(words, spv::OpMemoryModel, {spv::AddressingModelLogical, spv::MemoryModelGLSL450});
     const auto entryPointOffset = words.size();
     if (shape.vertexInput) emit(words, spv::OpEntryPoint, {spv::ExecutionModelVertex, main, 0x6e69616du, 0, output, input});
-    else emit(words, spv::OpEntryPoint, {shape.fragment ? spv::ExecutionModelFragment : spv::ExecutionModelVertex, main, 0x6e69616du, 0, output});
+    else emit(words, spv::OpEntryPoint, {shape.tessellationModel ? *shape.tessellationModel : shape.fragment ? spv::ExecutionModelFragment : spv::ExecutionModelVertex, main, 0x6e69616du, 0, output});
     words[entryPointOffset] += static_cast<std::uint32_t>(extraInterface.size()) << 16u;
     words.insert(words.end(), extraInterface.begin(), extraInterface.end());
     if (shape.fragmentMode) emit(words, spv::OpExecutionMode, {main, *shape.fragmentMode});
+    if (shape.tessellationModel == spv::ExecutionModelTessellationControl) emit(words, spv::OpExecutionMode, {main, spv::ExecutionModeOutputVertices, 3});
+    if (shape.tessellationModel == spv::ExecutionModelTessellationEvaluation) {
+        for (const auto mode : {spv::ExecutionModeQuads, spv::ExecutionModeSpacingFractionalOdd, spv::ExecutionModeVertexOrderCw}) emit(words, spv::OpExecutionMode, {main, mode});
+    }
     if (shape.fragment) emit(words, spv::OpExecutionMode, {main, spv::ExecutionModeOriginUpperLeft});
     if (shape.fragDepth) emit(words, spv::OpExecutionMode, {main, spv::ExecutionModeDepthReplacing});
     if (shape.floatControlsWidth != 0) {
@@ -11275,6 +11281,16 @@ void validationTests() {
         vertex.spirv = makeModule({.parameterOutput = true, .cullDistanceLength = 4});
         expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, false, true, false); }, "PA_CL_VS_OUT_CNTL=0x0040000f");
         AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, false, false, true);
+        ShaderRecompiler::RecompileResult tessVertex, tessControl, tessEvaluation;
+        tessVertex.spirv = makeModule({});
+        tessControl.spirv = makeModule({.push = true, .tessellationModel = spv::ExecutionModelTessellationControl});
+        tessEvaluation.spirv = makeModule({.cullDistanceLength = 4, .tessellationModel = spv::ExecutionModelTessellationEvaluation});
+        const std::array<AgcDriver::Graphics::CompiledShader, 4> tessShaders{{{ShaderRecompiler::ShaderStage::Local, &tessVertex, 0}, {ShaderRecompiler::ShaderStage::TessellationControl, &tessControl, 0}, {ShaderRecompiler::ShaderStage::TessellationEvaluation, &tessEvaluation, 0}, {ShaderRecompiler::ShaderStage::Fragment, &pixel, 0}}};
+        auto tessState = state;
+        tessState.stages.path = AgcDriver::Graphics::ShaderPath::Tessellation;
+        tessState.stages.tessellation = ShaderRecompiler::TessellationConfiguration{3, 3, 2, 1, 4, 128, 16, false};
+        AgcDriver::Graphics::ValidateShaders(tessShaders, tessState, subgroup, false, false, false, false, false, false, false, true);
+        expectFailure([&] { AgcDriver::Graphics::ValidateShaders(tessShaders, tessState, subgroup, false, false, false, false, false, false, true, false); }, "PA_CL_VS_OUT_CNTL=0x0040000f");
         state.paClVsOutCntl = 0;
         vertex.spirv = makeModule({.parameterOutput = true, .clipDistanceLength = 9});
         expectFailure([&] { AgcDriver::Graphics::ValidateShaders(shaders, state, subgroup, false, false, false, false, false, false, true, true); }, "clip or cull distance");

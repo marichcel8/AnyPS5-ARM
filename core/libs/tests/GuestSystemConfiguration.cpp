@@ -347,6 +347,37 @@ static void CheckProcessSysctl() {
     length = 100;
     Require(sysctl_nid_postfix(mibPid, 4, buffer, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 12 && length == 100);
 }
+static void CheckProcessListSysctl() {
+    const int callerPid = getpid_nid_postfix();
+    const int mib[] = {1, 14, 8};
+    std::size_t length = 0;
+    Require(sysctl_nid_postfix(mib, 3, nullptr, &length, nullptr, 0) == 0);
+
+    unsigned char buffer[1100];
+    std::memset(buffer, 0xaa, sizeof(buffer));
+    length = sizeof(buffer);
+    Require(sysctl_nid_postfix(mib, 3, buffer, &length, nullptr, 0) == 0 && length == 1088);
+    std::int32_t structSize = 0;
+    std::int32_t pid = 0;
+    std::memcpy(&structSize, buffer, sizeof(structSize));
+    std::memcpy(&pid, buffer + 72, sizeof(pid));
+    Require(structSize == 1088 && pid == callerPid);
+    Require(std::strcmp(reinterpret_cast<const char*>(buffer + 447), "eboot.bin") == 0);
+    Require(buffer[1088] == 0xaa);
+
+    const int mibWithPid[] = {1, 14, 8, 0};
+    length = sizeof(buffer);
+    Require(sysctl_nid_postfix(mibWithPid, 4, buffer, &length, nullptr, 0) == 0 && length == 1088);
+
+    const int mibTooLong[] = {1, 14, 8, 0, 0};
+    Require(sysctl_nid_postfix(mibTooLong, 5, buffer, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 22);
+
+    length = 100;
+    Require(sysctl_nid_postfix(mib, 3, buffer, &length, nullptr, 0) == -1 && *__error_nid_postfix() == 12);
+
+    length = sizeof(buffer);
+    Require(sysctl_nid_postfix(mib, 3, buffer, &length, buffer, sizeof(buffer)) == -1 && *__error_nid_postfix() == 1);
+}
 struct SystemString {
     int mib[2];
     const char* name;
@@ -1157,6 +1188,7 @@ int main() {
     CheckUnknownSysctlName();
     CheckPathnameSysctl();
     CheckProcessSysctl();
+    CheckProcessListSysctl();
     CheckSystemStringSysctl();
     CheckSystemStringNames();
     CheckOsReleaseDateSysctl();

@@ -490,6 +490,7 @@ if(BUILD_TESTING)
     target_link_libraries(guest_kernel_sys_tests PRIVATE libkernel_sys libSceAmpr libkernel libc)
     configure_windows_unwind(guest_kernel_sys_tests)
     add_test(NAME guest_kernel_sys COMMAND guest_kernel_sys_tests)
+    set_tests_properties(guest_kernel_sys PROPERTIES TIMEOUT 20)
     if(WIN32)
         set_tests_properties(guest_kernel_sys PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceAmpr>")
