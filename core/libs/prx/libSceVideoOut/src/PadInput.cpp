@@ -87,8 +87,11 @@ std::uint32_t ScriptedButtons() {
 }
 #include "prx/libSceIme/include/ImeInput.hpp"
 #include "prx/libSceIme/include/ModalDialog.hpp"
+#include "prx/libSceVideoOut/include/HostVolumeInput.hpp"
+#include "prx/libScePad/include/HostVolumeSettings.hpp"
 
 PadInput::PadInput() : PadInput(Pad::LoadInputLayouts()) {
+    HostVolumeConfigureFromEnvironment_nid_no_patch();
 }
 
 static_assert(PAD_MAX_CONTROLLERS == AgcDriver::PadStatusSlots, "the pad status panel lists one line per controller slot");
@@ -428,6 +431,8 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
             setMouseMode(false);
             mouseLookArmed = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
         }
+        HostVolume volume;
+        if (window.Handle() != nullptr && ApplyHostFocusEvent(event, SDL_GetWindowID(window.Handle()), &volume)) APS5_LOG_ERR("%s", HostVolumeMessage(volume).c_str());
         publish(window.FrameNumber());
         return;
     }
@@ -451,6 +456,10 @@ void PadInput::HandleEvent(const SDL_Event& event, DisplayWindow& window) {
     if (requests.showPadStatus && window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) {
         AgcDriverPadStatusShow_nid_postfix();
         reportStatus();
+    }
+    if (window.Handle() != nullptr && event.key.windowID == SDL_GetWindowID(window.Handle())) {
+        HostVolume volume;
+        if (ApplyHostVolumeRequests(requests, &volume)) APS5_LOG_ERR("%s", HostVolumeMessage(volume).c_str());
     }
     if (requests.toggleMouse) setMouseMode(!keyboardMouse.MouseMode());
     if (requests.switchLayout && keyboardMouse.SwitchLayout()) {
@@ -560,6 +569,11 @@ void PadInput::type(const RemotePad::TypedText& text) {
 }
 
 void PadInput::Update(const DisplayWindow& window) {
+    if (!hostFocusSynced && window.Handle() != nullptr) {
+        hostFocusSynced = true;
+        HostVolume volume;
+        if (HostVolumeFocus_nid_no_patch(SDL_GetKeyboardFocus() == window.Handle(), &volume)) APS5_LOG_ERR("%s", HostVolumeMessage(volume).c_str());
+    }
     if (!controllers.empty()) SDL_GameControllerUpdate();
     reportStatus();
     applyOutput();
