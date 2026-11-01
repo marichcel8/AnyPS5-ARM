@@ -6,7 +6,9 @@
 #include "prx/libScePad/include/KeyboardMouse.hpp"
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/Pad.hpp"
+#include "prx/libScePad/include/PadIdentify.hpp"
 #include "prx/libSceVideoOut/include/PadOutputPacing.hpp"
+#include "prx/libSceVideoOut/include/Port0Presence.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PadStatus.hpp"
 #include "prx/libSceVideoOut/include/GyroAim.hpp"
 #include "prx/libSceVideoOut/include/RemotePad.hpp"
@@ -48,6 +50,7 @@ private:
         TriggerEffectCache triggerEffect;
         // Helps the first player (assist) rather than holding a seat.
         bool helping = false;
+        Pad::IdentifyScheduler identify;
         AgcDriver::PadKind kind = AgcDriver::PadKind::Unknown;
         std::string name;
         // What the game reads: the state with gyro aiming's turn on the right stick.
@@ -87,6 +90,10 @@ private:
     void enableSensors(Controller& controller, bool wanted);
     AgcDriver::PadStatusSnapshot statusSnapshot() const;
     void reportStatus();
+    void updatePort0();
+    void applyPort0(bool connected);
+    bool port0Bound() const;
+    void startPort0();
     void updateRemotes();
     void answer(Remote& remote, int player);
     void leave(std::uint32_t device);
@@ -98,6 +105,7 @@ private:
     void type(const RemotePad::TypedText& text);
 
     Pad::KeyboardMouse keyboardMouse;
+    Pad::IdentifyMode identifyMode = Pad::IdentifyMode::Off;
     bool mouseLookArmed = false;
     std::vector<Controller> controllers;
     std::vector<Remote> remotes;
@@ -116,6 +124,8 @@ private:
     std::optional<GyroAim::Settings> gyro;
     VideoOutTelemetry::PadChangeFilter telemetryFilter;
     AgcDriver::PadStatusProvider statusProvider;
+    Port0Presence::Mode port0Mode = Port0Presence::ConfiguredMode();
+    Port0Presence::Presence port0{port0Mode, false};
     bool padCaptured = false;
     bool hostFocusSynced = false;
 };

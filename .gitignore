@@ -104,6 +104,8 @@ downloads/
 !tools/macos/patches/*.json
 !tools/macos/launcher/l10n/*.json
 !mobile/assets/l10n/*.json
+!/docs/run-report.schema.json
+!/docs/run-report-fixtures/*.json
 
 !/assets/*.jpg
 !/assets/*.png

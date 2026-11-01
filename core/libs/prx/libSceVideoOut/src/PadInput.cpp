@@ -98,10 +98,12 @@ static_assert(PAD_MAX_CONTROLLERS == AgcDriver::PadStatusSlots, "the pad status 
 
 PadInput::PadInput(Pad::InputLayouts layouts) : keyboardMouse(std::move(layouts)), statusProvider{[this] { return statusSnapshot(); }} {
     static_cast<void>(Pad::RumblePercent());
+    identifyMode = Pad::IdentifyModeFromEnvironment();
     mouseLookArmed = keyboardMouse.CurrentLayout() == Pad::Layout::Shooter;
     APS5_LOG_OUT("[input] layout %s (F8 switches)", mouseLookArmed ? "Shooter" : "Classic");
     for (auto& channel : RemotePad::OpenAllFromEnvironment()) remotes.push_back(Remote{std::move(channel)});
     openAvailableControllers();
+    startPort0();
 }
 
 PadInput::PadInput(Pad::InputConfiguration configuration) : keyboardMouse(std::move(configuration)), gyro(GyroAim::FromEnvironment()) {
@@ -111,6 +113,7 @@ PadInput::PadInput(Pad::InputConfiguration configuration) : keyboardMouse(std::m
     }
     for (auto& channel : RemotePad::OpenAllFromEnvironment()) remotes.push_back(Remote{std::move(channel)});
     openAvailableControllers();
+    startPort0();
 }
 
 PadInput::~PadInput() {
@@ -148,6 +151,13 @@ void PadInput::openController(int deviceIndex) {
     controller.id = SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(handle));
     controller.kind = PadKindFromSdl(SDL_GameControllerGetType(handle));
     controller.name = name != nullptr ? name : "";
+    if (identifyMode != Pad::IdentifyMode::Off) {
+        if (SDL_GameControllerHasRumble(handle) == SDL_TRUE) {
+            controller.identify.Bind(std::chrono::steady_clock::now(), static_cast<unsigned>(controllers.size()) + 1, identifyMode);
+        } else {
+            APS5_LOG_OUT("Pad: identify pulse skipped for controller %zu: the controller has no rumble support", controllers.size() + 1);
+        }
+    }
     controllers.push_back(std::move(controller));
     enableSensors(controllers.back(), true);
 }
@@ -236,6 +246,24 @@ void PadInput::reportStatus() {
     AgcDriverPadStatusPoll_nid_postfix(&statusProvider);
 }
 
+void PadInput::applyPort0(bool connected) {
+    PadSetPortConnected_nid_postfix(0, connected);
+    UserServiceSetUserConnected_nid_postfix(0, connected);
+}
+
+bool PadInput::port0Bound() const {
+    return std::any_of(controllers.begin(), controllers.end(), [this](const Controller& controller) { return playerOf(controller) == 0; });
+}
+
+void PadInput::startPort0() {
+    port0 = Port0Presence::Presence(port0Mode, port0Bound());
+    if (port0Mode == Port0Presence::Mode::Controller) applyPort0(port0.Connected());
+}
+
+void PadInput::updatePort0() {
+    if (const auto change = port0.Observe(port0Bound(), std::chrono::steady_clock::now())) applyPort0(*change);
+}
+
 void PadInput::setControllersHelp(bool help) {
     if (help == controllersHelp) return;
     controllersHelp = help;
@@ -308,6 +336,10 @@ void PadInput::applyOutput(Controller& pad, const PadOutputState& outputState, i
             : RemotePad::PlayerColor(std::max(player, 0));
         if (pad.lightBar.Due(color, now)) pad.lightBar.Result(color, now, SDL_GameControllerSetLED(controller, color[0], color[1], color[2]) == 0);
     }
+    const bool titleActive = pad.outputPending || rumbling || triggerRumble;
+    if (pad.identify.Tick(now, titleActive, rumblePercent, [controller](std::uint16_t low, std::uint16_t high, std::uint32_t durationMs) {
+            SDL_GameControllerRumble(controller, low, high, durationMs);
+        })) return;
     if (!pad.outputPending) {
         if ((rumbling || (triggerRumble && !isPs5)) && now >= pad.nextRumbleRefresh) pad.outputPending = true;
         else return;
@@ -575,6 +607,7 @@ void PadInput::Update(const DisplayWindow& window) {
         if (HostVolumeFocus_nid_no_patch(SDL_GetKeyboardFocus() == window.Handle(), &volume)) APS5_LOG_ERR("%s", HostVolumeMessage(volume).c_str());
     }
     if (!controllers.empty()) SDL_GameControllerUpdate();
+    updatePort0();
     reportStatus();
     applyOutput();
     updatePrompt(std::chrono::steady_clock::now());
@@ -664,7 +697,7 @@ void PadInput::publish(std::uint64_t frame) {
             PadPublishInputForPort_nid_postfix(player, handOff(player, *device));
             continue;
         }
-        auto state = handOff(0, keyboardMouse.Compose(device.value_or(PadInputState{})));
+        auto state = handOff(0, port0.Connected() ? keyboardMouse.Compose(device.value_or(PadInputState{})) : PadInputState{});
         if (!state.intercepted) state.buttons |= ScriptedButtons() | playerOnePressed;
         PadPublishInput_nid_postfix(state);
         if (auto* telemetry = VideoOutTelemetry::Instance(); telemetry != nullptr) VideoOutTelemetry::EmitPadIfChanged(*telemetry, telemetryFilter, frame, state);
