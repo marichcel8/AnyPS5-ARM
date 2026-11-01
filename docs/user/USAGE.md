@@ -287,7 +287,11 @@ A Windows executable started without a standard output or error handle, such as 
 
 ### Display resolution and window size
 
-The game chooses its video-output resolution; AnyPS5 uses that mode for rendering. The display window can be resized or switched to fullscreen, which scales the presented image to fit the window. F11 switches between window and fullscreen; set `ANYPS5_FULLSCREEN` to a non-empty value other than `0` to open the window fullscreen from the start. Changing the window size does not change the game's render resolution. AnyPS5 does not currently provide a global render-resolution override; use a game's own display setting when it offers one.
+The game chooses its video-output resolution; AnyPS5 uses that mode for rendering. The display window can be resized or switched to fullscreen, which scales the presented image to fit the window. F11 switches between window and fullscreen; set `ANYPS5_FULLSCREEN` to a non-empty value other than `0` to open the window fullscreen from the start. Changing the window size does not change the game's render resolution. The only host setting that changes the resolution a game reads is `APS5_OUTPUT_RESOLUTION`, described below; otherwise AnyPS5 provides no render-resolution override, so use a game's own display setting when it offers one.
+
+`APS5_OUTPUT_RESOLUTION=<width>x<height>`, for example `APS5_OUTPUT_RESOLUTION=1920x1080`, makes the game's video output status report the 1080p class when the width is below 3840 and the height below 2160, and the 2160p class otherwise, instead of the class of the display's current mode. The two numbers must be positive integers separated by `x` or `X`. An empty value is the same as an unset one; any other value stops the game with an error that names the variable.
+
+`ANYPS5_DISPLAY_INDEX=<n>` opens the window centred on display `n`, counted from 0 in the order SDL lists the displays. Unset, the first display is used. A value that is not the index of a connected display, including an empty value, stops the game at start with an error that names the variable.
 
 ### VR compatibility
 
@@ -374,6 +378,9 @@ Assist lets another device play the first player together with whoever holds it,
 ### Gyro aiming
 
 Set `ANYPS5_GYRO_AIM` to aim with a pad's motion in any game that aims with the right stick, as Steam Input's gyro to joystick camera does: turning a DualSense, DualShock 4 or Switch Pro Controller (read through SDL), or a phone the launcher brings, moves the right stick on top of what the stick itself does. The turn is read in player space: left and right about the world's vertical, taken from the accelerometer's gravity, and up and down about the pad's own left-right axis, so a pad held at any angle and a phone held upright aim the same way. The motion the game reads is unchanged, and the pad's sensors stay on even when the game turns motion off. The value is `on`, or comma-separated settings, any of `sensitivity=<0.1-10>` (1 by default: a turn of 90 degrees a second is a full stick), `invert=none|x|y|xy`, `activate=always|l2|touch` (always, while L2 is held, or while a finger is on the touchpad) and `deadzone=<0-45>` (2 by default: turns slower than this many degrees a second move nothing), such as `ANYPS5_GYRO_AIM=sensitivity=1.5,activate=l2`. An empty value is the same as an unset one, which is off; a malformed one stops the game with an error naming the variable. The launchers set it from each game's Controls → Gyro Aiming.
+Set `APS5_NO_PAD_INPUT` to any value, an empty one included, to make the window ignore its keyboard and mouse events. The keyboard and mouse bindings, the mouse stick and the window keys (F10, F11 and F12 among them) then do nothing. Controllers and the `APS5_PAD_INPUT_FILE` commands are not affected.
+
+On Windows, set `APS5_NO_WGI` to any value to turn off SDL's Windows Gaming Input controller backend. AnyPS5 turns off DirectInput there in every case, and this variable is read once when the video output driver is created.
 
 ### Controller vibration strength
 
@@ -425,6 +432,9 @@ Games ask for the console's language with `sceSystemServiceParamGetInt` and show
 | `audio_language` | `default` (0), or a console language number as for `ANYPS5_LANGUAGE` (the number + 1) |
 
 For example `ANYPS5_GAME_PRESETS=difficulty=hard,priority=performance,invert_3rd_v=1`. A key left out is not set, and an unknown key is passed over; a known key with another value stops the game at its first presets query with an error that names the variable. Titles have been seen to honour `priority=performance` (1); the other field values follow the order of the console's menus and have not been checked against a console.
+### Save data free space
+
+By default a game's save data is never refused for lack of disk space, and the free blocks it sees are those of its own save. Set `ANYPS5_FREE_SPACE=host` to make a new save refuse to be created when the volume that holds the save data has less room than the save's size, so the game can report that the disk is full. A save of 16384 blocks, the size used when the game asks for none, needs 1 GiB. The free blocks a game reads for a save are then limited to the room its volume still has. `fixed`, the value used when the variable is unset, keeps today's behaviour, and any other value, including an empty one, stops the game at its next save mount or save search that finds a save, with an error naming `ANYPS5_FREE_SPACE`. On Windows an empty value counts as unset, because `set ANYPS5_FREE_SPACE=` in `cmd` and `$env:ANYPS5_FREE_SPACE = ""` in PowerShell remove the variable. Existing saves are opened as before in both modes. Whether a console refuses a save the same way is not measured; see the [technical debt](../dev/debt/libSceSaveData.native.md) of `libSceSaveData.native`.
 
 ### Host game mode
 
