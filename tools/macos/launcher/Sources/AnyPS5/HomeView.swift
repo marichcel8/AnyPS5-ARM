@@ -789,6 +789,8 @@ extension AppModel {
 
     /// Home screen and library navigation; panels go through panelCommand.
     func handle(_ command: Command) -> Bool {
+        // Mirrored screens (Arabic, Urdu): → moves to what is drawn on the right.
+        let command = T.language.isRightToLeft ? command.mirrored : command
         if pairing != nil {
             if command == .select { answerPairing(true) }
             if command == .back { answerPairing(false) }
@@ -826,6 +828,12 @@ extension AppModel {
         }
         switch overlay {
         case .settings, .gameSettings, .confirmUninstall, .updateChoice, .updateRequired, .noSpace:
+            return panelCommand(command)
+        case .gameFiles:
+            if command == .back || command == .options {
+                filesBack()
+                return true
+            }
             return panelCommand(command)
         case .controls, .advanced:
             if command == .back || command == .options {
