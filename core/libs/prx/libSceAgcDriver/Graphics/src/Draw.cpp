@@ -1208,6 +1208,16 @@ MeshArgumentRules MeshArgumentRulesFor(const Context& context, const ShaderRecom
     return {indexCount, inputSize, step, mesh.primitivesPerGroup, context.meshLimits.maxMeshWorkGroupCount[0], context.meshLimits.maxMeshWorkGroupCount[1], context.meshLimits.maxMeshWorkGroupTotalCount};
 }
 
+std::optional<MeshGrid> MeshGridFor(const Context& context, std::uint32_t groups, std::uint32_t instances) {
+    const auto& limits = context.meshLimits;
+    if (groups == 0 || instances > limits.maxMeshWorkGroupCount[1] || limits.maxMeshWorkGroupCount[0] == 0) return std::nullopt;
+    const auto across = groups <= limits.maxMeshWorkGroupCount[0] ? groups : std::min(limits.maxMeshWorkGroupCount[0], ShaderRecompiler::MeshLayerStrideLimit);
+    const auto layers = (groups - 1u) / across + 1u;
+    const auto columns = (groups - 1u) / layers + 1u;
+    if (layers > limits.maxMeshWorkGroupCount[2] || (instances != 0 && columns > limits.maxMeshWorkGroupTotalCount / instances / layers)) return std::nullopt;
+    return MeshGrid{columns, instances, layers, layers > 1u ? columns : 0u};
+}
+
 MeshArguments ResolveMeshArguments(const Pm4::DrawArguments& record, const MeshArgumentRules& rules) {
     const auto first = record.firstVertexOrIndex;
     const auto effective = first < rules.indexCount ? std::min(record.count, rules.indexCount - first) : 0u;
@@ -1491,6 +1501,8 @@ struct DrawInputs {
     std::uint32_t fragmentOutputs = 0;
     VkPipelineStageFlags shaderStages = 0;
     std::uint32_t meshGroups = 0;
+    std::uint32_t meshLayers = 1;
+    std::uint32_t meshLayerStride = 0;
     std::vector<std::uint32_t> restartTable;
     const ShaderRecompiler::RecompileResult* emulatedMesh = nullptr;
     std::uint32_t expandedIndexCount = 0;
@@ -1601,10 +1613,19 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         if (args == nullptr) {
             const auto step = mesh.inputPrimitive == 5 || mesh.inputPrimitive == 6 ? 1u : inputSize;
             const auto primitives = (draw.indexCount - inputSize) / step + 1u;
-            inputs.meshGroups = (primitives - 1u) / mesh.primitivesPerGroup + 1u;
-            APS5_LOG_OUT_DEBUG("Mesh primitives=%u groups=%u", primitives, inputs.meshGroups);
-            if (inputs.emulatedMesh != nullptr) Require(inputs.meshGroups <= context.limits.maxComputeWorkGroupCount[0] && draw.instanceCount <= context.limits.maxComputeWorkGroupCount[1], "emulated mesh draw exceeds the compute workgroup count limits");
-            else Require(inputs.meshGroups <= context.meshLimits.maxMeshWorkGroupCount[0] && draw.instanceCount <= context.meshLimits.maxMeshWorkGroupCount[1] && static_cast<std::uint64_t>(inputs.meshGroups) * draw.instanceCount <= context.meshLimits.maxMeshWorkGroupTotalCount, "mesh draw exceeds workgroup count limits");
+            const auto groups = (primitives - 1u) / mesh.primitivesPerGroup + 1u;
+            if (inputs.emulatedMesh != nullptr) {
+                inputs.meshGroups = groups;
+                APS5_LOG_OUT_DEBUG("Mesh primitives=%u groups=%u", primitives, inputs.meshGroups);
+                Require(inputs.meshGroups <= context.limits.maxComputeWorkGroupCount[0] && draw.instanceCount <= context.limits.maxComputeWorkGroupCount[1], "emulated mesh draw exceeds the compute workgroup count limits");
+            } else {
+                const auto grid = MeshGridFor(context, groups, draw.instanceCount);
+                Require(grid.has_value(), "mesh draw exceeds workgroup count limits");
+                APS5_LOG_OUT_DEBUG("Mesh primitives=%u groups=%u as %u x %u", primitives, groups, grid->groups, grid->layers);
+                inputs.meshGroups = grid->groups;
+                inputs.meshLayers = grid->layers;
+                inputs.meshLayerStride = grid->layerStride;
+            }
         }
     }
     if (state.stages.tessellation) Require(draw.indexCount % state.stages.tessellation->inputControlPoints == 0, "incomplete tessellation patch");
@@ -2058,8 +2079,8 @@ void recordDrawCommands(const Context& context, VkCommandBuffer commands, const 
         return;
     }
     if (state.stages.mesh) {
-        APS5_LOG_OUT_DEBUG("vkCmdDrawMeshTasksEXT groups=%u instances=%u", inputs.meshGroups, draw.instanceCount);
-        context.Function<PFN_vkCmdDrawMeshTasksEXT>("vkCmdDrawMeshTasksEXT")(commands, inputs.meshGroups, draw.instanceCount, 1);
+        APS5_LOG_OUT_DEBUG("vkCmdDrawMeshTasksEXT groups=%u instances=%u layers=%u", inputs.meshGroups, draw.instanceCount, inputs.meshLayers);
+        context.Function<PFN_vkCmdDrawMeshTasksEXT>("vkCmdDrawMeshTasksEXT")(commands, inputs.meshGroups, draw.instanceCount, inputs.meshLayers);
         recorded(subdraw++);
         return;
     }
@@ -2364,7 +2385,7 @@ void recordStencilReplay(const Context& context, VkCommandBuffer commands, const
     }
 }
 
-void pushDrawConstants(const Pipeline& pipeline, VkCommandBuffer commands, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, const ShaderResources& resources, const std::array<std::byte, PipelinePushConstantBytes>* bytes, VkShaderStageFlags stages, VkDeviceAddress meshArguments = 0, bool restartTable = false) {
+void pushDrawConstants(const Pipeline& pipeline, VkCommandBuffer commands, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, const ShaderResources& resources, const std::array<std::byte, PipelinePushConstantBytes>* bytes, VkShaderStageFlags stages, VkDeviceAddress meshArguments = 0, bool restartTable = false, std::uint32_t meshLayerStride = 0) {
     auto block = bytes != nullptr ? *bytes : AssemblePushConstants(shaders);
     if (bytes == nullptr) {
         resources.PatchPushConstants(block);
@@ -2392,7 +2413,7 @@ void pushDrawConstants(const Pipeline& pipeline, VkCommandBuffer commands, const
     }
     const auto firstVertex = draw.indirect ? draw.indirect->vertexConstant : draw.firstVertex;
     const auto firstInstance = draw.indirect ? draw.indirect->instanceConstant : draw.firstInstance;
-    std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4> words{draw.indexCount, firstVertex, firstInstance, draw.indexed ? draw.indexSize | (restartTable ? ShaderRecompiler::MeshIndexRestartTable : 0u) : 0u, static_cast<std::uint32_t>(meshArguments), static_cast<std::uint32_t>(meshArguments >> 32u)};
+    std::array<std::uint32_t, ShaderRecompiler::MeshDrawPushBytes / 4> words{draw.indexCount, firstVertex, firstInstance, (draw.indexed ? draw.indexSize | (restartTable ? ShaderRecompiler::MeshIndexRestartTable : 0u) : 0u) | meshLayerStride << ShaderRecompiler::MeshLayerStrideShift, static_cast<std::uint32_t>(meshArguments), static_cast<std::uint32_t>(meshArguments >> 32u)};
     if (state.tessellationCapture != nullptr) words = {static_cast<std::uint32_t>(capturedItems), static_cast<std::uint32_t>(capturedItems >> 32u), 0u, 0u, static_cast<std::uint32_t>(meshArguments), static_cast<std::uint32_t>(meshArguments >> 32u)};
     static_assert(ShaderRecompiler::MeshDrawPushOffsetBytes + ShaderRecompiler::MeshDrawPushBytes == PipelinePushSlotBytes);
     std::memcpy(block.data() + ShaderRecompiler::MeshDrawPushOffsetBytes, words.data(), sizeof(words));
@@ -2740,7 +2761,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     APS5_LOG_CHARS_OUT_DEBUG("Resources bound");
     timer.phase(PhaseRecBind);
     if (inputs.emulatedMesh != nullptr) pushMeshBuffers(context, commands, VK_PIPELINE_BIND_POINT_GRAPHICS, record.pipeline->Layout(), meshBuffers);
-    pushDrawConstants(*record.pipeline, commands, state, draw, shaders, resources, record.pushBytes, record.pushStages, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0, !inputs.restartTable.empty());
+    pushDrawConstants(*record.pipeline, commands, state, draw, shaders, resources, record.pushBytes, record.pushStages, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0, !inputs.restartTable.empty(), inputs.meshLayerStride);
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
     timer.phase(PhaseRecPush);
     static const bool timeEachDraw = std::getenv("APS5_PROFILE_GPU_DRAWS") != nullptr;
@@ -3681,7 +3702,7 @@ void recordPreparedDraw(const Context& context, const State& state, const Pm4::D
     if (pixelLdsSubgroup != 0u) BindPixelFunctionLds(context, commands, pipeline->Layout());
     if (UsesMeshWindow(shaders)) BindMeshWindow(context, commands, pipeline->Layout());
     APS5_LOG_CHARS_OUT_DEBUG("Resources bound");
-    pushDrawConstants(*pipeline, commands, state, draw, shaders, *resources, nullptr, 0, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0, !inputs.restartTable.empty());
+    pushDrawConstants(*pipeline, commands, state, draw, shaders, *resources, nullptr, 0, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0, !inputs.restartTable.empty(), inputs.meshLayerStride);
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
     std::uint32_t subdraw = 0;
     if (stencilReplay.empty()) recordDrawCommands(context, commands, state, draw, inputs, args != nullptr ? &indirect : nullptr, argumentBuffer, argumentOffset, prepared.trace, subdraw);
