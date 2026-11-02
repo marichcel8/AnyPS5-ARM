@@ -22,8 +22,8 @@
 #include <cerrno>
 #include <exception>
 #include <stdexcept>
-#include <string>
 #include <system_error>
+#include <string>
 #include <thread>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -35,8 +35,7 @@
 #include <sys/mman.h>
 #endif
 #ifdef __APPLE__
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
+#include "prx/libSceAgcDriver/Execution/include/Driver/DriverMemory.hpp"
 #endif
 
 namespace AgcDriver::DriverDetail {
@@ -59,24 +58,25 @@ void PrintFailure(std::exception_ptr error) {
     std::fflush(stderr);
 }
 
+#ifdef __APPLE__
+constexpr std::uint64_t DriverMemoryAddress = MacOsDriverMemoryBase;
+constexpr std::size_t DriverMemoryBytes = DriverMemorySpan;
+constexpr std::uint64_t FsTableAddress = RetargetPs5DriverMemory(0xfe0040000ull);
+#else
 constexpr std::uint64_t DriverMemoryAddress = 0xfe0000000ull + GuestArena::GuestAddressOffset;
 constexpr std::size_t DriverMemoryBytes = 2u << 20u;
-constexpr std::uint64_t FsTableOffset = 0x40000ull;
+constexpr std::uint64_t FsTableAddress = DriverMemoryAddress + 0x40000ull;
+#endif
 constexpr std::uint64_t FsTableSlotBytes = 16u;
 constexpr std::uint64_t FsTableSlots = 6u;
 constexpr std::uint64_t FsRoutineRecords = 8u;
 constexpr std::uint64_t FsRoutineRecordBytes = 16u;
 constexpr std::uint64_t FsRoutineTableBytes = FsRoutineRecords * FsRoutineRecordBytes;
-constexpr std::uint64_t FsRoutineTableOffset = FsTableOffset + FsTableSlots * FsTableSlotBytes;
-constexpr std::uint64_t FsRoutineOffset = FsRoutineTableOffset + FsRoutineTableBytes;
+constexpr std::uint64_t FsRoutineTableAddress = FsTableAddress + FsTableSlots * FsTableSlotBytes;
+constexpr std::uint64_t FsRoutineAddress = FsRoutineTableAddress + FsRoutineTableBytes;
 constexpr std::uint32_t ScalarSetpcB64LinkS14 = 0xbe80200eu;
 constexpr std::uint32_t ScalarEndProgram = 0xbf810000u;
 constexpr std::uint64_t FsTableDword3 = 0x5204u;
-
-std::atomic<bool> driverMemoryMapped{false};
-std::uint64_t driverMemoryBase = DriverMemoryAddress;
-
-std::uint64_t FsTableAddress() { return driverMemoryBase + FsTableOffset; }
 
 void MapDriverMemory() {
     void* mapped;
@@ -84,56 +84,30 @@ void MapDriverMemory() {
     mapped = reinterpret_cast<void*>(DriverMemoryAddress);
     GuestArena::GuestArenaCommit_nid_postfix(mapped, DriverMemoryBytes, PAGE_READWRITE, DriverMemoryBytes);
 #elif defined(__APPLE__)
-    // macOS has no MAP_FIXED_NOREPLACE; a fixed mach_vm_allocate fails instead of replacing a mapping.
-    // Rosetta keeps 0xF_C0000000-0x10_00000000 unmappable (maximum protection none), so there the
-    // table is left out and FS table calls stay unlinked.
-    mach_vm_address_t address = DriverMemoryAddress;
-    if (const auto result = mach_vm_allocate(mach_task_self(), &address, DriverMemoryBytes, VM_FLAGS_FIXED); result != KERN_SUCCESS) {
-        mach_vm_address_t region = DriverMemoryAddress;
-        mach_vm_size_t regionBytes = 0;
-        vm_region_basic_info_data_64_t info{};
-        mach_msg_type_number_t infoCount = VM_REGION_BASIC_INFO_COUNT_64;
-        mach_port_t object = MACH_PORT_NULL;
-        if (mach_vm_region(mach_task_self(), &region, &regionBytes, VM_REGION_BASIC_INFO_64, reinterpret_cast<vm_region_info_t>(&info), &infoCount, &object) == KERN_SUCCESS) {
-            std::fprintf(stderr, "[gpu] the AGC driver memory cannot be mapped at 0x%llx (mach_vm_allocate %d); the next region is 0x%llx-0x%llx, protection %d, maximum %d\n", static_cast<unsigned long long>(DriverMemoryAddress), result, static_cast<unsigned long long>(region), static_cast<unsigned long long>(region + regionBytes), info.protection, info.max_protection);
-        } else {
-            std::fprintf(stderr, "[gpu] the AGC driver memory cannot be mapped at 0x%llx (mach_vm_allocate %d)\n", static_cast<unsigned long long>(DriverMemoryAddress), result);
-        }
-        address = 0;
-        if (const auto fallback = mach_vm_allocate(mach_task_self(), &address, DriverMemoryBytes, VM_FLAGS_ANYWHERE); fallback != KERN_SUCCESS) {
-            std::fprintf(stderr, "[gpu] the AGC FS table cannot be mapped (mach_vm_allocate %d at 0x%llx, %d anywhere); FS table calls stay unlinked\n", result, static_cast<unsigned long long>(DriverMemoryAddress), fallback);
-            return;
-        }
-    }
-    mapped = reinterpret_cast<void*>(address);
+    mapped = mmap(reinterpret_cast<void*>(DriverMemoryAddress), DriverMemoryBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map the AGC driver memory");
+    if (reinterpret_cast<std::uint64_t>(mapped) != DriverMemoryAddress) munmap(mapped, DriverMemoryBytes);
 #else
     mapped = mmap(reinterpret_cast<void*>(DriverMemoryAddress), DriverMemoryBytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (mapped == MAP_FAILED) throw std::system_error(errno, std::generic_category(), "map the AGC driver memory");
 #endif
-#ifdef __APPLE__
-    driverMemoryBase = reinterpret_cast<std::uint64_t>(mapped);
-#else
     if (reinterpret_cast<std::uint64_t>(mapped) != DriverMemoryAddress) throw std::runtime_error("the AGC driver memory was not mapped at its fixed address");
-#endif
-    const auto fsRoutineTableAddress = driverMemoryBase + FsRoutineTableOffset;
-    const auto fsRoutineAddress = driverMemoryBase + FsRoutineOffset;
-    auto* routineTable = reinterpret_cast<std::uint64_t*>(fsRoutineTableAddress);
+    auto* routineTable = reinterpret_cast<std::uint64_t*>(FsRoutineTableAddress);
     for (std::uint64_t record = 0; record < FsRoutineRecords; ++record) {
-        routineTable[record * 2u] = fsRoutineAddress;
+        routineTable[record * 2u] = FsRoutineAddress;
         routineTable[record * 2u + 1u] = 0u;
     }
-    auto* routine = reinterpret_cast<std::uint32_t*>(fsRoutineAddress);
+    auto* routine = reinterpret_cast<std::uint32_t*>(FsRoutineAddress);
     routine[0] = ScalarSetpcB64LinkS14;
     routine[1] = ScalarEndProgram;
-    auto* slot = reinterpret_cast<std::uint64_t*>(FsTableAddress());
-    slot[0] = (fsRoutineTableAddress & 0xffffffffffffull) | 16ull << 48u;
+    auto* slot = reinterpret_cast<std::uint64_t*>(FsTableAddress);
+    slot[0] = (FsRoutineTableAddress & 0xffffffffffffull) | 16ull << 48u;
     slot[1] = FsTableDword3 << 32u | FsRoutineRecords;
 #ifndef _WIN32
     GuestWriteWatch::GuestWriteWatchRegister_nid_postfix(mapped, DriverMemoryBytes);
 #endif
     GuestAllocations::Mutation mutation;
     mutation.Add(mapped, DriverMemoryBytes, true, true, true);
-    driverMemoryMapped.store(true, std::memory_order_release);
 }
 
 bool StackHoldsImport() {
@@ -147,13 +121,9 @@ bool StackHoldsImport() {
         std::uintptr_t high = 0;
         Bounds() {
 #ifdef __APPLE__
-            // macOS has no pthread_getattr_np; the stack address is its top.
-            const auto top = reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(pthread_self()));
-            const auto size = pthread_get_stacksize_np(pthread_self());
-            if (top != 0 && size <= top) {
-                low = top - size;
-                high = top;
-            }
+            const auto self = pthread_self();
+            high = reinterpret_cast<std::uintptr_t>(pthread_get_stackaddr_np(self));
+            low = high - pthread_get_stacksize_np(self);
 #else
             pthread_attr_t attributes;
             if (pthread_getattr_np(pthread_self(), &attributes) != 0) return;
@@ -399,7 +369,5 @@ std::unique_lock<std::mutex> HoldAsyncLog() {
 
 extern "C" void* AgcDriverStaticTable_nid_postfix() {
     static_cast<void>(AgcDriver::DriverDetail::Driver::Get());
-    if (!AgcDriver::DriverDetail::driverMemoryMapped.load(std::memory_order_acquire))
-        throw std::runtime_error("the AGC static table at 0xfe0040000 is not mapped: this host cannot map the AGC driver memory at its fixed address");
-    return reinterpret_cast<void*>(AgcDriver::DriverDetail::FsTableAddress());
+    return reinterpret_cast<void*>(AgcDriver::DriverDetail::FsTableAddress);
 }
