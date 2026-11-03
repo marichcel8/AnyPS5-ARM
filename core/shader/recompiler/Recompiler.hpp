@@ -299,6 +299,7 @@ struct GuestContext {
     std::optional<ShaderFloatMode> floatMode;
     std::span<const std::uint32_t> linkedCallFallbacks;
     bool convertedSamples = false;
+    bool layerRowSamples = false;
 };
 
 struct MeshTargetLimits {
@@ -338,6 +339,7 @@ struct SpirvTarget {
     std::optional<TessellationTargetLimits> tessellation;
     bool nonConstantImageOffsets = false;
     std::uint32_t srgbDecodeFormats = 0;
+    std::uint32_t maxImageArrayLayers = 0;
     bool narrowSubgroupClock = false;
     std::uint32_t subgroupStages = 0xffffffffu;
     bool fixedPushSlots = false;
