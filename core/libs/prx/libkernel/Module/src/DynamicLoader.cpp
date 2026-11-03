@@ -7,6 +7,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <limits>
@@ -25,6 +26,7 @@
 #include "prx/libc/include/specifics/linux/ElfTypes.hpp"
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #else
 #include <dlfcn.h>
 #include <link.h>
@@ -77,6 +79,10 @@ struct Module {
     bool global = false;
 #ifdef _WIN32
     std::uintptr_t globalOrder = 0;
+#endif
+#ifdef __APPLE__
+    const void* image = nullptr;
+    const void* loadBias = nullptr;
 #endif
     ~Module() {
         if (owned && native) {
@@ -151,6 +157,24 @@ bool FromGuestModule(void* address) {
     const std::string path(info.dli_fname);
     return path.ends_with(".prx");
 }
+
+#ifdef __APPLE__
+void FindImage(Module& module, bool mainProgram) {
+    for (std::uint32_t index = 0; index < _dyld_image_count() && module.image == nullptr; ++index) {
+        const auto* header = reinterpret_cast<const mach_header_64*>(_dyld_get_image_header(index));
+        if (header == nullptr) continue;
+        if (mainProgram) {
+            if (header->filetype == MH_EXECUTE) module.image = header;
+            continue;
+        }
+        void* loaded = ::dlopen(_dyld_get_image_name(index), RTLD_LAZY | RTLD_NOLOAD);
+        if (loaded == nullptr) continue;
+        if (loaded == module.native) module.image = header;
+        ::dlclose(loaded);
+    }
+    module.loadBias = module.image;
+}
+#endif
 
 void* DefaultScopeSymbol(const char* symbolName) {
     auto* result = ::dlsym(RTLD_DEFAULT, symbolName);
@@ -312,8 +336,12 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
 #else
         const auto source = path ? ResolvePath_nid_no_patch(path) : std::filesystem::path{};
         const auto resolved = path ? RelinkedModulePath_nid_no_patch(source) : std::filesystem::path{};
+#ifdef __APPLE__
+        const int nativeFlags = ((flags & 3) == 1 ? RTLD_LAZY : RTLD_NOW) | RTLD_GLOBAL;
+#else
         const int nativeFlags = ((flags & 3) == 1 ? RTLD_LAZY : RTLD_NOW) |
             ((flags & 0x100) ? RTLD_GLOBAL : RTLD_LOCAL);
+#endif
         module->native = ::dlopen(path ? resolved.c_str() : nullptr, nativeFlags);
         if (!module->native) {
             if (path) LoadFailure(source, resolved, ::dlerror()); else Error(::dlerror());
@@ -321,6 +349,9 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
         }
 #ifdef __linux__
         if (path) InitializeLinuxGuestModule(module->native);
+#endif
+#ifdef __APPLE__
+        FindImage(*module, path == nullptr);
 #endif
 #endif
         std::lock_guard lock(modulesMutex);
@@ -347,9 +378,17 @@ void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name) {
     if (!name || !*name) { Error("dlsym: empty symbol name"); return nullptr; }
     try {
         std::vector<std::shared_ptr<Module>> search;
+        bool defaultScope = handle == nullptr || handle == reinterpret_cast<void*>(static_cast<std::intptr_t>(-2));
         {
             std::lock_guard lock(modulesMutex);
-            if (handle == nullptr || handle == reinterpret_cast<void*>(static_cast<std::intptr_t>(-2))) {
+#ifdef __APPLE__
+            if (!defaultScope) {
+                auto found = modules.find(reinterpret_cast<std::uintptr_t>(handle));
+                defaultScope = found != modules.end() && found->second->image != nullptr &&
+                    static_cast<const mach_header_64*>(found->second->image)->filetype == MH_EXECUTE;
+            }
+#endif
+            if (defaultScope) {
                 for (const auto& [key, module] : modules) if (module->global) search.push_back(module);
 #ifdef _WIN32
                 std::sort(search.begin(), search.end(), [](const auto& left, const auto& right) { return left->globalOrder < right->globalOrder; });
@@ -363,7 +402,7 @@ void* APS5_VABI dlsym_nid_postfix(void* handle, const char* name) {
         }
         for (const auto& module : search) if (auto* result = FindSymbol(*module, name)) return result;
 #ifndef _WIN32
-        if (handle == nullptr || handle == reinterpret_cast<void*>(static_cast<std::intptr_t>(-2))) {
+        if (defaultScope) {
             if (auto* result = DefaultScopeSymbol(name)) return result;
             const auto nid = Nid::ComputeNid(name, "");
             if (auto* result = DefaultScopeSymbol(nid.c_str())) return result;
