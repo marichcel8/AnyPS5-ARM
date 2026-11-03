@@ -1,4 +1,5 @@
 #include "prx/libSceNetCtl/include/Online.hpp"
+#include "prx/libSceNpWebApi2/include/InventoryExports.hpp"
 #include "prx/libSceNpWebApi2/include/Api.hpp"
 #include <cstdint>
 #include <cstddef>
@@ -285,6 +286,15 @@ static std::optional<std::string> ReplyHeader(std::int64_t requestId, const char
 }
 
 extern "C" {
+
+int APS5_VABI sceNpWebApi2IntGlobalPush2Initialize() {
+    NotImplemented_nid_no_patch(__func__);
+}
+
+int APS5_VABI sceNpWebApi2IntGlobalPush2Terminate() {
+    NotImplemented_nid_no_patch(__func__);
+}
+
 
 int APS5_VABI sceNpWebApi2AbortRequest(int64_t request_id) {
     Online::Call call("libSceNpWebApi2", __func__);

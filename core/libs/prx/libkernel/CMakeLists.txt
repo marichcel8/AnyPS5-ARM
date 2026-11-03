@@ -82,6 +82,7 @@ add_library(libkernel SHARED EXCLUDE_FROM_ALL
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Error.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/ThermalSensors.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Signals.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SigvecRegistration.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/SignalSets.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/Notification.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/System/src/UserContext.cpp
@@ -1257,8 +1258,9 @@ if(BUILD_TESTING)
     add_test(NAME guest_itimer_pending_default COMMAND guest_itimer_tests pending-default)
     set_tests_properties(guest_itimer_pending_default PROPERTIES TIMEOUT 20 PASS_REGULAR_EXPRESSION
         "SIGALRM: a pending SIGALRM was unblocked with the default disposition; the process terminates")
+    add_test(NAME guest_itimer_short_expiry COMMAND guest_itimer_tests short-expiry)
     if(WIN32)
-        set_tests_properties(guest_itimer guest_itimer_pending_default PROPERTIES ENVIRONMENT_MODIFICATION
+        set_tests_properties(guest_itimer guest_itimer_pending_default guest_itimer_short_expiry PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_parent_process_tests ${LIBS_INCLUDE_DIR}/tests/GuestParentProcess.cpp)
@@ -2255,6 +2257,16 @@ if(BUILD_TESTING)
         set_tests_properties(guest_posix_specific PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
+    add_test_executable(guest_pipe_fault_tests ${LIBS_INCLUDE_DIR}/tests/GuestPipeFault.cpp)
+    target_include_directories(guest_pipe_fault_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_pipe_fault_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_pipe_fault_tests)
+    add_test(NAME guest_pipe_fault COMMAND guest_pipe_fault_tests)
+    set_tests_properties(guest_pipe_fault PROPERTIES TIMEOUT 15)
+    if(WIN32)
+        set_tests_properties(guest_pipe_fault PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     add_test_executable(guest_rename_dot_tests ${LIBS_INCLUDE_DIR}/tests/GuestRenameDot.cpp)
     target_include_directories(guest_rename_dot_tests PRIVATE ${LIBS_INCLUDE_DIR})
     target_link_libraries(guest_rename_dot_tests PRIVATE libkernel libc)
@@ -2273,6 +2285,16 @@ if(BUILD_TESTING)
     set_tests_properties(guest_truncate_extend PROPERTIES TIMEOUT 30)
     if(WIN32)
         set_tests_properties(guest_truncate_extend PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
+    add_test_executable(guest_posix_exit_tests ${LIBS_INCLUDE_DIR}/tests/GuestPosixExit.cpp)
+    target_include_directories(guest_posix_exit_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_posix_exit_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_posix_exit_tests)
+    add_test(NAME guest_posix_exit COMMAND guest_posix_exit_tests)
+    set_tests_properties(guest_posix_exit PROPERTIES TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(guest_posix_exit PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
     add_test_executable(guest_fstatfs_tests ${LIBS_INCLUDE_DIR}/tests/GuestFstatfs.cpp)
