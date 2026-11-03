@@ -405,6 +405,7 @@ private:
         append(key, value.ldsLockFences);
         append(key, value.meshWindowBuffer);
         append(key, value.hostInterpolationFirst);
+        append(key, value.shaderImageMinLod);
     }
 };
 

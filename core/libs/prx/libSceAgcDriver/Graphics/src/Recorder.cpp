@@ -557,6 +557,7 @@ bool ProcTable() {
 // set and cleared under this mutex, so a lookup never touches a table being destroyed. Nothing
 // under this mutex takes the GPU mutex (no lock-order cycle).
 AgcDriver::Mutex labelTableMutex;
+std::atomic<unsigned> injectedSubmitFailures{0};
 Recorder* labelTableOwner = nullptr;
 // The ranges of the calling worker's queued labels (NoteQueuedLabel, cleared by
 // ForgetQueuedLabels): the flush hook, on the same thread, has them recorded before an access that
@@ -3879,6 +3880,10 @@ void Recorder::HoldNextSubmit(VkSemaphore semaphore, std::uint64_t value) {
     submitHoldValue = value;
 }
 
+void Recorder::FailNextSubmitsForTest(unsigned count) {
+    injectedSubmitFailures.store(count, std::memory_order_relaxed);
+}
+
 void Recorder::Submit() {
     PerformanceTimer frameTiming("Recorder.Submit");
     // The work count is cleared even when nothing is open: the driver counts a dispatch after its
@@ -3922,6 +3927,7 @@ void Recorder::Submit() {
         }
     } discardUnsubmitted{*this, batch};
     Check(function(endCommandBuffer, "vkEndCommandBuffer")(batch->commands), "vkEndCommandBuffer recorder");
+    if (injectedSubmitFailures.load(std::memory_order_relaxed) != 0 && injectedSubmitFailures.fetch_sub(1, std::memory_order_relaxed) != 0) throw std::runtime_error("vkQueueSubmit recorder: injected failure");
     std::array<VkCommandBuffer, 2> submitted{batch->commands, VK_NULL_HANDLE};
     if (batch->prologue != VK_NULL_HANDLE) {
         // The prologue's writes are visible to every command of the batch after it.
