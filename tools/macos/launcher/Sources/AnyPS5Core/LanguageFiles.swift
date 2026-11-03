@@ -4,7 +4,7 @@ import Foundation
 /// object of texts per language, as Weblate keeps monolingual JSON, named by its locale code
 /// (de.json is German, pt-BR.json Brazilian Portuguese). The language's own name is the text
 /// "languageName"; the console language a game starts in comes from the code
-/// (ConsoleLanguage.forLocale). The same format and keys as AnyLauncher-Port's assets/l10n.
+/// (ConsoleLanguage.forLocale). The same format and keys as AnyPS5-Desktop's assets/l10n.
 public struct LanguageFile: Equatable, Sendable {
     public let code: String
     /// The language's name in itself, as Settings lists it.
@@ -61,9 +61,9 @@ public enum LanguageFiles {
     }
 
     /// The language files in [folders], the first folder first: a file there comes before one of
-    /// the same code further on (the user's Languages folder before the built-in files), and one
-    /// that cannot be read is left out for the next of its code. English comes first, then the
-    /// others by name.
+    /// the same code further on (the user's Languages folder before the built-in files), a text it
+    /// lacks is the later file's, and one that cannot be read is left out. English comes first,
+    /// then the others by name.
     public static func load(_ folders: [URL], log: (String) -> Void = { _ in }) -> [LanguageFile] {
         var candidates: [String: [URL]] = [:]
         var order: [String] = []
@@ -76,21 +76,71 @@ public enum LanguageFiles {
                 candidates[code, default: []].append(file)
             }
         }
+        // Every readable file of a code is read: the first gives the name and its texts, a text it
+        // lacks comes from the next (a translator's older file over the built-in one), then English.
         var found: [LanguageFile] = []
         for code in order {
+            var first: LanguageFile?
+            var texts: [String: String] = [:]
             for file in candidates[code] ?? [] {
                 do {
-                    found.append(try parse(Data(contentsOf: file), code: code))
-                    break
+                    let language = try parse(Data(contentsOf: file), code: code)
+                    if first == nil { first = language }
+                    texts.merge(language.texts) { kept, _ in kept }
                 } catch {
                     log("the language file \(file.path) is left out: \(error)")
                 }
+            }
+            if let first {
+                found.append(LanguageFile(code: code, name: first.name, consoleLanguage: first.consoleLanguage, texts: texts))
             }
         }
         return found.sorted { a, b in
             if a.code == english || b.code == english { return a.code == english }
             return a.name.lowercased() < b.name.lowercased()
         }
+    }
+
+    /// Codes a system may give for a language whose file has another one: Norwegian Bokmål and
+    /// Nynorsk read the Norwegian file, Tagalog the Filipino one, and the old code for Indonesian
+    /// the Indonesian one.
+    static let sameLanguage = ["nb": "no", "nn": "no", "tl": "fil", "in": "id"]
+    /// The regions that write Chinese in traditional characters when the system gives no script.
+    static let traditionalRegions: Set<String> = ["TW", "HK", "MO"]
+
+    /// The first of [preferred] (locale names as macOS gives them, Locale.preferredLanguages:
+    /// zh-Hant-TW, nb-NO, fil-PH, en_US) one of [codes] (the files' codes: zh-Hans, pt-BR, no) is
+    /// for, or nil. A locale takes the file of its language and script or region (pt-BR), else its
+    /// language's (pt). Chinese takes zh-Hant for Taiwan, Hong Kong and Macau or the Hant script,
+    /// and zh-Hans otherwise. The same rules as AnyPS5-Desktop's Language.matchLocale.
+    public static func match(_ preferred: [String], codes: [String]) -> String? {
+        var byKey: [String: String] = [:]
+        for code in codes { byKey[code.replacingOccurrences(of: "_", with: "-").lowercased()] = code }
+        for name in preferred {
+            let locale = name.split(whereSeparator: { $0 == "." || $0 == "@" }).first.map(String.init) ?? ""
+            let parts = locale.split(whereSeparator: { $0 == "-" || $0 == "_" }).map(String.init)
+            guard let first = parts.first?.lowercased() else { continue }
+            let language = sameLanguage[first] ?? first
+            var script: String?
+            var region: String?
+            for part in parts.dropFirst() {
+                if part.count == 4, script == nil {
+                    script = part.prefix(1).uppercased() + part.dropFirst().lowercased()
+                } else if part.count == 2 || part.count == 3, region == nil {
+                    region = part.uppercased()
+                }
+            }
+            if language == "zh", script == nil { script = traditionalRegions.contains(region ?? "") ? "Hant" : "Hans" }
+            var candidates: [String] = []
+            if let script, let region { candidates.append("\(language)-\(script)-\(region)") }
+            if let script { candidates.append("\(language)-\(script)") }
+            if let region { candidates.append("\(language)-\(region)") }
+            candidates.append(language)
+            for candidate in candidates {
+                if let code = byKey[candidate.lowercased()] { return code }
+            }
+        }
+        return nil
     }
 
     /// A text's placeholders as String(format:) fills them: (argument number, kind) for each,

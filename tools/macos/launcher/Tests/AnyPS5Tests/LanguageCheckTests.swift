@@ -2,7 +2,7 @@
 import AnyPS5Core
 import XCTest
 
-/// The check of the language files in l10n (l10n/TRANSLATING.md), as AnyLauncher-Port's
+/// The check of the language files in l10n (l10n/TRANSLATING.md), as AnyPS5-Desktop's
 /// tool/check_translations.dart does it for its own: every file one flat JSON object of texts
 /// (Weblate's monolingual JSON, so no "@meta"), named by a locale code, its own name under
 /// "languageName", no key English lacks, English's placeholders in each text, Turkish complete,
@@ -96,6 +96,11 @@ final class LanguageCheckTests: XCTestCase {
             ]),
             "Orbit Runner is ready, but some of its files are encrypted in the dump. If it does not start, dump it again."
         )
+        // Gran Turismo 7 with its wheel module neither an ELF nor a SELF: the same short note.
+        XCTAssertEqual(
+            AppModel.leftOutText("Gran Turismo 7", [LeftOutModule("sce_module/pdiWheel_0.prx", .encrypted)]),
+            "Gran Turismo 7 is ready, but some of its files are encrypted in the dump. If it does not start, dump it again."
+        )
     }
 
     func testFormatsFillTheirArgumentsInBothLanguages() {
@@ -131,7 +136,11 @@ final class LanguageCheckTests: XCTestCase {
         let saved = T.language
         defer { T.language = saved }
         let names = ["ar": "العربية", "bho": "भोजपुरी", "bn": "বাংলা", "de": "Deutsch", "es": "Español", "fr": "Français",
-                     "hi": "हिन्दी", "id": "Bahasa Indonesia", "ja": "日本語", "pt": "Português", "ru": "Русский", "ur": "اردو"]
+                     "hi": "हिन्दी", "id": "Bahasa Indonesia", "ja": "日本語", "pt": "Português", "ru": "Русский", "ur": "اردو",
+                     // VK's second batch.
+                     "am": "አማርኛ", "cs": "Čeština", "da": "Dansk", "fil": "Filipino", "hu": "Magyar", "km": "ភាសាខ្មែរ",
+                     "ko": "한국어", "lo": "ພາສາລາວ", "ms": "Bahasa Melayu", "no": "Norsk", "ro": "Română", "sv": "Svenska",
+                     "zh-Hans": "简体中文", "zh-Hant": "繁體中文"]
         let english = try file("en").texts
         for (code, name) in names {
             let language = try XCTUnwrap(Language(rawValue: code), "\(code).json is listed")
@@ -150,6 +159,31 @@ final class LanguageCheckTests: XCTestCase {
         T.language = try XCTUnwrap(Language(rawValue: "de"))
         XCTAssertEqual(T.text(.back), "Zurück")
         XCTAssertEqual(T.string("welcomeSubtitle"), english["welcomeSubtitle"], "the Mac's own words, which the Port says of a PC, stay English")
+    }
+
+    /// The first start picks the Mac's language, as AnyPS5-Desktop's launcher does: Chinese by
+    /// its script or region, Norwegian and Filipino by any of their codes.
+    func testTheFirstStartPicksTheMacsLanguage() throws {
+        let codes = Language.allCases.map(\.code)
+        let cases: [(String, String?)] = [
+            ("zh-Hans-CN", "zh-Hans"), ("zh-CN", "zh-Hans"), ("zh_SG", "zh-Hans"), ("zh", "zh-Hans"),
+            ("zh-Hant-TW", "zh-Hant"), ("zh-TW", "zh-Hant"), ("zh-HK", "zh-Hant"), ("zh-MO", "zh-Hant"),
+            ("zh-Hant-HK", "zh-Hant"), ("zh-Hant", "zh-Hant"),
+            ("nb-NO", "no"), ("nn-NO", "no"), ("no", "no"), ("fil-PH", "fil"), ("tl-PH", "fil"),
+            ("ko-KR", "ko"), ("km-KH", "km"), ("lo-LA", "lo"), ("am-ET", "am"), ("cs-CZ", "cs"), ("hu-HU", "hu"),
+            ("ro-RO", "ro"), ("ms-MY", "ms"), ("sv-SE", "sv"), ("da-DK", "da"), ("de_DE@euro", "de"), ("pt-BR", "pt"),
+            ("eo", nil),
+        ]
+        for (system, code) in cases {
+            XCTAssertEqual(LanguageFiles.match([system], codes: codes), code, system)
+        }
+        XCTAssertEqual(LanguageFiles.match(["eo", "fr-CA", "en-US"], codes: codes), "fr")
+        XCTAssertEqual(LanguageFiles.match(["pt-BR"], codes: ["en", "pt", "pt-BR"]), "pt-BR")
+        XCTAssertEqual(LanguageFiles.match(["pt_PT"], codes: ["en", "pt", "pt-BR"]), "pt")
+        XCTAssertEqual(Preferences.firstStart(preferred: ["zh-Hant-TW", "en-US"]).language.code, "zh-Hant")
+        XCTAssertEqual(Preferences.firstStart(preferred: ["nb-NO"]).language.code, "no")
+        XCTAssertEqual(Preferences.firstStart(preferred: ["eo"]).language, .english)
+        XCTAssertEqual(Preferences.firstStart(preferred: []).language, .english)
     }
 
     /// Arabic and Urdu mirror the screens, and ← and → then follow what is drawn.
