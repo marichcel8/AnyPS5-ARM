@@ -97,6 +97,49 @@ static int DoLstat(const std::filesystem::path& p, NativeStat* st) {
     st->isSymbolicLink = true;
     return 0;
 }
+#elif defined(__APPLE__)
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <unistd.h>
+using NativeStat = struct stat;
+static int StatAt(const std::filesystem::path& p, NativeStat* st, int flags) {
+    std::string rest = p.native();
+    int directory = AT_FDCWD;
+    while (rest.size() >= PATH_MAX) {
+        const std::size_t split = rest.rfind('/', PATH_MAX - 1);
+        if (split == std::string::npos) {
+            if (directory != AT_FDCWD) ::close(directory);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        const std::string prefix = split == 0 ? std::string("/") : rest.substr(0, split);
+        const int next = ::openat(directory, prefix.c_str(), O_SEARCH | O_CLOEXEC);
+        const int error = errno;
+        if (directory != AT_FDCWD) ::close(directory);
+        if (next < 0) {
+            errno = error;
+            return -1;
+        }
+        directory = next;
+        rest.erase(0, split + 1);
+        rest.erase(0, rest.find_first_not_of('/'));
+    }
+    const int result = ::fstatat(directory, rest.empty() ? "." : rest.c_str(), st, flags);
+    const int error = errno;
+    if (directory != AT_FDCWD) ::close(directory);
+    errno = error;
+    return result;
+}
+static int DoStat(const std::filesystem::path& p, NativeStat* st) {
+    return StatAt(p, st, 0);
+}
+static int DoFstat(int fd, NativeStat* st) {
+    return ::fstat(fd, st);
+}
+static int DoLstat(const std::filesystem::path& p, NativeStat* st) {
+    return StatAt(p, st, AT_SYMLINK_NOFOLLOW);
+}
 #else
 #include <sys/stat.h>
 using NativeStat = struct stat;
@@ -154,20 +197,20 @@ static void CopyNativeStat(const NativeStat& st, FileStat* sb) {
     sb->st_blksize = static_cast<std::uint32_t>(st.st_blksize);
     sb->st_blocks = static_cast<std::int64_t>(st.st_blocks);
 #if defined(__APPLE__)
-    const auto& accessed = st.st_atimespec;
-    const auto& modified = st.st_mtimespec;
-    const auto& changed = st.st_ctimespec;
+    sb->st_atim.tv_sec = static_cast<std::int64_t>(st.st_atimespec.tv_sec);
+    sb->st_atim.tv_nsec = static_cast<std::int64_t>(st.st_atimespec.tv_nsec);
+    sb->st_mtim.tv_sec = static_cast<std::int64_t>(st.st_mtimespec.tv_sec);
+    sb->st_mtim.tv_nsec = static_cast<std::int64_t>(st.st_mtimespec.tv_nsec);
+    sb->st_ctim.tv_sec = static_cast<std::int64_t>(st.st_ctimespec.tv_sec);
+    sb->st_ctim.tv_nsec = static_cast<std::int64_t>(st.st_ctimespec.tv_nsec);
 #else
-    const auto& accessed = st.st_atim;
-    const auto& modified = st.st_mtim;
-    const auto& changed = st.st_ctim;
+    sb->st_atim.tv_sec = static_cast<std::int64_t>(st.st_atim.tv_sec);
+    sb->st_atim.tv_nsec = static_cast<std::int64_t>(st.st_atim.tv_nsec);
+    sb->st_mtim.tv_sec = static_cast<std::int64_t>(st.st_mtim.tv_sec);
+    sb->st_mtim.tv_nsec = static_cast<std::int64_t>(st.st_mtim.tv_nsec);
+    sb->st_ctim.tv_sec = static_cast<std::int64_t>(st.st_ctim.tv_sec);
+    sb->st_ctim.tv_nsec = static_cast<std::int64_t>(st.st_ctim.tv_nsec);
 #endif
-    sb->st_atim.tv_sec = static_cast<std::int64_t>(accessed.tv_sec);
-    sb->st_atim.tv_nsec = static_cast<std::int64_t>(accessed.tv_nsec);
-    sb->st_mtim.tv_sec = static_cast<std::int64_t>(modified.tv_sec);
-    sb->st_mtim.tv_nsec = static_cast<std::int64_t>(modified.tv_nsec);
-    sb->st_ctim.tv_sec = static_cast<std::int64_t>(changed.tv_sec);
-    sb->st_ctim.tv_nsec = static_cast<std::int64_t>(changed.tv_nsec);
 #if defined(__APPLE__)
     sb->st_birthtim.tv_sec = static_cast<std::int64_t>(st.st_birthtimespec.tv_sec);
     sb->st_birthtim.tv_nsec = static_cast<std::int64_t>(st.st_birthtimespec.tv_nsec);

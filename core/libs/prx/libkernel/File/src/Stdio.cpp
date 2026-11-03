@@ -56,13 +56,13 @@ static constexpr std::uint64_t KERNEL_MNT_RDONLY = 0x1;
 static constexpr std::uint64_t KERNEL_MNT_NOEXEC = 0x4;
 static constexpr std::uint64_t KERNEL_MNT_NOSUID = 0x8;
 
-#if defined(_WIN32) || defined(__APPLE__)
+#ifdef __APPLE__
 struct PositionedLock {
     std::mutex mutex;
 };
 std::mutex g_positionedTableLock;
 std::unordered_map<int, std::shared_ptr<PositionedLock>> g_positionedLocks;
-std::unique_lock<std::mutex> File::LockPositionedTransfer(int descriptor) {
+File::PositionedTransferLock File::LockPositionedTransfer(int descriptor) {
     std::shared_ptr<PositionedLock> entry;
     {
         std::lock_guard table(g_positionedTableLock);
@@ -70,7 +70,7 @@ std::unique_lock<std::mutex> File::LockPositionedTransfer(int descriptor) {
         if (!slot) slot = std::make_shared<PositionedLock>();
         entry = slot;
     }
-    return std::unique_lock<std::mutex>(entry->mutex);
+    return PositionedTransferLock(std::shared_ptr<std::mutex>(entry, &entry->mutex));
 }
 void File::SharePositionedTransfer(int from, int to) {
     std::lock_guard table(g_positionedTableLock);
@@ -265,6 +265,27 @@ static int NativeSync(int descriptor) {
 static int NativeFlock(int descriptor, int operation) {
     return File::Flock(descriptor, operation);
 }
+struct PositionedLock {
+    std::mutex mutex;
+};
+std::mutex g_positionedTableLock;
+std::unordered_map<int, std::shared_ptr<PositionedLock>> g_positionedLocks;
+File::PositionedTransferLock File::LockPositionedTransfer(int descriptor) {
+    std::shared_ptr<PositionedLock> entry;
+    {
+        std::lock_guard table(g_positionedTableLock);
+        auto& slot = g_positionedLocks[descriptor];
+        if (!slot) slot = std::make_shared<PositionedLock>();
+        entry = slot;
+    }
+    return PositionedTransferLock(std::shared_ptr<std::mutex>(entry, &entry->mutex));
+}
+void File::SharePositionedTransfer(int from, int to) {
+    std::lock_guard table(g_positionedTableLock);
+    auto& source = g_positionedLocks[from];
+    if (!source) source = std::make_shared<PositionedLock>();
+    g_positionedLocks[to] = source;
+}
 static std::int64_t NativePositionedTransfer(int descriptor, void* buf, std::size_t nbytes, std::int64_t offset, bool write) {
     if (nbytes > static_cast<std::size_t>(std::numeric_limits<DWORD>::max())) {
         throw std::runtime_error("NativePositioned: nbytes exceeds platform limit");
@@ -376,6 +397,9 @@ static std::int64_t NativePwrite(int descriptor, const void* buf, std::size_t nb
 #include <dirent.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#ifdef __APPLE__
+extern "C" ssize_t __getdirentries64(int fd, void* buffer, size_t bytes, off_t* base);
+#endif
 static int NativeRmdir(const std::filesystem::path& path) {
     return ::rmdir(path.c_str());
 }
@@ -418,24 +442,9 @@ static std::int64_t NativePread(int descriptor, void* buf, std::size_t nbytes, s
     return static_cast<std::int64_t>(::pread(descriptor, buf, nbytes, static_cast<off_t>(offset)));
 }
 #ifdef __APPLE__
-std::unique_lock<std::mutex> File::LockAppendOffset(int descriptor) {
-    if (!File::Appends(descriptor)) return {};
+std::optional<File::PositionedTransferLock> File::LockAppendOffset(int descriptor) {
+    if (!File::Appends(descriptor)) return std::nullopt;
     return File::LockPositionedTransfer(descriptor);
-}
-std::int64_t File::AppendKeepingOffset(int descriptor, const struct iovec* vectors, int count) {
-    if (!File::Appends(descriptor)) return -2;
-    struct stat status{};
-    if (::fstat(descriptor, &status) != 0 || !S_ISREG(status.st_mode)) return -2;
-    const auto positioned = File::LockPositionedTransfer(descriptor);
-    const off_t offset = ::lseek(descriptor, 0, SEEK_CUR);
-    if (offset < 0) return -1;
-    const auto result = static_cast<std::int64_t>(::writev(descriptor, vectors, count));
-    const int error = errno;
-    if (::lseek(descriptor, offset, SEEK_SET) != offset) {
-        throw std::runtime_error("AppendKeepingOffset: cannot restore the offset of descriptor " + std::to_string(descriptor) + ", errno=" + std::to_string(errno));
-    }
-    errno = error;
-    return result;
 }
 #endif
 #ifdef __APPLE__
@@ -627,9 +636,9 @@ static bool NativeIsPipe(int descriptor) {
 #endif
 static bool NativeIsPipe(int descriptor) {
 #ifdef __APPLE__
-    // macOS has no pipefs magic; a FIFO descriptor (pipe or named FIFO) counts as a pipe.
-    struct stat fifo{};
-    return ::fstat(descriptor, &fifo) == 0 && S_ISFIFO(fifo.st_mode);
+    struct stat file{};
+    struct statfs kind{};
+    return ::fstat(descriptor, &file) == 0 && S_ISFIFO(file.st_mode) && ::fstatfs(descriptor, &kind) != 0;
 #else
     constexpr long PipeFilesystem = 0x50495045;
     struct stat file{};
@@ -642,19 +651,22 @@ static bool NativeIsPipe(int descriptor) {
 static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     struct stat file{};
     if (::fstat(descriptor, &file) != 0) return SceErrorFromErrno(errno) & 0xffff;
-#ifdef O_PATH
-    if (S_ISSOCK(file.st_mode) && (::fcntl(descriptor, F_GETFL) & O_PATH) == 0) return GUEST_EINVAL;
-#else
-    // macOS has no O_PATH, so a socket descriptor is always an open socket.
+#ifdef __APPLE__
     if (S_ISSOCK(file.st_mode)) return GUEST_EINVAL;
-#endif
     if (NativeIsPipe(descriptor)) return GUEST_EINVAL;
+#else
+    if (S_ISSOCK(file.st_mode) && (::fcntl(descriptor, F_GETFL) & O_PATH) == 0) return GUEST_EINVAL;
+    if (NativeIsPipe(descriptor)) return GUEST_EINVAL;
+#endif
     if (S_ISCHR(file.st_mode)) return DeviceFilesystem(fs);
     struct statvfs host{};
     if (::fstatvfs(descriptor, &host) != 0) return SceErrorFromErrno(errno) & 0xffff;
     if (host.f_flag & ST_RDONLY) fs->f_flags |= KERNEL_MNT_RDONLY;
     if (host.f_flag & ST_NOSUID) fs->f_flags |= KERNEL_MNT_NOSUID;
-#ifdef ST_NOEXEC
+#ifdef __APPLE__
+    struct statfs mount{};
+    if (::fstatfs(descriptor, &mount) == 0 && (mount.f_flags & MNT_NOEXEC)) fs->f_flags |= KERNEL_MNT_NOEXEC;
+#else
     if (host.f_flag & ST_NOEXEC) fs->f_flags |= KERNEL_MNT_NOEXEC;
 #endif
     fs->f_bsize = host.f_frsize != 0 ? host.f_frsize : host.f_bsize;
@@ -847,12 +859,8 @@ int APS5_VABI close_nid_postfix(int d) {
 #ifdef _WIN32
     const auto positioned = File::LockPositionedTransfer(d);
 #endif
-    File::ForgetRandomDevice(d);
-    File::ForgetDescriptor(d);
-    ForgetJitSharedMemory(d);
-    File::ForgetDirectoryDescriptor(d);
+    File::ForgetClosedDescriptor(d);
 #ifdef _WIN32
-    File::ForgetFileLock(d);
     const int shared = File::CloseSharedMemoryDescriptor_nid_no_patch(d);
     if (shared != -2) return shared;
     return WithoutParameterHandler([d] { return ::_close(d); });
@@ -1251,7 +1259,6 @@ int APS5_VABI sceKernelFdatasync(int fd) {
 #ifdef _WIN32
     if (NativeSync(fd) != 0) return SceErrorFromErrno(errno);
 #elif defined(__APPLE__)
-    // macOS declares no fdatasync; fsync also writes the metadata.
     if (::fsync(fd) != 0) return SceErrorFromErrno(errno);
 #else
     if (::fdatasync(fd) != 0) return SceErrorFromErrno(errno);
@@ -1372,6 +1379,85 @@ static bool InsideApp0(int fd) {
     return inside;
 }
 
+#ifdef __APPLE__
+static unsigned char GuestEntryType(int fd, const struct dirent& entry, bool followLinks) {
+    if (entry.d_type != DT_LNK && entry.d_type != DT_UNKNOWN) return entry.d_type;
+    if (entry.d_type == DT_LNK && !followLinks) return DT_LNK;
+    const int savedErrno = errno;
+    struct stat target{};
+    const bool found = ::fstatat(fd, entry.d_name, &target, followLinks ? 0 : AT_SYMLINK_NOFOLLOW) == 0;
+    errno = savedErrno;
+    if (!found) return entry.d_type;
+    if (S_ISDIR(target.st_mode)) return DT_DIR;
+    if (S_ISREG(target.st_mode)) return DT_REG;
+    if (S_ISLNK(target.st_mode)) return DT_LNK;
+    return entry.d_type;
+}
+
+int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
+    if (GuestSockets::IsOpen(fd)) return SceErrorFromErrno(GUEST_EINVAL);
+    File::RefuseArchivedFile(fd, "getdirentries");
+    constexpr std::size_t GuestHeaderBytes = 8;
+    constexpr std::size_t GuestMaxName = 255;
+    if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
+    if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
+    const GuestArena::HostWrite destination(buf, static_cast<std::size_t>(nbytes));
+    const GuestArena::HostWrite baseDestination(basep, basep == nullptr ? 0 : sizeof(*basep));
+    if (!destination.Open() || !baseDestination.Open()) return SceErrorFromErrno(GUEST_EFAULT);
+    if (File::IsDirectoryDescriptor(fd)) return File::ReadDirectoryDescriptor(fd, buf, nbytes, basep);
+    struct stat status{};
+    if (::fstat(fd, &status) != 0) return SceErrorFromErrno(errno);
+    if (!S_ISDIR(status.st_mode)) return SceErrorFromErrno(GUEST_EINVAL);
+    const off_t base = ::lseek(fd, 0, SEEK_CUR);
+    if (base < 0) return SceErrorFromErrno(errno);
+    if (basep != nullptr) *basep = static_cast<int64_t>(base);
+    if (::lseek(fd, 0, SEEK_SET) < 0) return SceErrorFromErrno(errno);
+    std::vector<char> listing;
+    for (;;) {
+        constexpr std::size_t Chunk = 64 * 1024;
+        const auto start = listing.size();
+        listing.resize(start + Chunk);
+        off_t position = 0;
+        const auto read = ::__getdirentries64(fd, listing.data() + start, Chunk, &position);
+        if (read < 0) {
+            const int error = errno;
+            ::lseek(fd, base, SEEK_SET);
+            return SceErrorFromErrno(error);
+        }
+        listing.resize(start + static_cast<std::size_t>(read));
+        if (read == 0) break;
+    }
+    const bool followLinks = InsideApp0(fd);
+    std::size_t written = 0;
+    off_t index = 0;
+    for (std::size_t offset = 0; offset < listing.size(); ++index) {
+        const auto* entry = reinterpret_cast<const struct dirent*>(listing.data() + offset);
+        if (entry->d_reclen == 0) break;
+        offset += entry->d_reclen;
+        if (index < base) continue;
+        const auto nameLength = std::strlen(entry->d_name);
+        const auto record = (GuestHeaderBytes + nameLength + 1 + 3) & ~std::size_t{3};
+        if (nameLength > GuestMaxName || written + record > static_cast<std::size_t>(nbytes)) {
+            if (::lseek(fd, index, SEEK_SET) < 0) return SceErrorFromErrno(errno);
+            if (written != 0) return static_cast<int>(written);
+            return nameLength > GuestMaxName ? static_cast<int>(0x80020000u | GUEST_ENAMETOOLONG) : SceErrorFromErrno(GUEST_EINVAL);
+        }
+        char* out = buf + written;
+        std::memset(out, 0, record);
+        const auto fileNumber = static_cast<std::uint32_t>(entry->d_ino);
+        const auto recordLength = static_cast<std::uint16_t>(record);
+        const auto nameBytes = static_cast<std::uint8_t>(nameLength);
+        std::memcpy(out, &fileNumber, sizeof(fileNumber));
+        std::memcpy(out + 4, &recordLength, sizeof(recordLength));
+        out[6] = static_cast<char>(GuestEntryType(fd, *entry, followLinks));
+        out[7] = static_cast<char>(nameBytes);
+        std::memcpy(out + GuestHeaderBytes, entry->d_name, nameLength);
+        written += record;
+    }
+    if (::lseek(fd, index, SEEK_SET) < 0) return SceErrorFromErrno(errno);
+    return static_cast<int>(written);
+}
+#else
 static unsigned char GuestEntryType(int fd, const struct dirent64& entry, bool followLinks) {
     if (entry.d_type != DT_LNK && entry.d_type != DT_UNKNOWN) return entry.d_type;
     if (entry.d_type == DT_LNK && !followLinks) return DT_LNK;
@@ -1441,6 +1527,7 @@ int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* bas
     if (::lseek(fd, resume, SEEK_SET) < 0) return SceErrorFromErrno(errno);
     return static_cast<int>(written);
 }
+#endif
 
 int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
     return sceKernelGetdirentries(fd, buf, nbytes, nullptr);
@@ -1674,9 +1761,12 @@ int64_t APS5_VABI sceKernelPwrite(int d, const void* buf, size_t nbytes, int64_t
 }
 
 #ifdef __APPLE__
-static std::int64_t EmptyIovecs(int d) {
-    if (GuestSockets::IsOpen(d)) return 0;
-    return ::fcntl(d, F_GETFD) < 0 ? SceErrorFromErrno(errno) : 0;
+static std::int64_t EmptyIovecsResult(int d, bool write, bool positioned) {
+    const int flags = ::fcntl(d, F_GETFL);
+    if (flags < 0) return SceErrorFromErrno(errno);
+    if ((flags & O_ACCMODE) == (write ? O_RDONLY : O_WRONLY)) return SceErrorFromErrno(EBADF);
+    if (positioned && ::lseek(d, 0, SEEK_CUR) < 0) return SceErrorFromErrno(errno);
+    return 0;
 }
 #endif
 
@@ -1685,9 +1775,6 @@ int64_t APS5_VABI sceKernelReadv(int d, const KernelIovec* guestIov, int iovcnt)
     std::vector<KernelIovec> vectors;
     if (const int error = CopyIovecs(guestIov, iovcnt, vectors)) return error;
     const auto* iov = vectors.data();
-#ifdef __APPLE__
-    if (iovcnt == 0) return EmptyIovecs(d);
-#endif
     std::deque<GuestArena::HostWrite> destinations;
     if (!OpenIovecs(iov, iovcnt, destinations)) return SceErrorFromErrno(GUEST_EFAULT);
     if (GuestSockets::IsOpen(d)) {
@@ -1697,7 +1784,7 @@ int64_t APS5_VABI sceKernelReadv(int d, const KernelIovec* guestIov, int iovcnt)
     if (File::IsRandomDevice(d)) return ReadRandomIovecs(d, iov, iovcnt);
     if (const auto archived = File::ReadArchivedIovecs(d, iov, iovcnt, nullptr)) return *archived;
 #ifdef __APPLE__
-    const auto appendOffset = File::LockAppendOffset(d);
+    if (iovcnt == 0) return EmptyIovecsResult(d, false, false);
 #endif
     const auto result = static_cast<std::int64_t>(::readv(d, NativeIovecs(iov), iovcnt));
     return result < 0 ? SceErrorFromErrno(errno) : result;
@@ -1713,14 +1800,11 @@ int64_t APS5_VABI sceKernelWritev(int d, const KernelIovec* guestIov, int iovcnt
         return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
     }
     const File::WriteSync sync(d);
-#ifdef __APPLE__
-    if (iovcnt == 0) return EmptyIovecs(d);
-#endif
     PrepareWriteIovecs(iov, iovcnt);
     const auto sharedResult = File::WritevSharedMemory_nid_no_patch(d, NativeIovecs(iov), iovcnt);
     if (sharedResult != -2) return sharedResult < 0 ? SceErrorFromErrno(errno) : sharedResult;
 #ifdef __APPLE__
-    const auto appendOffset = File::LockAppendOffset(d);
+    if (iovcnt == 0) return EmptyIovecsResult(d, true, false);
 #endif
     const auto result = static_cast<std::int64_t>(::writev(d, NativeIovecs(iov), iovcnt));
     return result < 0 ? SceErrorFromErrno(errno) : result;
@@ -1733,13 +1817,13 @@ int64_t APS5_VABI sceKernelPreadv(int d, const KernelIovec* guestIov, int iovcnt
     const auto* iov = vectors.data();
     if (const int error = PositionedArgumentError(d, false, false, offset)) return SceErrorFromErrno(error);
     if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
-#ifdef __APPLE__
-    if (iovcnt == 0) return EmptyIovecs(d);
-#endif
     std::deque<GuestArena::HostWrite> destinations;
     if (!OpenIovecs(iov, iovcnt, destinations)) return SceErrorFromErrno(GUEST_EFAULT);
     if (File::IsRandomDevice(d)) return ReadRandomIovecs(d, iov, iovcnt);
     if (const auto archived = File::ReadArchivedIovecs(d, iov, iovcnt, &offset)) return *archived;
+#ifdef __APPLE__
+    if (iovcnt == 0) return EmptyIovecsResult(d, false, true);
+#endif
     const auto result = static_cast<std::int64_t>(::preadv(d, NativeIovecs(iov), iovcnt, static_cast<off_t>(offset)));
     return result < 0 ? SceErrorFromErrno(errno) : result;
 }
@@ -1752,13 +1836,11 @@ int64_t APS5_VABI sceKernelPwritev(int d, const KernelIovec* guestIov, int iovcn
     if (const int error = PositionedArgumentError(d, true, false, offset)) return SceErrorFromErrno(error);
     if (const auto error = PositionedGuestSocketError(d); error != 0) return error;
     const File::WriteSync sync(d);
-#ifdef __APPLE__
-    if (iovcnt == 0) return EmptyIovecs(d);
-#endif
     PrepareWriteIovecs(iov, iovcnt);
     const auto sharedResult = File::PwritevSharedMemory_nid_no_patch(d, NativeIovecs(iov), iovcnt, offset);
     if (sharedResult != -2) return sharedResult < 0 ? SceErrorFromErrno(errno) : sharedResult;
 #ifdef __APPLE__
+    if (iovcnt == 0) return EmptyIovecsResult(d, true, true);
     if (const auto appended = File::WritevAtEnd(d, NativeIovecs(iov), iovcnt); appended != -2) return appended < 0 ? SceErrorFromErrno(errno) : appended;
 #endif
     const auto result = static_cast<std::int64_t>(::pwritev(d, NativeIovecs(iov), iovcnt, static_cast<off_t>(offset)));

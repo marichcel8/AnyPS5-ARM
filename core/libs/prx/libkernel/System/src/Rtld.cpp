@@ -19,7 +19,11 @@
 #include <dlfcn.h>
 #else
 #include <dlfcn.h>
+#ifdef __APPLE__
+#include <mach-o/loader.h>
+#else
 #include <link.h>
+#endif
 #endif
 
 #ifdef _WIN32

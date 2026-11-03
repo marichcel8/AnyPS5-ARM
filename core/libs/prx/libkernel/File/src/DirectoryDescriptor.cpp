@@ -34,9 +34,27 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <sys/param.h>
+#endif
 #endif
 
 namespace {
+
+#ifndef _WIN32
+std::filesystem::path HostDescriptorTarget(int fd, std::error_code& error) {
+#ifdef __APPLE__
+    char buffer[MAXPATHLEN];
+    if (::fcntl(fd, F_GETPATH, buffer) != 0) {
+        error = std::error_code(errno, std::generic_category());
+        return {};
+    }
+    return std::filesystem::path(buffer);
+#else
+    return std::filesystem::read_symlink(std::filesystem::path("/proc/self/fd") / std::to_string(fd), error);
+#endif
+}
+#endif
 
 constexpr std::uint8_t GuestUnknownType = 0;
 constexpr std::uint8_t GuestDirectoryType = 4;
@@ -296,38 +314,26 @@ bool IsNativeDirectoryDescriptor(int fd) {
     return state && state->nativeBacked;
 }
 
-#ifndef _WIN32
-static std::optional<std::filesystem::path> HostDescriptorPath(int fd) {
-    if (fd < 0) return std::nullopt;
-#ifdef __APPLE__
-    char buffer[MAXPATHLEN];
-    if (::fcntl(fd, F_GETPATH, buffer) != 0) return std::nullopt;
-    return std::filesystem::path(buffer);
-#else
-    std::error_code error;
-    const auto link = std::filesystem::path("/proc/self/fd") / std::to_string(fd);
-    const auto target = std::filesystem::read_symlink(link, error);
-    if (error) return std::nullopt;
-    return target;
-#endif
-}
-#endif
-
 std::optional<std::filesystem::path> DirectoryDescriptorPath(int fd) {
     if (const auto state = Find(fd)) {
         if (!state->nativeBacked) return state->path;
 #ifdef _WIN32
         return WindowsDescriptorPath_nid_no_patch(fd);
 #else
-        return HostDescriptorPath(fd);
+        if (fd < 0) return std::nullopt;
+        std::error_code error;
+        const auto target = HostDescriptorTarget(fd, error);
+        if (error) return std::nullopt;
+        return target;
 #endif
     }
 #ifdef _WIN32
     return std::nullopt;
 #else
-    const auto target = HostDescriptorPath(fd);
     std::error_code error;
-    if (!target || !std::filesystem::is_directory(*target, error)) return std::nullopt;
+    const auto target = HostDescriptorTarget(fd, error);
+    if (error) return std::nullopt;
+    if (!std::filesystem::is_directory(target, error)) return std::nullopt;
     return target;
 #endif
 }
