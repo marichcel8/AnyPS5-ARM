@@ -386,6 +386,7 @@ private:
         append(key, value.deviceScopeLdsMemoryBarriers);
         append(key, value.ldsLockFences);
         append(key, value.meshWindowBuffer);
+        append(key, value.hostInterpolationFirst);
     }
 };
 
