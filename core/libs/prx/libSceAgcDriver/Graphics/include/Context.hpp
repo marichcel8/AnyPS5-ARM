@@ -35,6 +35,7 @@ class SamplerCache;
 class ShaderResources;
 class PlaceholderImages;
 class VertexInputCache;
+class VertexBufferFormats;
 
 struct UnrenderableDraw : std::runtime_error {
     using std::runtime_error::runtime_error;
@@ -298,6 +299,7 @@ struct Context {
         return pipelineCacheSynchronization != nullptr ? pipelineCacheSynchronization->LockForPipelineUse() : PipelineCacheSynchronization::PipelineUseLock{};
     }
     VertexInputCache* vertexInputs = nullptr;
+    VertexBufferFormats* vertexFormats = nullptr;
 
     template<typename TFunction>
     TFunction Function(const char* name) const {
