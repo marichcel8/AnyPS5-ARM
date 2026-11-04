@@ -5584,11 +5584,14 @@ bool deviceLocalHasRoom(const Context& context, std::size_t bytes) {
 }
 
 std::shared_ptr<Buffer> stagingBuffer(const Context& context, std::size_t bytes, VkBufferUsageFlags usage) {
-    if (!deviceLocalHasRoom(context, bytes)) {
-        Copies().stagingRefused.fetch_add(1, std::memory_order_relaxed);
-        return nullptr;
-    }
     try {
+        // Inside the try: a device with no device-local memory type (the mock contexts of the
+        // graphics tests) refuses the staging buffer instead of failing the upload. The fork's span
+        // copies GPU-copy, and so shadow, regions upstream copies on the CPU.
+        if (!deviceLocalHasRoom(context, bytes)) {
+            Copies().stagingRefused.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
         if (auto buffer = Buffer::WithinDeviceLocalHeadroom(context, bytes, usage)) return buffer;
         static std::atomic<int> reported{0};
         if (reported.fetch_add(1, std::memory_order_relaxed) < 4) std::fprintf(stderr, "[buffers] staging shadow of %zu bytes refused: its device-local heap is within an eighth of its budget\n", bytes);
@@ -6425,8 +6428,12 @@ void GuestBufferMemory::recordGpuCopies(std::span<Region* const> copies, bool ad
             }
         }
     }
-    std::vector<Region*> shadowed;
-    for (auto* region : copies) {
+    // The shadow of a copied region follows its copy in the same command buffer: the prologue for a
+    // copy recorded there, the batch otherwise (with every copy in the prologue the batch's command
+    // buffer was never opened).
+    std::vector<Region*> shadowed[2];
+    for (std::size_t index = 0; index < copies.size(); ++index) {
+        auto* region = copies[index];
         const auto bytes = static_cast<std::size_t>(region->end - region->begin);
         if (!changedCopyBacks(context) || region->buffer->DeviceAddress() == 0 || !WritesOverlap(region->begin, bytes)) {
             region->shadowCopy = nullptr;
@@ -6437,13 +6444,15 @@ void GuestBufferMemory::recordGpuCopies(std::span<Region* const> copies, bool ad
             region->shadowCopy = nullptr;
             continue;
         }
-        shadowed.push_back(region);
+        shadowed[early[index] ? 1 : 0].push_back(region);
     }
-    if (!shadowed.empty()) {
-        RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    for (int inPrologue = 0; inPrologue < 2; ++inPrologue) {
+        if (shadowed[inPrologue].empty()) continue;
+        const auto target = inPrologue != 0 ? prologue : commands;
+        RecordMemoryBarrier(context, target, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         Recorder::CountBarriers(Recorder::CommandClass::StagingIn);
-        for (auto* region : shadowed) {
-            CopyBuffer(context, commands, region->buffer->Handle(), 0, region->shadowCopy->Handle(), 0, region->end - region->begin);
+        for (auto* region : shadowed[inPrologue]) {
+            CopyBuffer(context, target, region->buffer->Handle(), 0, region->shadowCopy->Handle(), 0, region->end - region->begin);
             recorder->Keep(region->shadowCopy);
         }
     }
