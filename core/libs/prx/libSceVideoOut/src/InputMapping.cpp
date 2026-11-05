@@ -311,23 +311,11 @@ std::array<std::uint8_t, 2> Pad::StickWithDeadzone(std::int16_t x, std::int16_t 
 
 namespace {
 
-Pad::InputConfiguration loadLayout(Pad::Layout layout) {
+void loadLayoutFile(Pad::InputConfiguration& configuration, Pad::Layout layout, const std::filesystem::path& path) {
     using namespace Pad;
-    InputConfiguration configuration = layout == Layout::Shooter
-        ? InputConfiguration{{ShooterMapping.begin(), ShooterMapping.end()}, {}}
-        : InputConfiguration{{InputMapping.begin(), InputMapping.end()}, {}};
-    auto& bindings = configuration.bindings;
-    const auto configured = configuredPath();
-    const bool explicitPath = !configured.empty();
-    const std::filesystem::path path = explicitPath ? configured : defaultConfigPath();
     std::ifstream file(path);
-    if (!file) {
-        if (explicitPath || std::filesystem::exists(path)) {
-            throw std::runtime_error("Pad: cannot read input mapping '" + pathToUtf8(path) + "'");
-        }
-        return configuration;
-    }
-
+    if (!file) throw std::runtime_error("Pad: cannot read input mapping '" + pathToUtf8(path) + "'");
+    auto& bindings = configuration.bindings;
     std::unordered_set<std::string> overriddenActions;
     std::array<bool, settingNames.size()> configuredSettings{};
     std::string line;
@@ -390,19 +378,41 @@ Pad::InputConfiguration loadLayout(Pad::Layout layout) {
         }
     }
     if (file.bad()) throw std::runtime_error("Pad: cannot read input mapping '" + pathToUtf8(path) + "'");
+}
 
+Pad::InputConfiguration loadLayout(Pad::Layout layout, std::string_view titleId) {
+    using namespace Pad;
+    InputConfiguration configuration = layout == Layout::Shooter
+        ? InputConfiguration{{ShooterMapping.begin(), ShooterMapping.end()}, {}}
+        : InputConfiguration{{InputMapping.begin(), InputMapping.end()}, {}};
+    const auto configured = configuredPath();
+    const bool explicitPath = !configured.empty();
+    const std::filesystem::path path = explicitPath ? configured : defaultConfigPath();
+    if (explicitPath || std::filesystem::exists(path)) loadLayoutFile(configuration, layout, path);
+    const auto profile = InputProfileName(titleId);
+    if (!profile.empty()) {
+        const auto profilePath = path.parent_path() / profile;
+        if (std::filesystem::exists(profilePath)) loadLayoutFile(configuration, layout, profilePath);
+    }
     return configuration;
 }
 
 }
 
-Pad::InputConfiguration Pad::LoadInputMapping() {
-    return loadLayout(Layout::Classic);
+std::string Pad::InputProfileName(std::string_view titleId) {
+    const bool valid = !titleId.empty() && titleId.size() <= MaxTitleIdLength && std::all_of(titleId.begin(), titleId.end(), [](char character) {
+        return std::isalnum(static_cast<unsigned char>(character)) != 0 || character == '_' || character == '-';
+    });
+    return valid ? "anyps5-input." + std::string(titleId) + ".ini" : std::string();
 }
 
-Pad::InputLayouts Pad::LoadInputLayouts() {
-    auto classic = loadLayout(Layout::Classic);
-    auto shooter = loadLayout(Layout::Shooter);
+Pad::InputConfiguration Pad::LoadInputMapping(std::string_view titleId) {
+    return loadLayout(Layout::Classic, titleId);
+}
+
+Pad::InputLayouts Pad::LoadInputLayouts(std::string_view titleId) {
+    auto classic = loadLayout(Layout::Classic, titleId);
+    auto shooter = loadLayout(Layout::Shooter, titleId);
     shooter.startLayout = classic.startLayout;
     return {std::move(classic), std::move(shooter)};
 }

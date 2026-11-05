@@ -269,6 +269,7 @@ function(add_shader_recompiler target runtimeTarget)
             CaptureResources
             DebugProbeActive
             DefaultShaderBackend
+            DecodeRdnaInstruction
             DepthBitsTextureWidth
             EmulatedMeshSlots
             HashBytes
@@ -311,6 +312,7 @@ function(add_shader_recompiler target runtimeTarget)
             GcnImagePitch
             GcnImagePow2Pad
             RuntimeAbi::HeapCapacity
+            RuntimeAbi::UintStorageImageBinding
             SampledTextureNumericClass
             SetDebugProbeActive
             SrtEvaluatingBranch
