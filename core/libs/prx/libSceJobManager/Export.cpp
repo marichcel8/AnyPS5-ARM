@@ -859,6 +859,15 @@ void* APS5_VABI WorkerEntry(void* argument) {
             guard.lock();
             continue;
         }
+        if (manager.sleepingWorkers >= manager.workerCount - manager.persistentThreads) {
+            const std::uint32_t epoch = manager.workEpoch.load(std::memory_order_acquire);
+            guard.unlock();
+            while (manager.workEpoch.load(std::memory_order_acquire) == epoch) {
+                for (std::uint32_t pause = 0; pause != SpinPauses; ++pause) _mm_pause();
+            }
+            guard.lock();
+            continue;
+        }
         ++manager.sleepingWorkers;
         manager.work.wait(guard, [&manager] { return !manager.running || manager.wakeTokens != 0; });
         if (manager.wakeTokens != 0) --manager.wakeTokens;
