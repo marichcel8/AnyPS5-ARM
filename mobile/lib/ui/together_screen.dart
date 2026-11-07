@@ -3,11 +3,13 @@ import 'package:flutter/material.dart';
 import '../discover_strings.dart';
 import '../social_strings.dart';
 import '../strings.dart';
+import '../together/challenges.dart';
 import '../together/discover.dart';
 import '../together/notifications.dart';
 import '../together/people.dart';
 import '../together/together_hub.dart';
 import '../together/together_socket.dart';
+import 'challenge_view.dart';
 import 'feed_view.dart';
 import 'find_players_view.dart';
 import 'friends_view.dart';
@@ -38,12 +40,13 @@ Future<void> openTogether(
   required TogetherHub hub,
   TogetherTab tab = TogetherTab.friends,
   String? Function(String titleId)? gameName,
+  Notice? notice,
 }) => Navigator.of(context).push(
   PageRouteBuilder<void>(
     transitionDuration: const Duration(milliseconds: 260),
     reverseTransitionDuration: const Duration(milliseconds: 200),
     pageBuilder: (_, _, _) =>
-        TogetherScreen(hub: hub, tab: tab, gameName: gameName),
+        TogetherScreen(hub: hub, tab: tab, gameName: gameName, notice: notice),
     transitionsBuilder: (_, animation, _, child) {
       final eased = CurvedAnimation(
         parent: animation,
@@ -70,10 +73,14 @@ class TogetherScreen extends StatefulWidget {
     required this.hub,
     this.tab = TogetherTab.friends,
     this.gameName,
+    this.notice,
   });
 
   final TogetherHub hub;
   final TogetherTab tab;
+
+  /// A notification to go to as the screen opens (a push that was tapped).
+  final Notice? notice;
 
   /// A game's name from the Mac's library, for a friend playing it.
   final String? Function(String titleId)? gameName;
@@ -92,6 +99,13 @@ class _TogetherScreenState extends State<TogetherScreen> {
   void initState() {
     super.initState();
     widget.hub.friends.refresh().catchError((_) {});
+    final notice = widget.notice;
+    if (notice != null) {
+      widget.hub.notifications.read(notice).catchError((_) {});
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _openNotice(notice);
+      });
+    }
   }
 
   void _show(TogetherTab tab) => setState(() => _tab = tab);
@@ -115,9 +129,14 @@ class _TogetherScreenState extends State<TogetherScreen> {
   /// Calls a friend; the call shows over every screen.
   void _call(Person friend) => widget.hub.calls.ring(friend);
 
-  /// Where a notification leads: the requests, the conversation, the party, or the person.
+  /// Where a notification leads: the requests, the conversation, the party, the challenge, or
+  /// the person.
   void _openNotice(Notice notice) {
     final actor = notice.actor;
+    if (challengeOf(notice) case final id?) {
+      openChallenge(context, hub: widget.hub, id: id, onProfile: _profile);
+      return;
+    }
     switch (notice.kind) {
       case NoticeKind.friendRequest:
         _show(TogetherTab.friends);

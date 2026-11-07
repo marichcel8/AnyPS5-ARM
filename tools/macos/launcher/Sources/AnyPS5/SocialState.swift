@@ -27,6 +27,18 @@ final class SocialState: ObservableObject {
     @Published var profileShowcase: TogetherShowcase?
     var profileShowcaseTask: Task<Void, Never>?
 
+    // Editing the own profile (ProfileLook.swift)
+    enum EditLoad: Equatable { case loading, shown, failed }
+    /// The pins while Edit showcase is open, and as it opened.
+    @Published var showcasePins = TogetherShowcasePins()
+    var showcasePinsBefore = TogetherShowcasePins()
+    /// The Hub's themes to wear, most popular first.
+    @Published var profileThemes: [TogetherProfileTheme] = []
+    @Published var profileThemesLoad = EditLoad.loading
+    var profileThemesTask: Task<Void, Never>?
+    /// The theme being put on ("" taking it off) while the server answers.
+    @Published var profileThemeSaving: String?
+
     // Comparing trophies
     enum CompareLoad: Equatable { case loading, shown, hidden, failed, unknown }
     /// Whom the trophies are compared with.
@@ -54,6 +66,30 @@ final class SocialState: ObservableObject {
     @Published var boardIndex = 0
     var boardTask: Task<Void, Never>?
     var boardReturn: AppModel.ProfileReturn?
+
+    // Challenges
+    /// The strip over the board: the game's challenges, or the user's own over overall points.
+    @Published var challenges: [TogetherChallenge] = []
+    /// The focus is on the strip, not the board.
+    @Published var boardOnChallenges = false
+    @Published var challengeStripIndex = 0
+    var challengesTask: Task<Void, Never>?
+    /// The challenge whose page is open over the board; nil on the board.
+    @Published var challengeId: String?
+    /// The challenge as last answered (from the strip until its page is read).
+    @Published var challengeShown: TogetherChallenge?
+    @Published var challengeDetail: TogetherChallengeDetail?
+    @Published var challengeFailed = false
+    /// No such challenge (any more).
+    @Published var challengeGone = false
+    @Published var challengeIndex = 0
+    /// 0 the standings, 1 the card's buttons.
+    @Published var challengeColumn = 0
+    @Published var challengeButton = 0
+    @Published var challengeBusy = false
+    /// The page was opened from outside the leaderboard (a notification): back leaves both.
+    var challengeAlone = false
+    var challengeTask: Task<Void, Never>?
 
     // Notifications
     @Published var notifications = TogetherNotifications()
@@ -86,6 +122,13 @@ final class SocialState: ObservableObject {
         feedFailed = false
         leaderboard = nil
         boardGame = nil
+        challengesTask?.cancel()
+        challengeTask?.cancel()
+        challenges = []
+        boardOnChallenges = false
+        challengeId = nil
+        challengeShown = nil
+        challengeDetail = nil
         notificationsTask?.cancel()
         compareTask?.cancel()
         compareGameTask?.cancel()
