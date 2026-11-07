@@ -16,6 +16,9 @@ enum NoticeKind {
   missedCall('missed_call'),
   lfgRequest('lfg_request'),
   lfgAccepted('lfg_accepted'),
+  challengeInvite('challenge_invite'),
+  challengeStarted('challenge_started'),
+  challengeEnded('challenge_ended'),
   warning('warning');
 
   const NoticeKind(this.wire);
@@ -37,6 +40,9 @@ const optionalNoticeKinds = [
   NoticeKind.missedCall,
   NoticeKind.lfgRequest,
   NoticeKind.lfgAccepted,
+  NoticeKind.challengeInvite,
+  NoticeKind.challengeStarted,
+  NoticeKind.challengeEnded,
 ];
 
 /// One notification under the bell.
@@ -82,13 +88,15 @@ class Notice {
   /// Who did it; null for a warning.
   final Person? actor;
 
-  /// A conversation, party, game session or call ID; null for friends.
+  /// A conversation, party, game session, call or challenge ID; null for friends.
   final String? subjectId;
 
   /// message: conversationId, title, group, count, text; party_invite: partyId, size;
   /// game_invite: sessionId, titleId; missed_call: callId; warning: reason; lfg_request:
   /// postId, titleId, gameNames, purpose, count; lfg_accepted: postId, titleId, gameNames,
-  /// purpose, invite {kind, id}.
+  /// purpose, invite {kind, id}; challenge_invite and challenge_started: challengeId, title,
+  /// titleId, gameNames, metric, endsAt; challenge_ended: the same and rank, value, entrants,
+  /// winner {displayName, handle, value} or null.
   final Map<String, dynamic> data;
   final bool read;
   final DateTime createdAt;
@@ -112,12 +120,15 @@ class Notice {
 }
 
 /// What the bell tells about (each kind on or off), the mail digest, and whether a digest can
-/// be mailed at all (an account with no email gets none).
+/// be mailed at all (an account with no email gets none); for push, whether it shows what was
+/// written and whether a call rings the phone.
 class NoticeSettings {
   const NoticeSettings({
     required this.kinds,
     required this.digest,
     required this.canMail,
+    this.pushPreview = true,
+    this.pushCalls = true,
   });
 
   factory NoticeSettings.fromJson(Map<String, dynamic> json) {
@@ -133,18 +144,21 @@ class NoticeSettings {
       },
       digest: settings['digest'] == true,
       canMail: json['canMail'] == true,
+      pushPreview: settings['pushPreview'] != false,
+      pushCalls: settings['pushCalls'] != false,
     );
   }
 
   final Map<NoticeKind, bool> kinds;
   final bool digest;
   final bool canMail;
+  final bool pushPreview;
+  final bool pushCalls;
 }
 
 /// The notification center on the phone: the list under the bell, newest first a page at a
 /// time, the unread count, marking read (here and, through the gateway, on every other device),
-/// and what to be told about. No push: a phone notification while the app is closed needs Apple
-/// and Firebase set up for this app, which it does not have yet.
+/// and what to be told about. With the app closed, PhonePush brings them.
 class Notifications extends ChangeNotifier {
   Notifications({required this.account, required this.socket}) {
     _events = socket.events.listen(_event);
@@ -224,7 +238,8 @@ class Notifications extends ChangeNotifier {
     await account.call('GET', 'me/notifications/settings'),
   );
 
-  /// Turns one kind (by its API name, or "digest") on or off; the settings as saved come back.
+  /// Turns one kind (by its API name, "digest", "pushPreview" or "pushCalls") on or off; the
+  /// settings as saved come back.
   Future<NoticeSettings> setting(String key, bool on) async =>
       NoticeSettings.fromJson(
         await account.call('PATCH', 'me/notifications/settings', {key: on}),

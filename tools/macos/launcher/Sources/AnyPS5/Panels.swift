@@ -5,6 +5,11 @@ import UniformTypeIdentifiers
 
 /// A settings row the panels draw and the input moves through.
 struct PanelRow: Identifiable {
+    struct Option {
+        let label: String
+        let run: () -> Void
+    }
+
     enum Kind {
         case choice(options: [String], selected: Int, set: (Int) -> Void)
         case toggle(Bool, set: (Bool) -> Void)
@@ -25,6 +30,8 @@ struct PanelRow: Identifiable {
     var person: PanelPerson?
     /// The detail is advice to read whole (the controller troubleshooter): no line limit.
     var wraps = false
+    /// What △ does on this row, with the hint saying so (a Hub theme: Wear on my profile).
+    var option: Option?
     /// A stepper's value that goes round, as degrees do: past one end it comes back at the other.
     var cycle: Int?
     /// A stepper whose number can be typed: at the keyboard, Return or a click opens a field.
@@ -112,6 +119,8 @@ extension AppModel {
         case .controls: return selectedGame.map { [PanelCategory(id: "controls", title: $0.name, symbol: "keyboard", rows: controlRows($0))] } ?? []
         case .advanced: return selectedGame.map { [PanelCategory(id: "advanced", title: $0.name, symbol: "slider.horizontal.below.rectangle", rows: advancedRows($0))] } ?? []
         case .themes: return [PanelCategory(id: "themes", title: T.text(.themes), symbol: "paintpalette", rows: themeRows())]
+        case .showcaseEdit: return [PanelCategory(id: "showcase", title: TL.text(.showcaseEdit), symbol: "pin", rows: showcaseRows())]
+        case .profileTheme: return [PanelCategory(id: "profile-theme", title: TL.text(.profileTheme), symbol: "paintpalette", rows: profileThemeRows())]
         case .studio: return [PanelCategory(id: "studio", title: T.text(.themeStudio), symbol: "wand.and.stars", rows: studioRows())]
         case .friends: return [PanelCategory(id: "friends", title: T.text(.friendsTitle), symbol: "person.2", rows: friendRows())]
         case .party: return [PanelCategory(id: "party", title: T.text(.partyTitle), symbol: "person.3", rows: partyRows())]
@@ -647,6 +656,21 @@ extension AppModel {
     /// Panels with categories on the left (Settings, Find players, a game's hub).
     var overlayHasCategories: Bool { overlay == .settings || overlay == .findPlayers || overlay == .gameHub }
 
+    /// The focused row's △ action, when it has one.
+    var focusedRowOption: PanelRow.Option? {
+        guard panelInRows, let rows = panelCategories().first?.rows, !rows.isEmpty else { return nil }
+        let index = focusedRow(in: rows)
+        return rows.indices.contains(index) ? rows[index].option : nil
+    }
+
+    /// △ on a row that has an action of its own runs it.
+    func runRowOption() -> Bool {
+        guard let option = focusedRowOption else { return false }
+        Sounds.shared.play(.select)
+        option.run()
+        return true
+    }
+
     func panelCommand(_ command: Command) -> Bool {
         if overlay == .settings, let used = settingsSearchCommand(command) { return used }
         let categories = panelCategories()
@@ -690,8 +714,9 @@ extension AppModel {
             // On a value with the pad, left in a panel without categories goes nowhere rather
             // than closing it.
             if command == .left && single && row.valueKind != .other && InputModeState.shared.mode == .pad { break }
-            // A question asked in place (AskFirst.swift) is answered Cancel first.
-            if !cancelAsk() { leaveRows(single) }
+            // A question asked in place (AskFirst.swift) is answered Cancel first; on the party
+            // screen ← goes into the chat beside the rows.
+            if !cancelAsk(), !(command == .left && overlay == .party && enterPartyChat()) { leaveRows(single) }
         case .close: closeOverlay()
         case .none: break
         }
@@ -1051,6 +1076,8 @@ struct SettingsSearchField: View {
 struct SidePanel: View {
     let title: String
     var subtitle: String?
+    /// A column drawn beside the rows, on their left (the party's chat).
+    var beside: AnyView?
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
 
@@ -1058,11 +1085,21 @@ struct SidePanel: View {
         let rows = model.panelCategories().first?.rows ?? []
         HStack(spacing: 0) {
             Color.black.opacity(0.35).contentShape(Rectangle()).onTapGesture { model.closeOverlay() }
+            if let beside { beside }
             VStack(alignment: .leading, spacing: 8 * scale) {
                 Text(title).font(.display(30 * scale, .light)).foregroundStyle(.white).lineLimit(2)
                 if let subtitle { Text(subtitle).font(.display(15 * scale)).foregroundStyle(.white.opacity(0.6)) }
-                RowList(rows: rows, focusedRow: model.focusedRow(in: rows))
+                // The focus in the column beside them leaves the rows unfocused.
+                RowList(rows: rows, focusedRow: beside != nil && model.partyChatFocused ? nil : model.focusedRow(in: rows))
                     .padding(.top, 18 * scale)
+                if let option = model.focusedRowOption {
+                    HStack(spacing: 18 * scale) {
+                        Hint(keys: "O / △", label: option.label)
+                        Hint(keys: "esc / ○", label: T.text(.hintBack))
+                    }
+                    .padding(.top, 14 * scale)
+                    .transition(.opacity)
+                }
             }
             .padding(36 * scale)
             .frame(width: 560 * scale, alignment: .topLeading)

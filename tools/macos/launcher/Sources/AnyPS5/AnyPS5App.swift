@@ -240,14 +240,15 @@ struct RootView: View {
             SidePanel(title: T.text(.friendsTitle), subtitle: model.togetherUser.map { "@\($0.handle) · \(T.format(.friendsOnlineCount, model.friendsOnline))" })
                 .transition(.move(edge: .trailing).combined(with: .opacity))
         case .party:
-            SidePanel(title: T.text(.partyTitle), subtitle: model.partySubtitle)
+            PartyScreen()
                 .transition(.move(edge: .trailing).combined(with: .opacity))
         case .themes, .studio:
             SidePanel(title: T.text(model.overlay == .studio ? .themeStudio : .themes), subtitle: T.text(model.overlay == .studio ? .themeStudioSubtitle : .themesDetail))
                 .transition(.move(edge: .trailing).combined(with: .opacity))
         case .messages:
             MessagesView().transition(.opacity.combined(with: .scale(scale: 1.03)))
-        case .profile:
+        case .profile, .showcaseEdit, .profileTheme:
+            // Edit showcase and Profile theme slide in at the profile's side (ProfileView).
             ProfileView().transition(.opacity.combined(with: .scale(scale: 1.03)))
         case .compare:
             CompareView().transition(.opacity.combined(with: .scale(scale: 1.03)))
