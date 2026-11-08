@@ -137,13 +137,13 @@ enum T {
         case locked, ready, updateAvailable, failed, starting, startingText, running
         case stepUnwrap, stepRelink, stepCopy, stepBundle, stepFinish
         case titleID, version, size, status, folder
-        case gameSettings, resolution, resolutionDefault, outputResolution, outputResolutionDetail, outputGame, outputDisplay, display, windowed, fullscreen, windowSize, vsync, on, off
-        case displayDefaults, displayDefaultsDetail, followDefault, useDisplayDefaults, useDisplayDefaultsDetail
+        case gameSettings, resolution, resolutionDefault, display, windowed, fullscreen, windowSize, vsync, on, off
+        case displayDefaults, displayDefaultsDetail, displayBorderless, followDefault, useDisplayDefaults, useDisplayDefaultsDetail
         case overlay, overlayOff, overlayTopLeft, overlayTopRight, overlayBottomLeft, overlayBottomRight, overlayStyle, overlayMinimal, overlayDetailed, frameGeneration, frameGenerationDetail, frameGenerationLowPower, upscaling, upscalingDetail, upscalingBilinear, upscalingFsr1, fsrSharpness, fsrSharpnessDetail, linkNoGame, folderNoGames, useGamesFolder, useGamesFolderDetail, useGamesFolderConfirm, addFolder, addFolderDetail, removeFolder, removeFolderAsk, folderRemoved, folderNotConnected, folderGames, folderOneGame, copyLink, linkCopied, saveSync, saveSyncDetail, saveSyncNoFolder, syncFolder, syncFolderICloud, syncFolderNone, savesSyncedFrom, saveSyncFailed, clips, clipsDetail, clipLength, seconds, clipsNeedPermission, clipsNeedPermissionDetail, clipsOff, clipsOffDetail, clipSaved = "clipSavedTitle", clipSavedDetail, clipFailed, lowPowerTitle, lowPowerFrameGeneration, lowPowerRefresh, gameLanguage, followLauncher
         case newGame, newGames, newGameDetail
         case reinstall, showInFinder, openLog, uninstall, clearShaderCache, uninstallConfirm, uninstallDone, cacheCleared
         case appearance, theme, accent, background, backgroundTheme, backgroundImage, backgroundVideo, chooseFile, gameArtwork
-        case motion, motionFull, motionReduced, sounds, language, storage, rescan, installedSize, about, aboutText, toolkitVersion
+        case motion, motionFull, motionReduced, sounds, launcherVolume, launcherVolumeDetail, language, storage, rescan, installedSize, about, aboutText, toolkitVersion
         case profileName, behaviour, hideWhilePlaying, rosettaMissing, rosettaInstall, rosettaInstalled
         case moveToApplications, moveToApplicationsText, moveNow, later, noToolkit
         case emptyLibraryTitle, emptyLibraryText, scanning, allGames, sortName, playTime
@@ -160,21 +160,21 @@ enum T {
         case partyTitle, partyStart, partyStartDetail, partyOpen, partyOpenDetail, partyJoinOf, partySize, partyDecline, partyNone, partyMembers, partyLeader, partyInVoice, partyInviteFriends, partyInvite, partyInvited, partyLeave, partyInvites, partyInvitedYou, partyJoined, partyLeft, partyKicked, partyEnded, partyFull, friendsInParty
         case togetherServer, togetherServerDetail, togetherServerForced, togetherServerUse, togetherServerInvalid, togetherServerNow
         case gameJoinable, gameJoin, gameInvitedDetail, gameDecline, gameInviteTitle, gamePlayers, gameInvited, gameInvitedYou, gameNotHere, gameUnlockFirst, gameVersionMismatch, gameEngineMismatch, gameSessionFull, gameCloseFirst, sessionEnded, gameJoined, togetherFriendsJoin, togetherFriendsJoinDetail
-        case voiceJoin, voiceJoinDetail, voiceInCall, voiceMic, voicePushToTalk, voicePushToTalkOn = "voicePushToTalkOnMac", voicePushToTalkOff = "voicePushToTalkOffMac", voiceLeave, voiceNoMic, voiceJoined
+        case voiceJoin, voiceJoinDetail, voiceInCall, voiceMic, voicePushToTalk, voicePushToTalkOn, voicePushToTalkOff, voiceTalkKey, voiceTalkKeyDetail, voiceTalkKeySet, voiceLeave, voiceNoMic, voiceJoined
         case voiceMovedPhone, voiceMovedAway, voiceTakeBack, voiceOnPhone, voiceOnOtherDevice
         case togetherLinkBlocked
-        case togetherOnlinePlay, togetherOnlinePlayDetail
+        case togetherOnlinePlay, togetherOnlinePlayDetail, togetherOnlineLog, togetherOnlineLogDetail
         case messagesTyping, messagesTypingMany
         case callRinging, callAnswer, callDecline, callKeys, callWith, callCalling, callFriend, callHangUp, callMissed, callDeclined, callEnded, callNoAnswer, callAnsweredElsewhere, voiceMuted, voiceSpeaking
         case messagesNewGroup, messagesNewGroupDetail, messagesGroupName, messagesGroupPicked, messagesGroupCreate, messagesGroupPick, messagesGroupMade
         case partyMakeLeader, partyRemove = "partyKick", partyNowLeads, partyRemoved, partyYouLead
-        case friendsTitle, friendsSignIn, friendsAccept, friendsDecline, friendsWantsToBe, friendsAddByHandle, friendsSendRequest, friendsNone, friendsYourHandle, friendsWaiting, friendsOffline, friendsOnline, friendsAway, friendsPlaying, friendsPlayingFor, friendsRequestSent, friendsCancelRequest, friendsRequestCancelled, friendsNowFriends, friendsNoOne, friendsAsked, friendsOnlineCount
-        case remotePlayNeedsPermission, remotePlayPermissionTitle, themes, themesDetail, themeStudio, themeStudioDetail, themeStudioSubtitle, themesOnMac, themesHub, hubLoading, hubFailed, hubEmpty, installThemeFile, themeBy, themeActive, themeInstalled, themeDownloading, themeInstallFailed, themeSaveFailed, themeSaved, themeName, themeAuthor, themeMotion, themeHue, themeHighlight, themeDepth, themeAccent, themeBackground, themeNoFile, themeRemoveBackground, themeMusic, themeMusicDetail, themeRemoveMusic, exportTheme, exportThemeDetail, shareTheme, shareThemeDetail, shareThemeHint, themeShareNext, deleteTheme, newThemeName
+        case friendsTitle, friendsSignIn, friendsAccept, friendsDecline, friendsWantsToBe, friendsAddByHandle, friendsSendRequest, friendsNone, friendsYourHandle, friendsWaiting, friendsOffline, friendsOnline, friendsAway, friendsPlaying, friendsPlayingFor, friendsRequestSent, friendsCancelRequest, friendsRequestCancelled, friendsNowFriends, friendsNoOne, friendsAsked, friendsOnlineCount, friendsRemove, friendsRemoved, askRemoveFriend
+        case remotePlayNeedsPermission, remotePlayPermissionTitle, themes, themesDetail, themeStudio, themeStudioDetail, themeStudioSubtitle, themesOnMac, themesHub, hubLoading, hubFailed, hubEmpty, installThemeFile, themeBy, themeActive, themeInstalled, themeDownloading, themeInstallFailed, themeSaveFailed, themeSaved, themeName, themeAuthor, themeMotion, themeHue, themeHighlight, themeDepth, themeAccent, themeBackground, themeNoFile, themeRemoveBackground, themeMusic, themeMusicDetail, menuMusicDetail, themeRemoveMusic, exportTheme, exportThemeDetail, shareTheme, shareThemeDetail, shareThemeHint, themeShareNext, deleteTheme, newThemeName
         case controls, controlsHint, controlsFromGame, pressKey, resetControls, noKey, dpad, leftStick, rightStick, touchpadLeft, touchpadRight
         case directionUp, directionDown, directionLeft, directionRight, keySpace, keyEnter
         case mouseLeft, mouseRight, mouseMiddle, mouseBack, mouseForward, wheelUp, wheelDown
         case trophies, trophyHidden, trophyHiddenDetail, trophyShow, trophyHide, alwaysShowHiddenTrophies = "showHiddenTrophies", alwaysShowHiddenTrophiesDetail, trophyLocked, gradePlatinum, gradeGold, gradeSilver, gradeBronze
-        case phonePairingTitle, phonePairingText, phoneAllow, phoneDeny, phoneConnected, phones, phonesNone, phoneRemove, phoneOpenLauncher, phoneServerFailed, phoneConnecting, phoneNone, phoneConnectedDetail, phoneOnline, phonesConnectedCount, phonePlayer, phoneWaiting
+        case phoneServer, phoneServerDetail = "phoneServerDetailMac", phoneAddress, phonePairingTitle, phonePairingText, phoneAllow, phoneDeny, phoneConnected, phones, phonesNone, phoneRemove, phoneOpenLauncher, phoneServerFailed, phoneConnecting, phoneNone, phoneConnectedDetail, phoneOnline, phonesConnectedCount, phonePlayer, phoneWaiting
         case madeBy, builtOn
         case updateChoiceText, updateAndPlay, updateAndPlayDetail, playNow, playNowDetail
         case discordPresence, discordPresenceDetail, gameMusic, gameMusicDetail, checkUpdates, checkUpdatesDetail, screenshots, screenshotsNone, backUpSaves, backUpSavesDetail, lastBackup, restoreSaves, restoreSavesDetail, savesBackedUp, savesRestored, backupFailed, closeGameFirst, launcherUpdateAvailable, launcherUpToDate, updateCheckFailed, checkForUpdatesNow, checkForUpdatesDetail, checkingUpdates, lastChecked, updateTo, updateDetail, updateDownloading, whatsNew, updateFailed, updateCloseGame, updateNotWritable

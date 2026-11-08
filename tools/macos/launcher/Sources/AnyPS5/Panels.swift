@@ -251,6 +251,14 @@ extension AppModel {
                 self?.chooseBackdrop(preferences.backdrop)
             }))
         }
+        // Music without making a theme, as on Windows and Linux.
+        appearance.append(PanelRow(id: "menuMusic", title: T.text(.themeMusic), detail: preferences.menuMusicFile.map { URL(fileURLWithPath: $0).lastPathComponent } ?? T.text(.menuMusicDetail),
+                                   symbol: "music.note", kind: .action(destructive: false) { [weak self] in self?.chooseMenuMusic() }))
+        if preferences.menuMusicFile != nil {
+            appearance.append(PanelRow(id: "menuMusicOff", title: T.text(.themeRemoveMusic), symbol: "speaker.slash", kind: .action(destructive: false) { [weak self] in
+                self?.preferences.menuMusicFile = nil
+            }))
+        }
         if lookStyle.isGlass {
             // The see-through window: how much of the desktop shows, and the key art over it.
             let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
@@ -292,6 +300,11 @@ extension AppModel {
 
         // The name and picture are the profile's: Settings → Profiles.
         var behaviour: [PanelRow] = [
+            // Over the two below, as on Windows and Linux.
+            PanelRow(id: "launcherVolume", title: T.text(.launcherVolume), detail: T.text(.launcherVolumeDetail), symbol: "speaker.wave.3",
+                     kind: .stepper(value: launcherVolume, range: 0...100, step: 5, format: Self.percent) { [weak self] value in
+                         self?.preferences.launcherVolume = value == 100 ? nil : value
+                     }),
             PanelRow(id: "sounds", title: T.text(.sounds), symbol: "speaker.wave.2",
                      kind: .stepper(value: preferences.sounds ? preferences.soundVolume ?? 100 : 0, range: 0...100, step: 10, format: Self.percent) { [weak self] value in
                          self?.preferences.sounds = value > 0
@@ -397,6 +410,12 @@ extension AppModel {
             PanelRow(id: "showScreenshots", title: T.text(.showScreenshots), symbol: "photo.on.rectangle.angled", kind: .action(destructive: false) { [weak self] in self?.showScreenshots() }),
             PanelRow(id: "screenshotsHint", title: T.text(.screenshotsHint), kind: .info("")),
         ]
+        // The phone server, and where a phone without Bonjour finds it, as on Windows and Linux.
+        advanced.append(PanelRow(id: "phoneServer", title: T.text(.phoneServer), detail: T.text(.phoneServerDetail), symbol: "iphone.gen3.radiowaves.left.and.right",
+                                 kind: .toggle(phoneServerOn) { [weak self] value in self?.setPhoneServer(value) }))
+        if let port = remote?.controlPort {
+            advanced.append(PanelRow(id: "phoneAddress", title: T.text(.phoneAddress), kind: .info("\(Host.current().localizedName ?? "Mac") · \(port)")))
+        }
         advanced.append(PanelRow(id: "phones", title: T.text(.phones), kind: .info(phones.isEmpty ? T.text(.phonesNone)
             : connectedPhones.isEmpty ? "" : T.format(.phonesConnectedCount, connectedPhones.count))))
         for device in phones {
@@ -406,7 +425,7 @@ extension AppModel {
                 self?.removePhone(device.id)
             }))
         }
-        advanced += browserPlayRows()
+        if phoneServerOn { advanced += browserPlayRows() }
 
         return [
             PanelCategory(id: "profiles", title: TPro.text(.profilesCategory), symbol: "person.crop.circle", rows: profileRows()),
@@ -648,6 +667,16 @@ extension AppModel {
             preferences.backdropFile = url.path
             preferences.backdrop = kind
         }
+    }
+
+    /// Appearance › Menu music: the user's own song for when the selected game has none.
+    func chooseMenuMusic() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [.audio]
+        panel.prompt = T.text(.chooseFile)
+        if panel.runModal() == .OK, let url = panel.url { preferences.menuMusicFile = url.path }
     }
 
     // MARK: Panel input
@@ -907,10 +936,31 @@ extension AppModel {
     }
 }
 
+/// "12 players online now" under Find players' heading: the online dot and the count, with who
+/// is left out (invisible accounts) as its help. A number only, never who.
+struct OnlineNowLine: View {
+    let text: String
+    @Environment(\.scale) private var scale
+
+    var body: some View {
+        let green = Color(red: 0.3, green: 0.85, blue: 0.45)
+        let hint = FP.text(.onlineNowHint)
+        HStack(spacing: 10 * scale) {
+            Circle().fill(green).frame(width: 9 * scale, height: 9 * scale).shadow(color: green.opacity(0.55), radius: 5 * scale)
+            Text(text).font(.display(15 * scale, .medium)).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
+        }
+        .help(hint)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(text + ". " + hint)
+    }
+}
+
 /// The settings screen: categories on the left, their rows on the right.
 struct SettingsPanel: View {
     var title = T.text(.settings)
     var subtitle: String?
+    /// Find players: how many are online now, with the online dot, under the subtitle.
+    var live: String?
     @EnvironmentObject private var model: AppModel
     @Environment(\.scale) private var scale
 
@@ -925,10 +975,11 @@ struct SettingsPanel: View {
         HStack(alignment: .top, spacing: 0) {
             VStack(alignment: .leading, spacing: 6 * scale) {
                 Text(title).font(.display(40 * scale, .light)).foregroundStyle(.white).lineLimit(2).minimumScaleFactor(0.6)
-                    .padding(.bottom, subtitle == nil ? 26 * scale : 0)
+                    .padding(.bottom, subtitle == nil && live == nil ? 26 * scale : 0)
                 if let subtitle {
-                    Text(subtitle).font(.display(15 * scale)).foregroundStyle(.white.opacity(0.6)).padding(.bottom, 26 * scale)
+                    Text(subtitle).font(.display(15 * scale)).foregroundStyle(.white.opacity(0.6)).padding(.bottom, live == nil ? 26 * scale : 0)
                 }
+                if let live { OnlineNowLine(text: live).padding(.top, 4 * scale).padding(.bottom, 26 * scale) }
                 if searchable {
                     SettingsSearchField().padding(.top, -12 * scale).padding(.bottom, 8 * scale)
                 }

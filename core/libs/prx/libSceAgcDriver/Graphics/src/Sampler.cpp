@@ -8,10 +8,6 @@
 
 namespace AgcDriver::Graphics {
 
-    bool Sampler::ShaderAppliesLodBias(const GuestSamplerResource& descriptor) {
-        return descriptor.lodBias < -ShaderRecompiler::PipelineSpecialization::SamplerLodBiasShaderThreshold || descriptor.lodBias > ShaderRecompiler::PipelineSpecialization::SamplerLodBiasShaderThreshold;
-    }
-
     namespace {
 
     void refuseSampler(bool condition, const char* reason) {
@@ -30,6 +26,10 @@ namespace AgcDriver::Graphics {
         }
     }
 
+    }
+
+    bool Sampler::ShaderAppliesLodBias(const GuestSamplerResource& descriptor) {
+        return descriptor.lodBias < -ShaderRecompiler::PipelineSpecialization::SamplerLodBiasShaderThreshold || descriptor.lodBias > ShaderRecompiler::PipelineSpecialization::SamplerLodBiasShaderThreshold;
     }
 
     void Sampler::Validate(const Context& context, const GuestSamplerResource& descriptor) {

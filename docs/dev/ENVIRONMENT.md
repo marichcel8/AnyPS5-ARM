@@ -613,6 +613,7 @@ The code reads environment names through `getenv`, `IsEnvironmentSet`, `kibSetti
 | `ANYPS5_ONLINE` | string | `core/libs/prx/libSceNetCtl/src/OnlineEnvironment.cpp` |  | `127.0.0.1:<port>` of the launcher's online bridge; with `ANYPS5_ONLINE_SECRET` it turns on sign-in and web API pass-through (see [online play](ONLINE_PLAY.md)) |
 | `ANYPS5_ONLINE_LOG` | presence | `core/libs/prx/libSceNetCtl/src/OnlineEnvironment.cpp` |  | file the online libraries append every observed call to, one JSON object per line |
 | `ANYPS5_ONLINE_SECRET` | string | `core/libs/prx/libSceNetCtl/src/OnlineEnvironment.cpp` |  | 64 hexadecimal digits the launcher made for this game start; both ends prove they know it, it is never sent |
+
 ### libSceIme
 
 | Name | Kind | Source | Default | Description |
