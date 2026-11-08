@@ -12,11 +12,11 @@
 
 extern "C" {
 
-std::uint32_t* APS5_VABI sceAgcDcbAtomicGds_0900(CommandBuffer* buf, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, std::uint64_t dataSlot, std::uint64_t compareData, std::uint64_t extraData) {
+std::uint32_t* APS5_VABI sceAgcDcbAtomicGds_0900(CommandBuffer* buf, std::uint32_t engine, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, std::uint64_t dataSlot, std::uint64_t compareData, std::uint64_t extraData) {
     const auto data = static_cast<std::uint32_t>(dataSlot);
     const auto operation = (control & 0xffu) | ((control & 0x200u) << 7u) |
         ((control & 0x20u) << 13u) | ((control & 0x40u) << 14u) |
-        ((control & 0x20u) == 0 && mode == 1 ? 0x20000u : 0u);
+        ((control & 0x20u) == 0 && mode == 1 ? 0x20000u : 0u) | ((engine & 3u) << 30u);
     return Agc::Command::Emit(buf, 0x1du, {
         operation, ((gdsOp & 1u) << 8u) | (src & 0x3fu), offset, index,
         mask & 0x00ff00ffu, data, static_cast<std::uint32_t>(compareData),
@@ -24,9 +24,8 @@ std::uint32_t* APS5_VABI sceAgcDcbAtomicGds_0900(CommandBuffer* buf, std::uint32
         static_cast<std::uint32_t>(extraData >> 32u)}, __func__);
 }
 
-std::uint32_t* APS5_VABI sceAgcDcbAtomicGds(CommandBuffer* buf, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, std::uint64_t dataSlot, std::uint64_t compareData, std::uint64_t extraData) {
-    const auto data = static_cast<std::uint32_t>(dataSlot);
-    return sceAgcDcbAtomicGds_0900(buf, control, mode, gdsOp, src, offset, index, mask, data, compareData, extraData);
+std::uint32_t* APS5_VABI sceAgcDcbAtomicGds(CommandBuffer* buf, std::uint32_t engine, std::uint32_t control, std::uint32_t mode, std::uint32_t gdsOp, std::uint32_t src, std::uint16_t offset, std::uint16_t index, std::uint32_t mask, std::uint64_t dataSlot, std::uint64_t compareData, std::uint64_t extraData) {
+    return sceAgcDcbAtomicGds_0900(buf, engine, control & ~0x80u, mode, gdsOp, src, offset, index, mask, dataSlot, compareData, extraData);
 }
 
 

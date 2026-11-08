@@ -57,6 +57,7 @@ struct MacOsTraceImport {
 // Dylibs in order; flat-namespace lookups then search the images in that load order.
 struct MacOsImageInput {
     bool Executable = true;
+    bool FunctionSymbolRoots = false;
     std::string InstallName;
     const std::vector<std::uint8_t>* Source = nullptr;
     const std::vector<Domain::ProgramHeader>* Headers = nullptr;
