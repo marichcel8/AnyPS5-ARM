@@ -19,6 +19,9 @@ struct Preferences: Codable, Equatable {
     var customTheme: String?
     var backdrop = Backdrop.theme
     var backdropFile: String?
+    /// Appearance › Menu music: a song of the user's own for when the selected game has none
+    /// (a custom theme's own music comes first).
+    var menuMusicFile: String?
     var gameArtwork = true
     /// The Glass theme's window: how much of the desktop shows through, in percent (nil for
     /// GlassWindowRecipe.defaultTransparency), and whether the selected game's key art is laid
@@ -30,17 +33,23 @@ struct Preferences: Codable, Equatable {
     /// Interface sounds and the selected game's theme song, in percent; nil keeps the default.
     var soundVolume: Int?
     var musicVolume: Int?
+    /// The launcher's own volume over both, in percent; nil is 100.
+    var launcherVolume: Int?
     /// nil checks GitHub for a newer launcher, as true does.
     var checkUpdates: Bool?
     /// Which releases the update check offers (Updates.Channel); nil is Stable.
     var updateChannel: String?
     var hideWhilePlaying = false
-    /// The party's voice sends only while ⌥V is held; nil means off (open microphone).
+    /// The party's voice sends only while the talk key is held; nil means off (open microphone).
     var pushToTalk: Bool?
+    /// The key that talks (Party › Talk key); nil is ⌥V (TalkKey.standard).
+    var talkKey: KeyChord?
     /// A session friends can join while a game runs; nil means on.
     var friendsJoin: Bool?
     /// Play from a browser (BrowserPlay.swift): nil is on; browserPlayAlways keeps its server up.
     var browserPlay: Bool?
+    /// The phone server (Settings › Advanced › Phone controller): nil is on.
+    var phoneServer: Bool?
     var browserPlayAlways: Bool?
     /// Another AnyTogether server than AnyTogether's own; nil is AnyTogether's.
     var togetherServer: String?
@@ -102,6 +111,9 @@ struct Preferences: Codable, Equatable {
     var engineCheckout: String?
     /// The commit each checkout was last built at by Update from Git.
     var engineGitBuilt: [String: String]?
+    /// Settings › Engine › Update from Git Before Playing: the checkout's remote asked before each
+    /// game starts; nil is off, as on Windows and Linux.
+    var engineGitBeforePlay: Bool?
     /// Settings → Game Library: new games unlocked in the background (PrepareQueue); nil means on.
     var prepareNewGames: Bool?
     /// The window full screen at start (WindowStart): nil the first time, then as it was left.
@@ -340,6 +352,7 @@ final class AppModel: ObservableObject {
                 if rowEditor.editing != nil { rowEditor.stop() }
                 if typingRow != nil { typingRow = nil }
                 if shortcutCapture != nil { endShortcutCapture() }
+                if capturingTalkKey { endTalkKeyCapture() }
             }
             // The controller test takes the pads' buttons: only PS acts while it is open.
             Input.shared.testing = overlay == .controllerTest
@@ -402,6 +415,8 @@ final class AppModel: ObservableObject {
     @Published var menuIndex = 0
     /// The shortcut waiting for a key or a chord in Settings → Shortcuts.
     @Published var shortcutCapture: ShortcutCapture?
+    /// Party › Talk key waits for the key to talk with.
+    @Published var capturingTalkKey = false
     /// The quick menu went up after the launcher pressed Options in the game.
     @Published var pausedGame = false
     /// The pad action waiting for a key in the controls panel.
@@ -714,7 +729,7 @@ final class AppModel: ObservableObject {
             musicSink = objectWillChange.debounce(for: .milliseconds(120), scheduler: RunLoop.main).sink { [weak self] _ in
                 MainActor.assumeIsolated { self?.updateMusic() }
             }
-            startRemote()
+            if phoneServerOn { startRemote() }
             // Once soon after start, then every six hours while the launcher stays open.
             Task { @MainActor in
                 try? await Task.sleep(for: .seconds(4))
@@ -776,10 +791,12 @@ final class AppModel: ObservableObject {
         if persists { DispatchQueue.main.async { [weak self] in self?.stepPrepare() } }
         power.profiles = preferences.powerProfiles ?? PowerProfiles()
         Motion.reduced = preferences.reducedMotion || power.adjustment.dimEffects
-        Sounds.shared.enabled = preferences.sounds
-        Sounds.shared.volume = Float(preferences.soundVolume ?? 100) / 100
+        // Every sound and song the launcher plays: the launcher's volume over each one's own.
+        let master = Float(launcherVolume) / 100
+        Sounds.shared.enabled = preferences.sounds && launcherVolume > 0
+        Sounds.shared.volume = master * Float(preferences.soundVolume ?? 100) / 100
         Feel.shared.vibration = preferences.controllerVibration ?? true
-        ThemeMusic.shared.volume = Float(musicVolume) / 100
+        ThemeMusic.shared.volume = master * Float(musicVolume) / 100
         Input.shared.circleConfirms = preferences.confirmCircle == true
         if persists, Input.shared.shortcuts != shortcutMap { Input.shared.apply(shortcutMap) }
         Input.shared.deadzone = preferences.stickDeadzone ?? 0
@@ -794,6 +811,9 @@ final class AppModel: ObservableObject {
     static let defaultMusicVolume = 50
 
     var musicVolume: Int { preferences.musicVolume ?? AppModel.defaultMusicVolume }
+
+    /// The launcher's own volume, over its sounds and its music (Settings › Behaviour).
+    var launcherVolume: Int { min(100, max(0, preferences.launcherVolume ?? 100)) }
 
     // MARK: Updates
 
@@ -995,8 +1015,9 @@ final class AppModel: ObservableObject {
 
     /// The selected game's song while the launcher is in front and idle, silence otherwise.
     private func updateMusic() {
-        let quiet = !preferences.onboarded || !active || running != nil || starting != nil || musicVolume == 0
-        let menuMusic = activeDesign.flatMap { themes.file($0.music, of: $0) }
+        let quiet = !preferences.onboarded || !active || running != nil || starting != nil || musicVolume == 0 || launcherVolume == 0
+        let ownMusic = preferences.menuMusicFile.map { URL(fileURLWithPath: $0) }.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil }
+        let menuMusic = activeDesign.flatMap { themes.file($0.music, of: $0) } ?? ownMusic
         ThemeMusic.shared.play(quiet ? nil : selectedGame, fallback: quiet ? nil : menuMusic)
     }
 
@@ -1800,7 +1821,12 @@ final class AppModel: ObservableObject {
     func primaryAction(_ game: Game) {
         if familyPrimaryAction(game) { return }
         switch state(of: game) {
-        case .installed(let outdated): outdated ? open(.updateChoice) : play(game)
+        case .installed(let outdated):
+            let go: () -> Void = { [weak self] in
+                if outdated { self?.open(.updateChoice) } else { self?.play(game) }
+            }
+            // Settings › Engine › Update from Git Before Playing: the checkout's remote first.
+            updatesBeforePlay ? playAfterGitCheck(game, play: go) : go()
         case .locked, .failed: unlock(game)
         case .installing where isPreparing(game): promotePreparation(game)
         case .installing, .queued: cancelUnlock(game)
@@ -1811,15 +1837,16 @@ final class AppModel: ObservableObject {
     }
 
     /// Plays the game, its saves brought in step first where save sync is on; `trace` turns
-    /// detailed logging on for this start only.
-    func play(_ game: Game, trace: Bool = false) {
+    /// detailed logging on for this start only, and `once` adds to the engine's environment for
+    /// this start only (the crash report's PlayGo answer).
+    func play(_ game: Game, trace: Bool = false, once: [String: String] = [:]) {
         guard root(of: game) != nil, starting == nil, running == nil, syncing == nil, fontWait == nil else { return }
         // The profile's own saves and trophies in the game folder before anything reads them.
         activateProfileSaves(game)
-        familyGate(game) { self.syncSaves(game) { self.ensureFonts(game) { self.start(game, trace: trace) } } }
+        familyGate(game) { self.syncSaves(game) { self.ensureFonts(game) { self.start(game, trace: trace, once: once) } } }
     }
 
-    private func start(_ game: Game, trace: Bool = false) {
+    private func start(_ game: Game, trace: Bool = false, once: [String: String] = [:]) {
         guard let root = root(of: game), starting == nil, running == nil else { return }
         let bundle = Installer.bundle(for: game, root: root)
         let configuration = NSWorkspace.OpenConfiguration()
@@ -1846,7 +1873,8 @@ final class AppModel: ObservableObject {
             .merging(togetherUser == nil ? [:] : ["ANYPS5_TOGETHER_SESSION": TogetherGameSession.bridgeFile.path]) { own, _ in own }
             // The battery and heat profiles' frame cap, and the file they change it through live.
             .merging(powerEnvironment()) { _, power in power }
-        markStart(of: game, traced: trace || settings.trace == true)
+            .merging(once) { _, once in once }
+        markStart(of: game, traced: trace || settings.trace == true, once: once)
         Sounds.shared.play(.select)
         preferences.lastPlayed[game.id] = Date()
         withAnimation(Motion.overlay) { starting = game }
@@ -2246,6 +2274,38 @@ final class AppModel: ObservableObject {
     }
 
     // MARK: Phone
+
+    var phoneServerOn: Bool { preferences.phoneServer != false }
+
+    /// Settings › Advanced › Phone controller: the phone server on or off, as on Windows and Linux.
+    /// Off, no phone finds this Mac and the browser pad has nothing to serve through.
+    func setPhoneServer(_ on: Bool) {
+        preferences.phoneServer = on ? nil : false
+        guard persists else { return }
+        if on {
+            if remote == nil { startRemote() }
+        } else {
+            stopRemote()
+        }
+    }
+
+    private func stopRemote() {
+        librarySink = nil
+        cable?.stop()
+        cable = nil
+        androidCable?.stop()
+        androidCable = nil
+        remote?.stop()
+        remote = nil
+        pairing = nil
+        withAnimation(Motion.overlay) {
+            phone = nil
+            phoneConnecting = nil
+            connectedPhones = []
+            phonePlayers = [:]
+        }
+        updateBrowserPlay()
+    }
 
     /// Starts the phone server; a launcher that cannot open it still works without phones.
     private func startRemote() {
@@ -2714,7 +2774,7 @@ final class AppModel: ObservableObject {
 
     /// The log line the diagnosis reads from, so only this start's output counts. A log grown
     /// too big is set aside first; a detailed one is kept under its cap while the game runs.
-    private func markStart(of game: Game, traced: Bool) {
+    private func markStart(of game: Game, traced: Bool, once: [String: String] = [:]) {
         diagnoses[game.id] = nil
         starts[game.id] = Date()
         lastSessions[game.id] = LastSession(traced: traced)
@@ -2734,7 +2794,8 @@ final class AppModel: ObservableObject {
         }
         // The controllers connected at the start, in the log a crash report reads.
         let pads = Controllers.shared.reportLines.map { "[anyps5-launcher] controllers: \($0)\n" }.joined()
-        let line = "\n\(Diagnosis.startMarker) \(ISO8601DateFormatter().string(from: Date())) \(game.titleID)\(traced ? " trace" : "")\n" + pads
+        let onlyThisStart = once.sorted { $0.key < $1.key }.map { "[anyps5-launcher] this start only: \($0.key)=\($0.value)\n" }.joined()
+        let line = "\n\(Diagnosis.startMarker) \(ISO8601DateFormatter().string(from: Date())) \(game.titleID)\(traced ? " trace" : "")\n" + pads + onlyThisStart
         if let handle = try? FileHandle(forWritingTo: file) {
             _ = try? handle.seekToEnd()
             try? handle.write(contentsOf: Data(line.utf8))
