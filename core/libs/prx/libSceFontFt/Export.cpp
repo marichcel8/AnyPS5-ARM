@@ -69,7 +69,7 @@ int APS5_VABI sceFontFtSupportPfr(FontLibrary library) {
 }
 
 int APS5_VABI sceFontFtSupportSystemFonts(FontLibrary library) {
-    return FontFt::SupportFormats(library, {"truetype", "cff"});
+    return FontFt::SupportFormats(library, {"cff", "truetype"});
 }
 
 int APS5_VABI sceFontFtSupportTrueType(FontLibrary library) {

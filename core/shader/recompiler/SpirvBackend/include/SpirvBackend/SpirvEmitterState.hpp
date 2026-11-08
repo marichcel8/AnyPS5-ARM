@@ -227,6 +227,7 @@ struct SpirvEmitterState {
     // Private variables, by type, that subgroup results are stored in (EmitConvergentResult).
     std::unordered_map<std::uint32_t, std::uint32_t> subgroupResultVariables;
     std::uint32_t gcnBufferFormatFunction = 0;
+    std::uint32_t gdsU64Variable = 0;
     std::uint32_t gdsVariable = 0;
     std::uint32_t gdsLength = 0;
     std::uint32_t pushConstantVariable = 0;

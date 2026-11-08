@@ -997,9 +997,6 @@ RdnaInstruction DecodeRdnaDs(std::uint32_t programCounter, std::span<const std::
     if ((info.opcode == RdnaOpcode::DsWrxchg2RtnB32 || info.opcode == RdnaOpcode::DsWrxchg2st64RtnB32 || info.opcode == RdnaOpcode::DsWrxchg2RtnB64 || info.opcode == RdnaOpcode::DsWrxchg2st64RtnB64) && vdst + info.dataDwords > 256u) {
         throw std::runtime_error("DS write exchange destination register range overflow");
     }
-    if (info.opcode == RdnaOpcode::DsWriteAddtidB32 && data1 != 0u) {
-        throw std::runtime_error("DS write addtid data1 operand is not supported");
-    }
     if (info.opcode == RdnaOpcode::DsCondxchg32RtnB64) {
         if (data0 + 2u > 256u) {
             throw std::runtime_error("DS conditional exchange source register range overflow");
@@ -1007,9 +1004,6 @@ RdnaInstruction DecodeRdnaDs(std::uint32_t programCounter, std::span<const std::
         if (vdst + 2u > 256u) {
             throw std::runtime_error("DS conditional exchange destination register range overflow");
         }
-    }
-    if (info.opcode == RdnaOpcode::DsReadAddtidB32 && (data0 != 0u || data1 != 0u)) {
-        throw std::runtime_error("DS read addtid data operands are not supported");
     }
 
     RdnaInstruction instruction{};
